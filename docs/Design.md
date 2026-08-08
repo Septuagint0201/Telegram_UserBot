@@ -30,39 +30,49 @@
 核心结构：
 
 ```text
-                       Telegram
-                           |
-             +-------------+-------------+
-             |                           |
-      真人用户账号                    Control Bot
-      Telegram User                  Telegram Bot
-             |                           |
-          MTProto                     Bot API
-             |                           |
-         Telethon                       |
-             |                           |
-             +-------------+-------------+
-                           |
-                    Backend Core
-                           |
-        +------------------+------------------+
-        |                  |                  |
- Conversation Engine   Memory Agent    Proactive Agent
-        |              GPT 5.4 nano    DeepSeek v4 Flash
-        |                  |                  |
-        |             Memory System      Time/Event System
-        |                  |                  |
-        +------------------+------------------+
-                           |
-                    Context Builder
-                           |
-                    Main AI Agent
-                    GPT 5.6 Luna
-                           |
-                    Response Engine
-                           |
-                     Telegram Send
+                                  Telegram
+                                      |
+                    +-----------------+-----------------+
+                    |                                   |
+          Telegram 真人用户账号              Control Bot / Web App
+                    |                                   |
+                 MTProto                         Bot API / HTTPS
+                    |                                   |
+                    v                                   v
+          app（单实例）                         control（单实例）
+     Telethon Session Owner              控制、配置、状态监控
+     Conversation Engine                         |
+     Context / Main AI                           |
+     Response Engine                             |
+                    |                            |
+                    +-------------+--------------+
+                                  |
+                         PostgreSQL + Redis
+                                  |
+                                  v
+                         worker（可扩展）
+                 Memory Agent / Proactive Agent
+                     Embedding / Scheduler
 ```
+
+运行时采用模块化单体，而不是从一开始把每个逻辑 Agent 拆成独立微服务。
+
+初期主要业务进程为：
+
+```text
+app
+control
+worker
+```
+
+其中：
+
+- `app` 是 Telethon Session 的唯一持有者，初期固定单实例。
+- `control` 独立运行 Control Bot、Telegram Web App 配置 API 和服务状态监控。
+- `worker` 执行记忆、摘要、embedding 和主动性任务，并承载带单例租约的 Scheduler。
+- PostgreSQL 保存持久化业务状态，Redis 提供任务队列、缓存、租约和短期服务心跳。
+- V1 只运行一个 Telegram 真人账号，但数据库身份模型和模块接口不写死为单账号。
+- 未来多账号采用每个账号一个独立 `app` 实例和独立 Session，共享 `control`、`worker`、PostgreSQL 和 Redis。
 
 整个系统分为几个彼此独立但协同工作的部分：
 
@@ -79,6 +89,8 @@
 11. Vector Memory
 12. Cache
 13. Human Override 系统
+14. 模型配置与密钥管理
+15. 服务状态监控
 
 ---
 
@@ -252,6 +264,10 @@ assistant / source=human:
 
 这保证真人和 AI 共同塑造同一个长期人格。
 
+`outgoing=true` 本身不能证明消息来自真人，因为 `app` 通过 Telethon 发送的 AI 消息同样属于 outgoing。系统发送前必须创建 outbound intent，发送成功后绑定 Telegram message ID。监听器通过该记录识别 `ai` 或 `proactive_ai`；无法匹配任何系统发送记录的 outgoing 消息才归类为 `human`。
+
+消息表使用 Telegram 账号、会话和 message ID 组成业务唯一键。同一个 update 被重复接收时只允许对账和补全状态，不得重复触发回复或记忆处理。
+
 ---
 
 # 6. 消息来源模型
@@ -327,11 +343,13 @@ Conversation Engine 是实时消息系统的中心。
 - 判断当前工作模式
 - 保存原始消息
 - 获取最近聊天历史
-- 请求 Memory System
+- 获取最近一次已提交的 Memory System 状态
+- 刷新异步记忆处理任务
 - 构造主模型 Context
 - 调用 Main AI
+- 创建 outbound intent
 - 将结果发送到 Telegram
-- 记录最终回复
+- 对账并记录最终回复
 
 核心流程：
 
@@ -340,18 +358,25 @@ Telegram Message
         |
  Conversation Engine
         |
-    Save Message
+Idempotent Save Raw Message
+        |
+Refresh Pending Memory Job ---------> Async Memory Pipeline
         |
   Check Chat Mode
         |
-  Build Context
+Build Context from Committed Memory
+and Recent Raw Messages
         |
   Main AI Agent
         |
-   Send Message
+Create Outbound Intent
         |
-    Save Reply
+Telegram Send
+        |
+Reconcile Message ID and Source
 ```
+
+Memory Agent 不位于 Main AI 的同步回复路径中。它暂时尚未提取的新内容仍然通过 recent raw messages 进入 Context，因此异步记忆处理不会使 Main AI 丢失当前对话。
 
 ---
 
@@ -429,9 +454,9 @@ AI Draft：
 @xxx_control_bot
 ```
 
-它不承担聊天。
+它不承担联系人聊天，只承担系统控制、状态监控和管理入口分发。
 
-它只承担系统控制。
+Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session。即使 `app` 进程不可用，只要 `control`、Telegram Bot API 和基础设施仍然可用，管理员仍可查看状态并修改全局控制状态。
 
 例如命令：
 
@@ -456,6 +481,14 @@ AI Draft：
 ```
 
 查看当前模式。
+
+```text
+/server_status
+```
+
+查看 `app`、`control`、`worker`、Scheduler、PostgreSQL、Redis 和模型端点的状态摘要。
+
+状态信息来自各服务写入 Redis TTL 的短期心跳和 PostgreSQL 中的重要状态转换，并结合 `control` 对 PostgreSQL、Redis 和配置中模型端点的直接探测。依赖不可达时返回 `down` 或 `unknown`，而不是依赖 Docker 容器查询。Control Bot 不挂载 Docker Socket，也不直接获得宿主机容器管理权限。
 
 ```text
 /memory
@@ -499,6 +532,12 @@ AI Draft：
 
 启用。
 
+```text
+/models
+```
+
+打开 Telegram Web App，管理各 Agent 使用的模型端点和生成参数。API key 不通过 Telegram 消息发送。
+
 Control Bot 必须设置管理员白名单。
 
 例如：
@@ -508,6 +547,58 @@ allowed_admin_ids
 ```
 
 只有指定 Telegram User ID 可以控制服务器。
+
+## Telegram Web App 管理界面
+
+Control Bot 通过 Web App 按钮打开部署在本服务器上的管理页面。
+
+Web App 只提供受限的控制面功能，初期主要用于管理：
+
+```text
+模型逻辑角色
+Provider / API 协议
+API Base URL
+模型名称
+API key
+temperature
+最大输出 token
+请求超时
+启用状态
+Provider 特有参数
+```
+
+模型逻辑角色至少包括：
+
+```text
+main_ai
+memory_agent
+proactive_agent
+embedding
+```
+
+Web App 浏览器直接通过 HTTPS 连接服务器上的 `control` 配置 API。该入口是专用 Telegram Web App API，不扩展为通用业务管理 API，也不直接访问 `app`、worker、PostgreSQL 或 Redis。
+
+每次 Web App 会话必须：
+
+- 校验 Telegram Web App `initData` 签名。
+- 校验认证数据的新鲜度，拒绝过期重放。
+- 再次检查 Telegram User ID 是否位于管理员白名单。
+- 使用短生命周期的服务端管理会话。
+- 对配置写入执行审计和速率限制。
+
+API key 采用只写不读语义：
+
+- 管理员在 Web App 中输入一次后，通过 HTTPS 发送给 `control`。
+- 服务端使用独立主密钥进行应用层加密后保存密文。
+- 主密钥通过 Docker Secret 或仅宿主机可读的密钥文件挂载，不与数据库密文存放在一起。
+- 后续页面只显示“已配置”和必要的非敏感标识，不返回、回显或记录完整 key。
+- 更换 key 必须重新输入；日志、审计记录、异常和 Telegram 消息中不得出现 key。
+
+V1 将 `control`、`app` 和 `worker` 视为受信任计算边界，并向这三个服务只读挂载同一主密钥。只有 `control` 可以接受和写入模型配置；`app` 与 `worker` 只能按 credential reference 读取密文，并在发起模型请求时于进程内存中短暂解密。`https-gateway`、PostgreSQL 和 Redis 不挂载主密钥，也不能获得明文 API key。
+
+模型端点默认只允许 HTTPS。需要访问 Docker 内部或本机私有模型服务时，HTTP 地址必须先由服务器侧配置显式加入允许列表；Web App 本身不能任意放开内网、链路本地地址或云元数据地址，避免形成 SSRF 通道。
+
+模型配置采用草稿、连通性验证、激活三步流程。新配置验证失败时继续保留旧的活动配置。配置激活后只影响新创建的模型请求；已在运行的请求继续使用启动时记录的配置版本。
 
 ---
 
@@ -602,9 +693,28 @@ Memory Agent 是高频运行的小模型。
 
 它不负责直接聊天。
 
+它在异步 worker 中运行，不阻塞 Main AI 的实时回复。Main AI 使用最近一次成功提交的长期记忆，同时直接读取当前会话的最新原始消息。
+
 核心问题只有：
 
 > 新发生的内容有什么值得长期保留？
+
+Memory Agent 采用事件驱动与定期补偿结合的触发方式。
+
+以下任一事件都会创建或刷新同一会话的 pending memory job：
+
+```text
+AI 回复成功
+OR 真人手动回复
+OR HUMAN 模式收到新消息
+OR 主动对话产生新消息
+OR 累计消息/token 达到硬阈值
+OR 补偿扫描发现遗漏范围
+```
+
+正常任务在会话连续安静 30～60 秒后执行。安静窗口内出现新消息时，只扩大待处理 sequence 范围并重新计时，不创建重复任务。硬阈值和补偿扫描可以绕过安静窗口。
+
+Proactive Agent 不负责常规记忆调度。它只消费已经提交的 event、intention 和关系状态，避免与 Memory Agent 形成循环依赖。
 
 ---
 
@@ -613,11 +723,12 @@ Memory Agent 是高频运行的小模型。
 典型输入：
 
 ```text
-当前消息
-最近数轮上下文
+尚未处理的 conversation episode
+该 episode 前后的必要上下文
 当前联系人
 已有相关记忆
 当前长期 profile
+来源 message IDs 和 sequence 范围
 ```
 
 ---
@@ -633,9 +744,16 @@ Memory Agent 是高频运行的小模型。
   "memory_action": "create",
   "memory_type": "personal_fact",
   "importance": 0.82,
+  "confidence": 0.88,
   "content": "Bob 下个月准备搬到东京",
   "entities": ["Bob", "东京"],
   "time_relevance": "next_month",
+  "evidence": [
+    {
+      "message_id": 1821,
+      "quote": "下个月准备搬到东京"
+    }
+  ],
   "embed": true
 }
 ```
@@ -647,6 +765,10 @@ Memory Agent 是高频运行的小模型。
   "memory_action": "none"
 }
 ```
+
+Memory Agent 的输出首先保存为 proposal，不能直接修改正式记忆。应用层负责验证 JSON Schema、证据消息、联系人范围、时间范围、引用关系和幂等键，然后在数据库事务中执行 create、update、supersede、invalidate 或 merge。
+
+验证层不重新总结或改写模型语义。低置信度但格式合法的结果可以保留为 candidate，不进入 Main AI 的正式长期记忆上下文。
 
 ---
 
@@ -887,23 +1009,31 @@ Vector Memory 负责：
 
 # 21. Memory 生命周期
 
-每条消息进入以后：
+原始消息进入以后，实时聊天和记忆处理分成两条流水线。记忆流水线按合并后的 conversation episode 工作：
 
 ```text
-Raw Message
-   |
+Raw Messages
+     |
+Pending Memory Job
+     |
 Memory Agent
-   |
-+-- 无价值 -> 只保留原始历史
-|
-+-- 有价值
-       |
-       +-- Structured Memory
-       |
-       +-- Embedding
-       |
-       +-- Time Relevant Memory
+     |
+Memory Proposal
+     |
+Schema / Evidence / Scope Validation
+     |
++----+-------------------------+
+|                              |
+Reject or Candidate         Commit in Transaction
+                               |
+                 +-------------+-------------+
+                 |             |             |
+          Structured Memory  Embedding  Event/Intention
 ```
+
+Episode extraction 负责事实、偏好、事件、承诺和风格候选；rolling summary 在消息数量或 token 达到阈值时运行；daily/weekly consolidation 定期合并重复记忆、处理冲突和更新淡化状态。
+
+每个任务都记录覆盖的 message sequence 范围和处理版本。相同会话、相同范围、相同 prompt 版本重复执行时必须幂等。定期补偿任务通过 memory watermark 查找未处理区间。
 
 ---
 
@@ -1128,10 +1258,14 @@ Promise:
 每 1 小时
 ```
 
-一次 Proactive Tick：
+一次 Proactive Tick 先由确定性 SQL 和规则层筛选候选。只有存在未完成承诺、临近事件、关系时间达到阈值或其他明确候选原因的联系人，才调用 Proactive Agent：
 
 ```text
 Scheduler
+    |
+SQL / Rules Candidate Filter
+    |
+No Candidate -> Stop
     |
 Time Context Builder
     |
@@ -1139,6 +1273,8 @@ DeepSeek v4 Flash
     |
 Decision
 ```
+
+不能对所有联系人在每个 Tick 中无条件调用模型。候选记录使用稳定幂等键，例如 `contact + reason + event + time_window`，避免 Scheduler 重复触发或 worker 重试时重复生成主动消息。
 
 输出：
 
@@ -1289,7 +1425,7 @@ style profile
 
 # 32. 模型分工
 
-最终模型配置：
+以下模型是当前默认配置。具体端点、模型名称和生成参数由运行时模型配置决定，不作为业务代码常量。
 
 ## Main AI
 
@@ -1347,6 +1483,57 @@ DeepSeek v4 Flash
 
 周期调用。
 
+## 运行时模型配置
+
+每个逻辑角色绑定一个活动模型配置版本，例如：
+
+```json
+{
+  "role": "main_ai",
+  "provider": "openai_compatible",
+  "base_url": "https://api.example.com/v1",
+  "model": "configured-model-name",
+  "credential_status": "configured",
+  "temperature": 0.8,
+  "max_output_tokens": 1200,
+  "timeout_seconds": 90,
+  "enabled": true,
+  "provider_options": {}
+}
+```
+
+`max token` 在内部统一表示 `max_output_tokens`，即单次生成允许的最大输出 token。输入上下文预算和模型上下文窗口由 Context Builder 与模型能力信息分别管理，不能与输出上限混为一项。
+
+不同模型和 Provider 支持的参数不同，因此模型适配器必须声明能力：
+
+```text
+supports_temperature
+supports_structured_output
+supports_streaming
+supports_reasoning_effort
+max_context_tokens
+max_output_tokens_limit
+```
+
+当模型不支持 `temperature` 或其他参数时，配置界面应禁用该字段或保存为 `null`，请求适配器不得强行发送不受支持的参数。
+
+非密钥配置与凭据分开保存。业务代码只能通过 credential reference 获取解密后的短生命周期内存值，不能查询或输出完整 API key。
+
+每次模型调用需要记录：
+
+```text
+logical role
+provider
+endpoint id
+model name
+config version
+prompt version
+timeout
+实际使用的非敏感生成参数
+```
+
+审计记录不得包含 API key。
+
 ---
 
 # 33. Embedding 模型
@@ -1382,16 +1569,28 @@ users
 contacts
 conversations
 messages
+outbound_messages
 conversation_modes
+model_runs
+background_jobs
 memories
+memory_jobs
+memory_proposals
+memory_evidence
 memory_relations
 summaries
+summary_watermarks
 events
 intentions
 relationship_states
 agent_states
 proactive_logs
 control_logs
+model_endpoints
+model_profiles
+model_credentials
+model_config_versions
+service_status_events
 ```
 
 ---
@@ -1402,17 +1601,52 @@ control_logs
 
 ```text
 id
+account_id
 telegram_message_id
 chat_id
 sender_id
+direction
 role
 source
 content
 reply_to
 created_at
 edited_at
+deleted_at
 metadata
 ```
+
+消息业务唯一键至少包含：
+
+```text
+account_id
+chat_id
+telegram_message_id
+```
+
+重复 Telegram update 必须命中同一记录并进行幂等更新。
+
+## outbound_messages
+
+系统发送前创建 outbound intent，核心字段包括：
+
+```text
+id
+account_id
+conversation_id
+source
+status
+content_hash
+mode_version
+telegram_message_id
+attempt_count
+created_at
+sent_at
+reconciled_at
+last_error
+```
+
+`source` 在发送前已确定为 `ai` 或 `proactive_ai`。发送成功后绑定 Telegram message ID，监听器使用它与 outgoing update 对账。
 
 ---
 
@@ -1430,8 +1664,14 @@ created_at
 updated_at
 last_accessed_at
 superseded_by
+valid_from
+valid_to
+extractor_model
+prompt_version
 metadata
 ```
+
+正式记忆必须通过 `memory_evidence` 关联一个或多个来源消息。没有证据链的模型输出不能直接进入正式长期记忆。
 
 ---
 
@@ -1653,24 +1893,37 @@ USER
 
 # 46. 调度
 
-Ubuntu Server 上建议：
+主要部署基线为单台 Ubuntu Server 上的：
 
 ```text
 Docker Compose
 ```
 
-服务可以拆分：
+初期运行拓扑：
 
 ```text
-telegram-userbot
-control-bot
-api-backend
-memory-worker
-proactive-worker
-scheduler
+https-gateway
+app
+control
+worker
 postgres
 redis
+migrate（一次性任务）
 ```
+
+其中：
+
+- `https-gateway` 只把 Telegram Web App 页面和专用配置 API 通过 HTTPS 暴露给外部。
+- `app` 固定一个副本，独占挂载的 Telethon `.session` 文件。
+- `control` 独立运行 Control Bot、Web App 和状态查询；不挂载 Telethon Session。
+- `worker` 初期使用一个服务承载多个逻辑任务队列，后续可以增加副本。
+- Scheduler 位于 `worker` 中，通过专用 PostgreSQL 连接持有 advisory lock，保证同一调度任务只有一个发布者。
+- `postgres` 和 `redis` 只加入 Compose 内部网络，不映射公网端口。
+- `migrate` 在业务服务启动或升级前执行数据库迁移，成功后退出。
+
+Ubuntu 原生运行只作为开发和故障排查手段，不作为与 Docker Compose 对等维护的一等部署方式。
+
+Telethon `.session` 文件保存在 `app` 专用持久化 volume 中，不写入镜像，不与其他服务共享。Session 备份需要单独加密。
 
 ---
 
@@ -1734,6 +1987,8 @@ AI回复C
 conversation lock
 ```
 
+锁必须具有 owner token 和过期租约，只有持有者可以续租或释放。worker 崩溃后租约可恢复，但锁本身不能代替数据库幂等键和发送前状态检查。
+
 ---
 
 # 49. 消息防抖
@@ -1776,7 +2031,7 @@ AI 正在生成回复。
 outgoing human message
 ```
 
-立即取消该 AI 回复任务。
+系统可以尽力取消该 AI 回复任务，但不能依赖模型请求一定可取消。
 
 否则可能出现：
 
@@ -1790,13 +2045,21 @@ AI 2 秒后：
 
 造成身份割裂。
 
-因此规则：
+因此主要保护规则是会话模式版本门禁：
 
 ```text
-Human outgoing message
-    |
-cancel pending AI response
+AI 开始生成 -> 记录 mode=AUTO, mode_version=N
+        |
+真人 outgoing 或 Control Bot 切换模式
+        |
+mode_version += 1，并尽力取消请求
+        |
+AI 发送前重新读取 mode 和 mode_version
+        |
+不是 AUTO 或版本不等于 N -> 丢弃结果，不发送
 ```
+
+`mode_version` 还需要在全局 pause、维护模式和其他会使旧结果失效的控制操作中递增。发送前检查应在 conversation lock 内完成。
 
 ---
 
@@ -1820,6 +2083,8 @@ cancel pending AI response
 
 这个策略可以做成可配置项。
 
+V1 以 Control Bot 的手动模式切换为主要接管方式，自动 temporary HUMAN 默认关闭。
+
 ---
 
 # 52. 安全
@@ -1832,9 +2097,15 @@ Telethon Session 等价于账号登录权限。
 - 文件权限严格限制
 - Session 加密备份
 - 服务器使用 SSH Key
-- 禁止暴露管理端口
+- 除 Telegram Web App 专用 HTTPS 入口外，禁止暴露管理和健康检查端口
 - Control Bot 设置 User ID 白名单
 - 数据库禁止公网直连
+- Redis 禁止公网直连
+- Web App 必须校验 Telegram `initData` 签名、时效和管理员身份
+- API key 只能通过 HTTPS Web App 提交，禁止通过 Bot 消息提交
+- API key 必须应用层加密保存，数据库密文与主密钥分离
+- API key 不得出现在日志、异常、审计记录或配置读取响应中
+- 模型端点必须经过协议、地址和 SSRF 安全校验
 
 ---
 
@@ -1882,6 +2153,22 @@ errors
 
 必须可追踪。
 
+服务进程需要定期发布最小化状态信息，例如：
+
+```text
+service name
+instance id
+started_at
+last_heartbeat_at
+readiness
+last_successful_operation_at
+queue lag
+scheduler lease status
+last model endpoint check
+```
+
+`/server_status` 只返回运维所需的摘要，不返回环境变量、路径、凭据、Prompt 正文或联系人隐私数据。
+
 ---
 
 # 55. Proactive Log
@@ -1911,13 +2198,22 @@ errors
 不发送
 ```
 
-不要发送异常内容。
+不要发送异常内容，并将模型运行记录为失败。
+
+如果进程在创建 outbound intent 后、发送确认前崩溃：
+
+```text
+保留 pending / unknown intent
+启动后查询或等待 Telegram update 对账
+无法确认前不盲目重复发送
+```
 
 如果 Memory Agent 失败：
 
 ```text
 原始消息仍然保存
-稍后可重新整理
+任务按策略重试
+补偿扫描稍后重新整理
 ```
 
 如果 Proactive Agent 失败：
@@ -1954,7 +2250,7 @@ human mode?
 blocked contact?
 ```
 
-满足后才进入 Main AI。
+满足后才进入 Main AI。Main AI 生成完成后，还需要在 conversation lock 内再次检查这些规则、幂等键和 `mode_version`，通过后才能创建 outbound intent。
 
 ---
 
@@ -1967,37 +2263,51 @@ Telegram Incoming
       |
 Conversation Engine
       |
-Save Raw Message
+Idempotent Save Raw Message
       |
-Memory Agent
+Refresh Pending Memory Job --------> Async Memory Pipeline
+      |
+Debounce / Check Mode
       |
 Context Builder
+Committed Memory + Recent Raw Messages
       |
 Main AI
       |
+Check mode_version in Conversation Lock
+      |
+Create Outbound Intent source=ai
+      |
 Telegram Send
       |
-Save assistant/source=ai
+Reconcile Telegram Message ID
 ```
 
 真人回复：
 
 ```text
-Telegram Outgoing Human
+Telegram Outgoing Update
       |
 Telethon Listener
       |
-Save assistant/source=human
+Match Existing Outbound Intent?
       |
-Memory Agent
+Yes -> Reconcile AI Source and Stop Duplicate Processing
+No  -> Classify source=human
       |
-Update Long-term Memory
+Idempotent Save Message
+      |
+Increment mode_version / Best-effort Cancel
+      |
+Refresh Pending Memory Job --------> Async Memory Pipeline
 ```
 
 主动消息：
 
 ```text
 Scheduler
+   |
+SQL / Rules Candidate Filter
    |
 Time Context Builder
    |
@@ -2009,9 +2319,15 @@ Rules
    |
 Main AI
    |
+Final Rules + mode_version in Conversation Lock
+   |
+Create Outbound Intent source=proactive_ai
+   |
 Telegram Send
    |
-Save assistant/source=proactive_ai
+Reconcile Telegram Message ID
+   |
+Refresh Pending Memory Job --------> Async Memory Pipeline
 ```
 
 ---

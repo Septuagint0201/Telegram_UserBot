@@ -1,0 +1,92 @@
+# Security and Dual-Use Disclosure
+
+## Project and review
+
+- Project: Telegram Personal AI Digital Twin
+- Public source target: `https://gitlab.com/Septuagintks/telegram_userbot`
+- Maintainer: GitLab user `Septuagintks`
+- Review date: 2026-08-08 (Asia/Shanghai)
+- Current artifact status: architecture and design documentation only
+
+The repository currently contains no runnable implementation, container image, package, binary, deployment, or release artifact. The capabilities below describe the system being designed and must not be interpreted as completed or independently audited safeguards.
+
+## Security-sensitive and dual-use capabilities
+
+The planned system will:
+
+- use a Telethon Session to control an authenticated Telegram user account;
+- observe incoming messages and outgoing messages sent by the account owner;
+- generate automatic and proactive messages under the same Telegram identity;
+- retain raw conversation history and derived long-term memories;
+- allow an administrator to change conversation modes and model configuration through a Control Bot and Telegram Web App;
+- store model endpoint credentials and use them for outbound model API requests; and
+- maintain persistent account, database, cache, queue, and model configuration state.
+
+These capabilities can support a legitimate personal digital twin, but misuse or credential compromise could enable impersonation, privacy intrusion, unwanted messaging, or unauthorized account control.
+
+## Intended use and authorization
+
+The intended use is operation by the owner of the Telegram account for the owner's personal communications. Deployment and operation require authorization from the account owner and must comply with Telegram rules, model-provider policies, applicable privacy requirements, and the expectations of affected contacts.
+
+The project is not intended for:
+
+- stealing, importing, or using another person's Telegram Session or credentials;
+- covert monitoring or collection of another person's private communications;
+- spam, phishing, bulk unsolicited messaging, or automated contact harvesting;
+- bypassing Telegram controls, account restrictions, or provider safeguards; or
+- accessing systems, accounts, or data without authorization.
+
+## Planned data and network behavior
+
+The design currently specifies:
+
+- PostgreSQL storage for raw messages, memories, configuration versions, decisions, and audit state;
+- Redis for queues, cache, short-lived locks, notifications, and service heartbeat state;
+- a persistent Telethon Session file mounted only by the Telegram `app` process;
+- outbound connections to Telegram and administrator-configured model endpoints;
+- a public HTTPS route limited to the Telegram Web App and its dedicated configuration API; and
+- no general public database, Redis, health, or management endpoint.
+
+Raw Telegram messages are planned to be retained as the system's source of truth. The detailed retention, export, and deletion policy has not yet been finalized. The current documentation itself performs no collection, network request, telemetry, persistence, or code execution.
+
+## Planned safeguards and controls
+
+The architecture requires:
+
+- a single owner process for each Telethon Session;
+- administrator allowlisting and Telegram Web App authentication;
+- manual AUTO, HUMAN, COPILOT, PAUSED, and maintenance controls;
+- version checks that prevent stale AI results from being sent after takeover or mode changes;
+- outbound intent records, idempotency, and Telegram message reconciliation;
+- proactive-message budgets, quiet hours, intervals, and final send gates;
+- API key input through HTTPS rather than Telegram messages;
+- application-layer credential encryption with the database ciphertext separated from the master key;
+- API key read responses, logs, errors, and audit records that never reveal the complete key;
+- no Docker Socket access by the Control Bot; and
+- private PostgreSQL and Redis network exposure.
+
+These are design requirements, not claims about an implementation that does not yet exist. Future releases must test and accurately disclose which controls are actually implemented and enabled by default.
+
+## Privileges and persistence
+
+A future deployment will hold credentials capable of controlling a Telegram account and accessing configured model APIs. It will require persistent storage for the Telethon Session and application data, and outbound network access to Telegram and model providers. The design does not require arbitrary host command execution, container-management access, privilege escalation, or public database access.
+
+## Residual risks
+
+Even with the planned controls:
+
+- compromise of the host, Telethon Session, Control Bot token, master key, or model credential may expose sensitive data or account control;
+- an incorrect mode, prompt, memory, or proactive decision may send an inappropriate message;
+- contacts may not distinguish AI-generated and human-generated messages under the shared identity;
+- long-term storage increases privacy and breach impact; and
+- Telegram or model-provider policy changes may make a previously valid deployment non-compliant.
+
+Operators are responsible for securing the host, obtaining appropriate authorization, setting conservative defaults, reviewing logs and proactive behavior, and stopping the service when account or credential compromise is suspected.
+
+## Source identity and integrity
+
+The public source of record is the GitLab repository above. No public package, image, tag, or binary is currently published. Source changes made by the automated coding agent are required to use a signed Git commit. Consumers should verify the commit identity and review the exact source revision they use.
+
+## Reporting security or misuse concerns
+
+Contact the repository maintainer through the GitLab account `Septuagintks`. Do not place Telegram Sessions, API keys, Bot tokens, private messages, or other sensitive evidence in a public issue. Ask the maintainer for a private reporting channel before sharing sensitive details.
