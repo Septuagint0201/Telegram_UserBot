@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 Conversation Orchestrator：基础模式、覆盖门禁、运行阻塞、Control Bot 命令、turn 创建、真人接管、COPILOT 草稿、恢复语义、版本门禁、并发边界、故障恢复与审计契约。
 
-总体设计见 `docs/Design.md`；消息事件、发送和 3 秒 supersede 状态机见 `docs/architecture/02-message-lifecycle.md`；持久化约束见 `docs/architecture/03-data-model.md`。本文不重新定义 Telegram update 幂等、模型 adapter、Memory extraction 或 Proactive 候选算法。
+总体设计见 `docs/Design.md`；消息事件、发送和 3 秒 supersede 状态机见 `docs/architecture/02-message-lifecycle.md`；持久化约束见 `docs/architecture/03-data-model.md`；Memory extraction 与来源信任见 `docs/architecture/05-memory-pipeline.md`。本文不重新定义 Telegram update 幂等、模型 adapter、Memory extraction 或 Proactive 候选算法。
 
 当前状态：V1 架构基线。
 
@@ -1082,7 +1082,7 @@ automation resume floor
 
 ## 23. 后续文档边界
 
-Memory Pipeline 可以读取所有模式下的 committed conversation history，但不得把 Memory任务成功当成回复授权。
+Memory Pipeline 可以读取所有模式下的 committed conversation history，但不得把 Memory 任务成功当成回复授权。其来源信任必须保留 `human`、已编辑/未编辑 `copilot_approved`、`ai` 和 `proactive_ai` 的差异，完整契约见 `docs/architecture/05-memory-pipeline.md`。
 
 Context Contract 定义 AUTO、COPILOT reactive、COPILOT proactive 和 manual pending reply 的具体 context layers/token/image budget；必须消费本文的turn/draft snapshot。
 

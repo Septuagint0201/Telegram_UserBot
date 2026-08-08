@@ -1,4 +1,5 @@
 # Telegram Personal AI Digital Twin
+
 ## Telegram 真人账号 AI 分身系统 — 项目总体设计
 
 ## 1. 项目定位
@@ -511,7 +512,16 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 /memory
 ```
 
-查看该联系人的长期记忆摘要。
+查看该联系人的 active 长期记忆最小摘要。
+
+```text
+/memory_candidates [contact]
+/memory_accept <proposal-short-id>
+/memory_reject <proposal-short-id>
+/memory_status [contact]
+```
+
+`/memory_candidates` 只列待审 candidate；接受/拒绝绑定精确 proposal、evidence 和 target version，使用短期一次性 action token。`/memory_status` 只显示 freshness、watermark lag、队列和稳定错误码，不显示正文。
 
 ```text
 /context
@@ -540,10 +550,10 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 `/draft` 只在 COPILOT 手动生成一次响应式草稿；`/reply_pending` 是恢复 AUTO 后显式补一次未回应片段的唯一 V1 路径；`/cancel` 失效当前 pre-send work 但不改变基础模式。
 
 ```text
-/forget
+/forget <memory-short-id>
 ```
 
-删除特定记忆。
+预览并二次确认后忘记特定 stable memory。forget 清除 memory payload、派生正文和 embedding，但默认不删除 canonical chat；contact purge/account wipe 由独立高影响流程处理。
 
 ```text
 /proactive off
@@ -728,6 +738,8 @@ Saturday 21:30
 
 # 12. Memory Agent
 
+详细的触发、输入清单、proposal、证据、summary、embedding、积压降级和恢复契约见 `docs/architecture/05-memory-pipeline.md`。
+
 记忆模型：
 
 **GPT 5.4 nano**
@@ -749,13 +761,17 @@ Memory Agent 采用事件驱动与定期补偿结合的触发方式。
 ```text
 AI 回复成功
 OR 真人手动回复
-OR HUMAN 模式收到新消息
+OR HUMAN / COPILOT / PAUSED / BLOCKED 下收到可提取的新消息
 OR 主动对话产生新消息
-OR 累计消息/token 达到硬阈值
+OR 累计 revision 达到 20 条
+OR 估算输入达到约 6000 tokens
+OR 最早未处理事件等待达到 10 分钟
 OR 补偿扫描发现遗漏范围
 ```
 
-正常任务在会话连续安静 30～60 秒后执行。安静窗口内出现新消息时，只扩大待处理 sequence 范围并重新计时，不创建重复任务。硬阈值和补偿扫描可以绕过安静窗口。
+这些触发条件全部是 OR。正常任务在会话连续安静 45 秒后执行。安静窗口内出现新 eligible event 时，只扩大 pending range 并重新计时，不创建重复任务；hard deadline 不后移。20 条 revision、约 6000 tokens、10 分钟等待和默认每 5 分钟执行的补偿扫描都可以绕过安静窗口。
+
+AUTO incoming 会立即进入未处理范围，通常等本轮 outgoing 确认后形成完整 episode；若生成失败或持续没有 outgoing，硬阈值和补偿扫描仍保证最终处理。已经 running 的范围不可扩张，新事件进入下一 job generation。
 
 Proactive Agent 不负责常规记忆调度。它只消费已经提交的 event、intention 和关系状态，避免与 Memory Agent 形成循环依赖。
 
@@ -763,41 +779,61 @@ Proactive Agent 不负责常规记忆调度。它只消费已经提交的 event�
 
 # 13. Memory Agent 输入
 
-典型输入：
+每次调用先持久化不可变 input manifest。典型输入：
 
 ```text
 尚未处理的 conversation episode
 该 episode 前后的必要上下文
 当前联系人
-已有相关记忆
+可能重复或冲突的 active memory version
+当前 active summary
 当前长期 profile
-来源 message IDs 和 sequence 范围
+来源 message revision / validated image IDs 和 event 范围
+每项 source、trust、inclusion role 和 content hash
+pipeline、prompt、schema、模型配置和时区版本
 ```
+
+前置上下文只帮助理解，不能自动成为 evidence。消息、caption、memory 和 summary 都是数据而不是 system instruction；Memory Agent 不能借消息内容改变 scope、输出 schema 或请求 secret。
+
+图片只有在媒体校验通过、revision 仍有效、Memory Agent profile 声明视觉能力且 adapter 支持 canonical `detail=auto` 时输入。caption 作为普通文本；纯图片推断默认只能进入 candidate。语音、音频、视频和其他非图片媒体不下载、不送入 Memory Agent。
 
 ---
 
 # 14. Memory Agent 输出
 
-建议输出严格 JSON。
+输出必须是严格、版本化 JSON，一次可以提出零个或多个 proposal。
 
 例如：
 
 ```json
 {
-  "memory_action": "create",
-  "memory_type": "personal_fact",
-  "importance": 0.82,
-  "confidence": 0.88,
-  "content": "Bob 下个月准备搬到东京",
-  "entities": ["Bob", "东京"],
-  "time_relevance": "next_month",
-  "evidence": [
+  "schema_version": 1,
+  "proposals": [
     {
-      "message_id": 1821,
-      "quote": "下个月准备搬到东京"
+      "proposal_ordinal": 0,
+      "operation": "create",
+      "memory_type": "event",
+      "target_memory_ids": [],
+      "semantic_key": "contact.relocation.plan",
+      "payload": {
+        "event": "plans_to_move",
+        "destination": "Tokyo"
+      },
+      "rendered_text": "联系人计划下个月搬到东京",
+      "importance": 0.82,
+      "confidence": 0.88,
+      "evidence": [
+        {
+          "message_revision_id": "revision-id",
+          "evidence_role": "explicit_statement",
+          "quoted_span_start": 0,
+          "quoted_span_end": 9
+        }
+      ],
+      "visual_only": false
     }
   ],
-  "embed": true
+  "no_change_reason": null
 }
 ```
 
@@ -805,13 +841,17 @@ Proactive Agent 不负责常规记忆调度。它只消费已经提交的 event�
 
 ```json
 {
-  "memory_action": "none"
+  "schema_version": 1,
+  "proposals": [],
+  "no_change_reason": "no_long_term_value"
 }
 ```
 
 Memory Agent 的输出首先保存为 proposal，不能直接修改正式记忆。应用层负责验证 JSON Schema、证据消息、联系人范围、时间范围、引用关系和幂等键，然后在数据库事务中执行 create、update、supersede、invalidate 或 merge。
 
-验证层不重新总结或改写模型语义。低置信度但格式合法的结果可以保留为 candidate，不进入 Main AI 的正式长期记忆上下文。
+验证层不重新总结或改写模型语义。默认只有 `confidence >= 0.85`、证据可信、没有未解决冲突且全部确定性校验通过的结果可以自动接受；`0.60–0.85`、image-only 或歧义冲突保留为 candidate；低于 `0.60` 拒绝。不同记忆类型可以提高门槛，不能让模型自报高 confidence 绕过证据规则。candidate 不进入 Main AI 的正式长期记忆上下文，也不生成正式 memory embedding。
+
+正式 memory 最终必须递归追溯到未删除的 canonical message revision。AI 和 proactive outgoing 只能证明系统实际发送过的内容或承诺，不能单独证明联系人事实、偏好或真人风格；已编辑的 `copilot_approved` 文本只能作为低于纯 `human` 的风格证据，未编辑草稿不作为真人风格证据。
 
 ---
 
@@ -996,6 +1036,12 @@ long-term profile
 
 旧聊天不需要每次完整送给主模型。
 
+rolling summary 默认在 watermark 之后新增 50 条 eligible revision 或估算约 12000 tokens 时触发。daily/weekly 使用 contact override、account timezone、部署默认 timezone 的顺序选择有效 IANA 时区，并保存时区和 UTC period boundary 快照；时区之后变化不默认重切历史。
+
+每个 immutable summary version 除覆盖 event range 外，还必须保存 ordered source membership，明确引用 message revision 或 prior summary version。summary 是派生上下文，不是独立事实源；正式 memory 即使引用 summary，也必须通过 source membership 递归到仍有效的 canonical revision。
+
+迟到 event、edit 或 delete 会隔离受影响 current summary，重新生成对应 daily/weekly/rolling version，并让依赖旧 summary 的 embedding 和下游 summary 失效。summary version、source membership、current pointer 和 watermark 必须在同一事务提交。
+
 ---
 
 # 19. Embedding / Vector Memory
@@ -1019,6 +1065,10 @@ Embedding 用于语义联想。
 Vector Memory 主要解决：
 
 > “以前有没有发生过和现在类似的事情？”
+
+V1 为 active memory current version、active summary current version 和允许检索的 current canonical text/caption chunk 建立 embedding；candidate、superseded、invalidated、forgotten、redacted 内容以及原始图片像素不进入 active vector retrieval。
+
+每个 embedding space 固定模型、配置版本、维度、距离度量、归一化和 chunker generation。更换模型时创建独立 shadow space，完成全量构建、delta catch-up、数量/维度/hash 验证和抽样检索后原子切换；旧、新 space 的向量分数不得混合排序。
 
 ---
 
@@ -1074,9 +1124,19 @@ Reject or Candidate         Commit in Transaction
           Structured Memory  Embedding  Event/Intention
 ```
 
-Episode extraction 负责事实、偏好、事件、承诺和风格候选；rolling summary 在消息数量或 token 达到阈值时运行；daily/weekly consolidation 定期合并重复记忆、处理冲突和更新淡化状态。
+Episode extraction 负责事实、偏好、事件、承诺和风格候选；rolling summary 在 50 条 revision 或约 12000 tokens 阈值时运行；daily/weekly consolidation 定期合并重复记忆、处理冲突和更新淡化特征。edit/delete、forget/purge 和 evidence source 变化进入不等待安静窗口的 reconciliation。
 
-每个任务都记录覆盖的 message sequence 范围和处理版本。相同会话、相同范围、相同 prompt 版本重复执行时必须幂等。定期补偿任务通过 memory watermark 查找未处理区间。
+每个任务都记录覆盖的 event 范围、ordered input membership、manifest hash、pipeline/policy/prompt/schema/model config 版本。相同会话、相同输入和版本重复执行时必须幂等。定期补偿任务通过 contiguous memory watermark 查找未处理区间；存在 hole 时不能越过推进。
+
+Memory freshness 分为：
+
+```text
+fresh      watermark 覆盖最新 eligible event，且无 reconciliation
+degraded   积压不超过 20 条且最早未处理不超过 10 分钟
+stale      超过上述任一阈值、出现 dead-letter 或 derived data 被隔离
+```
+
+Main AI 永不等待 Memory Agent。degraded/stale 时 Context Builder 在预算内扩大 watermark 之后的 recent canonical window，记录省略范围和原因，但不得读取 candidate 或 quarantined summary。
 
 ---
 
@@ -1094,7 +1154,7 @@ Bob 喜欢咖啡。
 最近把咖啡戒了。
 ```
 
-Memory Agent 应识别：
+Memory Agent 可以提出：
 
 ```json
 {
@@ -1104,9 +1164,7 @@ Memory Agent 应识别：
 }
 ```
 
-普通 supersede 不要求物理删除旧版本，可以：
-
-可以：
+validator 只有在新证据明确表达时间变化或纠正时才自动 supersede：
 
 ```text
 active=false
@@ -1115,11 +1173,13 @@ superseded_by=id
 
 保持历史变化轨迹。但 Telegram delete、memory forget、contact purge 或 account wipe 触发的内容 redaction 具有更高优先级，旧版本不得借“历史审计”继续保留已要求清除的正文。
 
+相同 typed proposition 只合并证据或创建 update；不同条件/时间可以同时成立时补充 qualifiers；无法确定是变化、例外还是矛盾时保持旧 memory active，将新 proposal 置为 candidate 并建立 `contradicts` relation，不让模型静默覆盖。
+
 ---
 
 # 23. 记忆淡化
 
-记忆可以随时间降低权重。
+记忆可以随时间降低检索权重。
 
 例如：
 
@@ -1132,6 +1192,8 @@ usage_count
 
 综合决定检索优先级。
 
+时间淡化不原地修改 immutable version 的 importance/confidence，也不自动删除事实。event/intention 到期或完成只改变 current relevance/status；明确新证据可以 supersede 或 invalidate。
+
 但重要的稳定人格信息：
 
 ```text
@@ -1142,6 +1204,8 @@ usage_count
 ```
 
 不应该因为时间简单删除。
+
+显式 `/forget <memory>` 才清除该 stable memory 的所有 payload、rendered text、content-derived hash 和 embedding，并写 erasure ledger；默认不删除作为 source of truth 的 canonical message。contact purge 和 account wipe 是更大范围的独立操作。
 
 ---
 
@@ -1655,18 +1719,20 @@ Memory Agent 不负责真正“生成向量”。
 流程：
 
 ```text
-Memory Agent
+Accepted active memory / summary / eligible message revision
     |
-判断 embed=true
+Embedding eligibility + source hash
     |
-Embedding API
+Independent Embedding ModelProfile
     |
-Vector DB
+embedding_space + embedding_records in PostgreSQL/pgvector
 ```
 
 这样未来可以单独替换 embedding 模型。
 
-每个 embedding model/version/dimension 对应独立 `embedding_space`。更换模型时创建新 space、重建并原子切换 active binding，不能在同一检索空间混用不同维度或模型的向量。
+每个 embedding model/config/version/dimension/metric/chunker generation 对应独立 `embedding_space`。更换模型时创建 shadow space，对所有 eligible target 幂等重建、补齐 build snapshot 后的 delta、验证数量/维度/source hash 和抽样检索，再原子切换 active binding。构建失败时旧 active space 继续服务，不能在同一检索排序中混用不同 space 的向量。
+
+proposal candidate、旧/invalidated/forgotten/redacted version 和 raw image pixels 不生成 active vector memory。edit/delete/forget 时先把关联向量标记 invalidated，使查询立即排除，再异步物理删除。
 
 ---
 
@@ -1701,9 +1767,12 @@ durable work:
   background_jobs, transactional_outbox, domain watermarks
 
 memory:
-  memories, memory_versions, memory_proposals, memory_evidence,
-  memory_relations, memory_jobs, summaries, summary_versions,
-  summary_watermarks, embedding_spaces, embedding_records
+  memories, memory_versions, memory_proposals, memory_proposal_targets,
+  memory_proposal_evidence, memory_evidence, memory_relations,
+  memory_jobs, memory_input_manifests, memory_input_manifest_items,
+  memory_watermarks, summaries, summary_versions, summary_version_sources,
+  summary_watermarks, embedding_spaces, embedding_records,
+  memory_review_actions
 
 proactive and state:
   life_events, intentions, relationship_states,
@@ -1841,6 +1910,27 @@ redacted_at
 ```
 
 `memories` 只保存稳定 identity 和 current version pointer，实际内容位于不可变 `memory_versions`。正式版本必须通过 `memory_evidence` 关联一个或多个来源 revision；没有证据链的模型输出不能直接进入正式长期记忆。forget 默认清除该 memory 的 payload、rendered text 和 embedding，但不等于删除来源消息。
+
+Memory Pipeline 还需要：
+
+```text
+memory_watermarks:
+  conversation_id, watermark_kind,
+  last_scanned_event_id, last_contiguous_decided_event_id, version
+
+memory_input_manifests/items:
+  job generation, range, ordered typed source IDs,
+  source hashes, trust/inclusion role, pipeline/prompt/schema/config versions
+
+memory_proposals/targets/evidence:
+  operation, target set, confidence, importance, time interval,
+  visual_only, validation/decision state and policy version
+
+summary_version_sources:
+  ordered message revision or prior summary membership
+```
+
+这些记录使 episode、summary 和人工 candidate review 可重放。proposal candidate 仍是待审模型输出，不等同于 `memories.status=active`；只有 acceptance transaction 同时写入 version、evidence/relation、current pointer 和 embedding outbox 后才成为正式记忆。
 
 ---
 
@@ -2384,9 +2474,13 @@ last model endpoint check
 
 ```text
 未被删除的 canonical message/revision 仍然保存
-任务按策略重试
-补偿扫描稍后重新整理
+sealed range、input manifest、watermark 和 model run 状态仍然保存
+任务按稳定错误分类重试或进入 dead-letter
+默认每 5 分钟的补偿扫描重建遗漏范围
+Main AI 使用已提交 memory，并在预算内扩大 watermark 之后的 recent canonical window
 ```
+
+Memory freshness 为 stale 时不读取 candidate、quarantined summary 或失效 embedding，也不因为 Memory 恢复而自动回复 backlog。edit/delete/forget reconciliation 优先于普通提取和 summary；恢复数据库备份后先重放 erasure ledger，再开放 derived memory 检索。
 
 如果 Proactive Agent 失败：
 
@@ -2444,7 +2538,7 @@ Refresh Pending Memory Job --------> Async Memory Pipeline
 Debounce / Check Mode
       |
 Context Builder
-Committed Memory + Recent Canonical Messages
+Committed Memory/Summary + Freshness + Recent Canonical Messages
       |
 Main AI
       |

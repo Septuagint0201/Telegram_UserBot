@@ -37,6 +37,13 @@
 - [x] 生成期间收到新 incoming 时，完整 API 结果在 run 开始 3 秒内返回则允许发送，否则 supersede 并合并重生成。
 - [x] AUTO 在生成开始时自动 read 并维持 typing；HUMAN、COPILOT 和 PAUSED 不自动执行两者。
 - [x] Memory Agent 先生成候选变更，再由应用层验证并事务提交。
+- [x] Memory episode 默认使用 45 秒安静窗口；20 条 revision、约 6000 tokens 或 10 分钟任一达到即硬触发，补偿扫描默认每 5 分钟运行。
+- [x] Memory 自动接受默认要求 `confidence >= 0.85`、可信证据且无未解决冲突；`0.60–0.85` 或 image-only/歧义结果进入 candidate。
+- [x] AI/proactive 输出不能单独证明联系人事实或真人风格；已编辑 COPILOT 草稿只能作为低于纯 human 的风格证据。
+- [x] Rolling summary 默认每 50 条 eligible revision 或约 12000 tokens 触发，summary 必须保存 ordered source membership。
+- [x] Memory candidate 通过 Control Bot 命令查看和裁决，接受与 forget 使用精确 version 门禁和二次确认。
+- [x] 时间淡化只影响检索，不自动删除记忆；显式 forget、contact purge 和 account wipe 保持不同语义。
+- [x] Embedding 更换模型时使用隔离 shadow space 完整重建并原子切换，不混合不同空间检索。
 - [x] Proactive Agent 只处理规则层筛选后的候选，不负责常规记忆调度。
 
 ## 文档编写顺序
@@ -118,17 +125,17 @@
 
 目标文档：`docs/architecture/05-memory-pipeline.md`
 
-- [ ] 定义 episode extraction、rolling summary 和 consolidation 三类任务。
-- [ ] 定义触发条件的或关系、安静窗口、硬阈值和补偿扫描。
-- [ ] 定义同一会话 pending memory job 的刷新、范围合并和幂等键。
-- [ ] 定义 Memory Agent 输入、结构化输出和 prompt 版本管理。
-- [ ] 定义 memory proposal 的校验、接受、拒绝和人工审计状态。
-- [ ] 定义 create、update、supersede、invalidate 和 merge 操作。
-- [ ] 定义 evidence、confidence、importance 和时间有效区间。
-- [ ] 定义 summary watermark、覆盖范围和重新生成规则。
-- [ ] 定义 embedding 的生成、版本、更换模型和重建流程。
-- [ ] 定义低置信度候选、冲突判断、遗忘和淡化策略。
-- [ ] 定义队列积压时 Context Builder 的记忆新鲜度降级策略。
+- [x] 定义 episode extraction、rolling summary 和 consolidation 三类任务。
+- [x] 定义触发条件的或关系、安静窗口、硬阈值和补偿扫描。
+- [x] 定义同一会话 pending memory job 的刷新、范围合并和幂等键。
+- [x] 定义 Memory Agent 输入、结构化输出和 prompt 版本管理。
+- [x] 定义 memory proposal 的校验、接受、拒绝和人工审计状态。
+- [x] 定义 create、update、supersede、invalidate 和 merge 操作。
+- [x] 定义 evidence、confidence、importance 和时间有效区间。
+- [x] 定义 summary watermark、覆盖范围和重新生成规则。
+- [x] 定义 embedding 的生成、版本、更换模型和重建流程。
+- [x] 定义低置信度候选、冲突判断、遗忘和淡化策略。
+- [x] 定义队列积压时 Context Builder 的记忆新鲜度降级策略。
 
 完成标准：任意 canonical message/event 范围可以安全重放，重复处理不会重复创建记忆，所有正式记忆都能追溯到证据 revision。
 
@@ -218,6 +225,11 @@
 - [ ] 测试真人发送、模式切换和模型返回同时发生的竞态。
 - [ ] 测试发送前、发送中、发送后各崩溃点的恢复行为。
 - [ ] 测试 Memory Pipeline 重放、冲突、watermark 和 embedding 重建。
+- [ ] 测试 Memory OR 触发、45 秒 quiet window、三类硬阈值、running range seal 和 5 分钟补偿扫描。
+- [ ] 测试 human/AI/proactive/COPILOT 来源信任、candidate 门槛、image-only 审核和 evidence root 断链拒绝。
+- [ ] 测试 rolling/daily/weekly summary source membership、迟到事件、时区快照、edit/delete 隔离与递归重建。
+- [ ] 测试 Memory candidate 接受/拒绝、一次性 action token、旧 version/evidence 失效和 `/forget` 二次确认。
+- [ ] 测试 Memory `fresh/degraded/stale` 积压降级，确保 Main AI 不等待且不读取 candidate/quarantined summary。
 - [ ] 测试 Proactive Pipeline 的时区、预算、幂等和最终安全闸门。
 - [ ] 测试 migration、备份恢复和 Docker Compose 集成运行。
 - [ ] 建立关键行为验收矩阵和回归测试数据集。

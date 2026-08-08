@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 PostgreSQL 逻辑数据模型、实体身份、版本化方式、业务唯一键、外键、检查约束、索引、事务边界、保留与删除语义，以及 Alembic migration 规则。
 
-总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`，模式与控制状态机见 `docs/architecture/04-conversation-orchestrator.md`。后续 Memory Pipeline、Context Contract 和 Proactive Pipeline 可以增加字段和受约束的扩展类型，但不得绕过本文定义的账号边界、版本快照、证据链、删除语义和发送幂等约束。
+总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`，模式与控制状态机见 `docs/architecture/04-conversation-orchestrator.md`，记忆运行语义见 `docs/architecture/05-memory-pipeline.md`。后续 Context Contract 和 Proactive Pipeline 可以增加字段和受约束的扩展类型，但不得绕过本文定义的账号边界、版本快照、证据链、删除语义和发送幂等约束。
 
 当前状态：V1 架构基线。
 
@@ -140,8 +140,11 @@ accounts
   |                        +--< memories --< memory_versions --< memory_evidence
   |                        |                    |
   |                        |                    +--< embedding_records
-  |                        +--< summaries --< summary_versions
-  |                        +--< memory_jobs
+  |                        +--< memory_jobs --< memory_input_manifests
+  |                        |                         +--< memory_input_manifest_items
+  |                        +--< memory_proposals --< memory_proposal_targets/evidence
+  |                        +--< memory_watermarks
+  |                        +--< summaries --< summary_versions --< summary_version_sources
   |
   +--< audit_log
   +--< background_jobs
@@ -666,6 +669,7 @@ CHECK typed source foreign key 恰好符合 source_type
 | `config_version_id` | UUIDv7 | 不可变 config snapshot FK |
 | `credential_version_id` | UUIDv7 | 同 role credential snapshot FK，不含 secret |
 | `context_manifest_id` | UUIDv7 | nullable FK |
+| `memory_input_manifest_id` | UUIDv7 | nullable FK；仅 Memory Agent run 使用 |
 | `input_fingerprint` | BYTEA | canonical request 的 keyed fingerprint；purge 时清除 |
 | `output_fingerprint` | BYTEA | nullable normalized output keyed fingerprint；purge 时清除 |
 | `adapter_version` | TEXT | protocol adapter 实现版本 |
@@ -688,6 +692,7 @@ UNIQUE (id, account_id)
 UNIQUE (id, account_id, logical_role)
 UNIQUE (id, account_id, conversation_id, logical_role)
 UNIQUE (id, account_id, conversation_id, turn_id, logical_role)
+CHECK (logical_role = 'memory_agent') = (memory_input_manifest_id IS NOT NULL)
 ```
 
 `model_profiles` 提供 `(id, logical_role)` unique key，run 使用 composite FK 保证 role；config version 和 credential version 也分别通过 `(id, profile_id)` composite FK 绑定同一个 `model_profile_id`，数据库会拒绝把其他 role 的配置或 key 用于本次运行。
@@ -965,7 +970,8 @@ version
 | `contact_id` | UUIDv7 | nullable composite FK |
 | `conversation_id` | UUIDv7 | nullable composite FK |
 | `memory_type` | TEXT | `identity/relationship/fact/preference/event/intention/style` |
-| `status` | TEXT | `candidate/active/superseded/invalidated/forgotten` |
+| `semantic_key_hash` | BYTEA | validator 对 versioned typed semantic key 的 32-byte hash；用于有界查重，不代表文本相等 |
+| `status` | TEXT | `active/superseded/invalidated/forgotten`；模型 candidate 只存在于 proposal |
 | `current_version_no` | INTEGER | 从 1 开始 |
 | `superseded_by_memory_id` | UUIDv7 | nullable self FK |
 | `created_at` | TIMESTAMPTZ | DB default |
@@ -975,6 +981,7 @@ version
 ```text
 UNIQUE (id, account_id)
 CHECK contact_id IS NOT NULL OR conversation_id IS NULL
+CHECK octet_length(semantic_key_hash) = 32
 CHECK status 与 forgotten/superseded 字段一致
 ```
 
@@ -996,11 +1003,16 @@ CHECK status 与 forgotten/superseded 字段一致
 | `rendered_text` | TEXT | 模型/人工可读 sensitive content |
 | `importance` | NUMERIC | 0..1 |
 | `confidence` | NUMERIC | 0..1 |
+| `observed_at` | TIMESTAMPTZ | nullable；证据被陈述/观察时间 |
 | `valid_from` | TIMESTAMPTZ | nullable |
 | `valid_to` | TIMESTAMPTZ | nullable |
+| `time_precision` | TEXT | `exact/day/week/month/relative/unknown` |
+| `timezone` | TEXT | nullable IANA timezone snapshot |
 | `model_run_id` | UUIDv7 | nullable composite FK |
 | `model_role` | TEXT | run 存在时固定为 `memory_agent` |
 | `prompt_version` | TEXT | nullable |
+| `validator_policy_version` | TEXT | acceptance/normalization policy version |
+| `acceptance_kind` | TEXT | `automatic/manual/reconciliation/migration` |
 | `created_at` | TIMESTAMPTZ | DB default |
 | `redacted_at` | TIMESTAMPTZ | nullable；forget/evidence delete/purge/wipe 的单向清除时间 |
 | `redaction_reason` | TEXT | nullable 受控原因码 |
@@ -1029,13 +1041,24 @@ CHECK ((model_run_id IS NULL AND model_role IS NULL) OR
 | `model_run_id` | UUIDv7 | composite FK model_runs |
 | `model_role` | TEXT | 固定为 `memory_agent` |
 | `idempotency_key` | BYTEA | 32-byte stable key |
-| `operation` | TEXT | `none/create/update/merge/supersede/invalidate` |
-| `target_memory_id` | UUIDv7 | nullable composite FK |
+| `proposal_ordinal` | INTEGER | model output 内稳定 ordinal，nonnegative |
+| `operation` | TEXT | `create/update/merge/supersede/invalidate` |
+| `semantic_key_hash` | BYTEA | 应用重新生成的 typed semantic key hash |
 | `payload_schema_version` | SMALLINT | NOT NULL |
 | `proposed_payload` | JSONB | typed candidate |
 | `proposed_text` | TEXT | sensitive candidate |
-| `state` | TEXT | `received/validating/accepted/rejected/candidate/error` |
+| `proposed_confidence` | NUMERIC | 0..1 |
+| `proposed_importance` | NUMERIC | 0..1 |
+| `proposed_valid_from` | TIMESTAMPTZ | nullable |
+| `proposed_valid_to` | TIMESTAMPTZ | nullable |
+| `visual_only` | BOOLEAN | default false |
+| `state` | TEXT | `received/validating/accepted/rejected/candidate/error/invalidated/expired` |
 | `validation_code` | TEXT | nullable |
+| `validator_policy_version` | TEXT | NOT NULL |
+| `accepted_memory_version_id` | UUIDv7 | nullable composite FK；accepted 时精确结果 |
+| `decision_actor_type` | TEXT | nullable `service/admin/system` |
+| `decision_actor_id` | TEXT | nullable 受控 actor ref，不复制用户名 |
+| `decision_reason_code` | TEXT | nullable |
 | `created_at` | TIMESTAMPTZ | DB default |
 | `decided_at` | TIMESTAMPTZ | nullable |
 | `retention_class` | TEXT | terminal candidate retention snapshot |
@@ -1043,24 +1066,52 @@ CHECK ((model_run_id IS NULL AND model_role IS NULL) OR
 
 ```text
 UNIQUE (account_id, idempotency_key)
+UNIQUE (model_run_id, proposal_ordinal)
 CHECK (model_role = 'memory_agent')
+CHECK octet_length(semantic_key_hash) = 32
+CHECK proposed_confidence BETWEEN 0 AND 1
+CHECK proposed_importance BETWEEN 0 AND 1
+CHECK proposed_valid_to IS NULL OR proposed_valid_from IS NULL OR proposed_valid_to >= proposed_valid_from
 ```
 
 proposal/version 的 `(model_run_id, account_id, model_role)` 都通过 composite FK 指向 model run。accepted proposal 在同一事务创建 memory/version/evidence 并记录 proposal result。proposal 不能直接更新 active memory row；terminal proposal 的候选正文按 retention policy 清除，正式事实只保留在 memory version。
 
+低置信度、歧义或 image-only 结果保持在 `memory_proposals.state=candidate`，不先创建 `memories.status=candidate`。candidate 不能进入 Context 或正式 embedding；证据/target 变化后进入 `invalidated`，retention 到期进入 `expired`。
+
 ### 9.4 Evidence 与 relation
+
+`memory_proposal_targets` 规范化多 target operation：
+
+```text
+proposal_id
+account_id
+target_memory_id
+target_version_no_snapshot
+target_role primary|merge_source|superseded|invalidated
+created_at
+PRIMARY KEY (proposal_id, target_memory_id, target_role)
+```
+
+`create` 不允许 target，`update/supersede/invalidate` 恰好一个 primary target，`merge` 至少两个 target。target 使用包含 `account_id` 的 composite FK；acceptance 时必须重新检查 current version snapshot。模型返回空 proposal 时只在 job/watermark 记录 deterministic no-change，不创建伪 proposal。
 
 `memory_proposal_evidence` 保存模型声明和验证层接受的候选证据：
 
 ```text
 proposal_id
+account_id
 message_revision_id
+media_object_id?
 evidence_role
 quoted_span_start?
 quoted_span_end?
+source_content_sha256
+source_normalization_version
+trust_class
 created_at
 PRIMARY KEY (proposal_id, message_revision_id, evidence_role)
 ```
+
+quote span 使用 canonical text 的 Unicode code point 半开区间。`media_object_id` 存在时必须通过 `message_media` 证明属于该 revision 且状态为 validated ready；image-only proposal 默认只能进入 candidate。
 
 `memory_evidence` 绑定正式 `memory_version_id` 与以下来源之一：
 
@@ -1068,9 +1119,15 @@ PRIMARY KEY (proposal_id, message_revision_id, evidence_role)
 message_revision_id
 summary_version_id
 other_memory_version_id
+media_object_id?  # 仅作为 message revision 的 supplemental image source
+evidence_role
+trust_class
+source_content_sha256
 ```
 
-CHECK 要求恰好一个来源列非空。证据保存 source revision ID 和 evidence role，不复制原文。Telegram delete 导致 source revision redacted 时，Memory reconciliation 按 evidence index 找到受影响 versions，立即从 active Context 隔离。若仍有独立有效证据则从剩余证据生成 replacement version；随后对受影响旧 version 的 payload/rendered text 和 embedding 做单向 redaction。没有剩余证据时直接 invalidate 并 redaction。
+CHECK 要求前三个主来源列恰好一个非空；`media_object_id` 只有 `message_revision_id` 存在时才允许，且必须属于该 revision。证据保存 source ID、hash、trust 和 evidence role，不复制原文。Telegram delete 导致 source revision redacted 时，Memory reconciliation 按 evidence index 找到受影响 versions，立即从 active Context 隔离。若仍有独立有效证据则从剩余证据生成 replacement version；随后对受影响旧 version 的 payload/rendered text 和 embedding 做单向 redaction。没有剩余证据时直接 invalidate 并 redaction。
+
+当 `memory_evidence` 引用 summary 或其他 memory version 时，应用必须通过 `summary_version_sources`/其他 evidence 递归到至少一个 current、未 redacted message revision，并拒绝循环、跨 scope、断链或深度超过 8 的 evidence graph。
 
 `memory_relations` 表达 memory version 之间的 `supports/contradicts/derived_from/merges/supersedes`，主键为 `(from_version_id, to_version_id, relation_type)`，禁止 self relation。
 
@@ -1085,12 +1142,23 @@ CHECK 要求恰好一个来源列非空。证据保存 source revision ID 和 ev
 | `conversation_id` | UUIDv7 | composite FK conversations |
 | `job_kind` | TEXT | `episode/rolling_summary/consolidation/reconciliation` |
 | `state` | TEXT | `pending/leased/running/succeeded/retry_wait/dead_letter/cancelled` |
+| `generation` | INTEGER | 同 conversation/kind 从 1 单调递增 |
+| `job_version` | BIGINT | pending refresh/状态 CAS version |
 | `range_start_event_id` | BIGINT | inclusive |
 | `range_end_event_id` | BIGINT | inclusive，可刷新扩大 |
+| `eligible_revision_count` | INTEGER | nonnegative policy snapshot input |
+| `estimated_input_tokens` | INTEGER | nonnegative estimate |
 | `completed_turn_watermark` | UUIDv7 | nullable |
 | `idempotency_key` | BYTEA | 32-byte |
 | `quiet_until` | TIMESTAMPTZ | 安静窗口 |
 | `hard_due_at` | TIMESTAMPTZ | 硬阈值 |
+| `pipeline_version` | TEXT | NOT NULL |
+| `policy_version` | TEXT | 阈值/接受 policy version |
+| `prompt_version` | TEXT | NOT NULL |
+| `input_schema_version` | SMALLINT | NOT NULL |
+| `output_schema_version` | SMALLINT | NOT NULL |
+| `input_manifest_id` | UUIDv7 | nullable；seal 后 composite FK |
+| `sealed_at` | TIMESTAMPTZ | nullable；running 范围不可再扩大 |
 | `background_job_id` | UUIDv7 | nullable FK generic job |
 | `created_at` | TIMESTAMPTZ | DB default |
 | `updated_at` | TIMESTAMPTZ | CAS |
@@ -1098,18 +1166,92 @@ CHECK 要求恰好一个来源列非空。证据保存 source revision ID 和 ev
 
 ```text
 UNIQUE (account_id, idempotency_key)
+UNIQUE (conversation_id, job_kind, generation)
+UNIQUE (conversation_id, job_kind) WHERE state = 'pending'
 CHECK (range_end_event_id >= range_start_event_id)
+CHECK eligible_revision_count >= 0
+CHECK estimated_input_tokens >= 0
+CHECK ((sealed_at IS NULL AND input_manifest_id IS NULL) OR
+       (sealed_at IS NOT NULL AND input_manifest_id IS NOT NULL))
 ```
 
-同一 conversation/kind 的 pending job 可以在事务中扩大范围，不创建重复 job；已经 running 的范围不可改写，新事件进入下一 job。
+同一 conversation/kind 的 pending job 可以在事务中扩大范围，不创建重复 job；quiet deadline 可以后移，`hard_due_at` 不得后移。已经 sealed/running 的范围不可改写，新事件进入下一 generation。默认 policy 使用 45 秒 quiet、20 revision/约 6000 tokens/10 分钟硬触发和 5 分钟补偿扫描；每个 job 保存具体版本和值的快照。
 
-### 9.6 Summary
+### 9.6 Memory input manifest
+
+`memory_input_manifests` 保存一次 Memory Agent 调用的 immutable typed membership：
+
+```text
+id UUIDv7 PK
+account_id
+conversation_id
+memory_job_id
+generation
+manifest_kind episode|rolling_summary|consolidation|reconciliation
+range_start_event_id / range_end_event_id
+pipeline_version / policy_version / prompt_version
+input_schema_version / output_schema_version
+model_config_version_id / credential_version_id
+timezone_snapshot?
+input_token_estimate
+image_count
+manifest_sha256 BYTEA
+created_at
+UNIQUE (memory_job_id, generation)
+UNIQUE (account_id, manifest_sha256, pipeline_version, prompt_version, output_schema_version)
+```
+
+`memory_input_manifest_items`：
+
+```text
+id BIGINT IDENTITY PK
+manifest_id
+ordinal
+source_type message_revision|media_object|memory_version|summary_version
+message_revision_id?
+media_object_id?
+memory_version_id?
+summary_version_id?
+inclusion_role episode|supporting|related_current|prior_summary|profile
+trust_class
+source_content_sha256
+selection_reason_code
+UNIQUE (manifest_id, ordinal)
+CHECK typed source columns match source_type
+```
+
+manifest 不复制正文。provider 调用前按 source ID 重读未 redacted content 并复核 hash；edit/delete 后旧 manifest 可以保留 ID/provenance，但不能恢复内容或接受迟到输出。
+
+`memory_jobs.input_manifest_id` 使用 deferrable FK 指回同一 account/conversation/job 的 manifest；manifest 到 job 的 FK 为直接 owner 关系，使 seal transaction 可以先插入 manifest/items，再更新 job pointer 并整体提交。
+
+`model_runs` 增加 nullable `memory_input_manifest_id`；仅 `logical_role=memory_agent` 时允许，且 run/job/manifest 的 account/conversation/model config version 必须一致。
+
+### 9.7 `memory_watermarks`
+
+```text
+account_id
+conversation_id
+watermark_kind episode|reconciliation
+last_scanned_event_id
+last_contiguous_decided_event_id
+last_succeeded_job_id?
+version
+updated_at
+PRIMARY KEY (conversation_id, watermark_kind)
+CHECK last_contiguous_decided_event_id <= last_scanned_event_id
+```
+
+watermark 使用 version CAS。明确 ineligible/no-change 的 event 也可成为已裁决范围；存在更早 pending/retry/dead-letter hole 时不得推进 contiguous watermark。
+
+### 9.8 Summary
 
 `summaries` 保存稳定 summary identity：
 
 ```text
 id, account_id, conversation_id, summary_kind,
-status, current_version_no, created_at, updated_at
+period_key?, timezone_snapshot?, period_start_at?, period_end_at?,
+status active|quarantined|invalidated,
+current_version_no, created_at, updated_at
 ```
 
 `summary_kind` 至少预留 `rolling/daily/weekly/consolidated`。`summary_versions` 保存：
@@ -1117,12 +1259,32 @@ status, current_version_no, created_at, updated_at
 ```text
 id, account_id, summary_id, version_no,
 range_start_event_id, range_end_event_id,
+period_start_at?, period_end_at?, timezone_snapshot?,
 content_text, content_sha256,
 model_run_id, model_role='memory_agent', prompt_version,
+pipeline_version, output_schema_version, manifest_sha256,
+invalidation_state active|quarantined|invalidated,
 created_at, redacted_at
 ```
 
 唯一键 `(summary_id, version_no)`。summary 版本不可原地改写。源消息删除后，受影响 summary 先退出 active Context，再从未删除范围创建 replacement/invalidation version；旧 summary content 和 embedding 随后单向 redaction。contact purge 时所有正文物理清除。
+
+`summary_version_sources` 保存 ordered source membership：
+
+```text
+summary_version_id
+account_id
+ordinal
+message_revision_id?
+prior_summary_version_id?
+inclusion_role
+source_content_sha256
+created_at
+UNIQUE (summary_version_id, ordinal)
+CHECK exactly one source column is non-null
+```
+
+source 使用包含 `account_id` 的 composite FK。rolling summary 可以引用前一个 rolling version + 新 revisions；weekly 可以引用 daily versions。迟到 event、edit/delete 通过 source index 找到受影响 version，并递归隔离下游 summary。只保存 range 而没有 source membership 不满足可审计/重建要求。
 
 `summary_watermarks` 使用：
 
@@ -1134,7 +1296,9 @@ last_summary_version_id, version, updated_at
 
 主键 `(conversation_id, summary_kind)`，更新使用 version CAS。
 
-### 9.7 Embedding space
+rolling summary 默认在新增 50 条 eligible revision 或估算约 12000 tokens 时 eligible。daily/weekly identity 保存 period key、有效 IANA timezone 和 UTC boundary snapshot；空 period 不创建 summary。summary version/source/current pointer/watermark 必须在同一事务提交。
+
+### 9.9 Embedding space
 
 `embedding_spaces` 将向量与模型、维度和重建代次绑定：
 
@@ -1149,6 +1313,7 @@ last_summary_version_id, version, updated_at
 | `dimensions` | INTEGER | positive |
 | `distance_metric` | TEXT | `cosine/inner_product/l2` |
 | `normalization` | TEXT | `none/l2` |
+| `chunker_version` | TEXT | normalized text/chunk boundary version |
 | `state` | TEXT | `building/active/retired/failed` |
 | `generation` | INTEGER | 从 1 递增 |
 | `created_at` | TIMESTAMPTZ | DB default |
@@ -1191,6 +1356,32 @@ UNIQUE (embedding_space_id, message_revision_id, chunk_index)
 ```
 
 `embedding_spaces` 提供 `(id, dimensions)` unique key，record 使用 composite FK 保证声明维度一致。pgvector ANN index 必须绑定固定 dimension/active space；具体 HNSW/IVFFlat 选择和查询参数留给 Context Contract/Operations，不建立跨 space 的无约束全局 ANN index。
+
+active query 必须显式绑定一个 `embedding_space_id`，不能跨 space 混合分数。更换模型/config/dimension/metric/chunker 时创建 `building` shadow space；只有 eligible target coverage、dimension、source hash、抽样检索和 final delta 均验证后，才在 activation transaction 中把新 space 设为 active、旧 space 设为 retired。构建失败时旧 active space 保持可用。
+
+candidate、superseded/invalidated/forgotten/redacted version 和 raw image pixels 不创建 active embedding。source edit/delete/forget 时同一逻辑删除边界先设置 `invalidated_at`，查询立即排除，物理删除随后幂等完成。
+
+### 9.10 Memory review extension
+
+Memory 管理复用第 12.2 节 `control_commands` 的 Bot update 幂等 identity，并使用 typed extension `memory_review_actions`：
+
+```text
+control_command_id UUIDv7 PRIMARY KEY/FK
+account_id
+action accept|reject|forget
+proposal_id?
+memory_id?
+expected_proposal_state?
+expected_memory_version_no?
+action_token_hash BYTEA
+expires_at
+used_at?
+state awaiting_confirmation|applied|rejected|expired
+reason_code?
+CHECK accept/reject targets proposal and forget targets memory
+```
+
+token 绑定 allowlisted admin、Bot chat、action、target 和 expected version，只保存 hash、单次使用。command/action 不复制 memory/proposal/message 正文；UI 显示时从仍有效 source 临时渲染最小摘要。
 
 ## 10. Proactive 与关系投影
 
@@ -1861,10 +2052,22 @@ copilot_edit_sessions(expires_at) WHERE completed_at IS NULL
 
 ```text
 memories(account_id, contact_id, memory_type, status)
+memories(account_id, contact_id, memory_type, semantic_key_hash)
 memory_versions(memory_id, version_no) UNIQUE
 memory_evidence(message_revision_id) WHERE message_revision_id IS NOT NULL
-memory_jobs(conversation_id, state, quiet_until)
+memory_evidence(media_object_id) WHERE media_object_id IS NOT NULL
+memory_proposals(state, expires_at)
+memory_proposal_targets(target_memory_id)
+memory_proposal_evidence(message_revision_id)
+memory_jobs(conversation_id, job_kind, state, quiet_until, hard_due_at)
+  WHERE state IN ('pending','retry_wait')
+memory_input_manifest_items(message_revision_id)
+memory_input_manifest_items(memory_version_id)
+memory_watermarks(conversation_id, watermark_kind) PRIMARY KEY
+summary_version_sources(message_revision_id)
+summary_version_sources(prior_summary_version_id)
 summary_watermarks(conversation_id, summary_kind) PRIMARY KEY
+memory_review_actions(expires_at) WHERE used_at IS NULL
 life_events(contact_id, status, start_at)
 intentions(contact_id, status, expected_at)
 proactive_decisions(account_id, idempotency_key) UNIQUE
@@ -1959,16 +2162,34 @@ source 确认为 human 的事务同时：
 
 在 account/contact scope lock 下：
 
-1. 锁 proposal 并确认 state、idempotency、evidence 均有效且未 redacted。
-2. 创建或锁 stable memory identity。
-3. 插入 immutable version 和 evidence/relation。
-4. 更新 current pointer/status。
-5. 标记 proposal accepted，创建 embedding job/outbox。
-6. commit。
+1. 锁 proposal、人工 review command（若有）和 sorted target memories。
+2. 确认 state、idempotency、input manifest、target version、evidence hash/span/trust/root 均有效且未 redacted。
+3. 按 operation 创建/锁 stable memory identity，重新检查 typed semantic key 重复或冲突。
+4. 插入 immutable version、proposal targets、evidence 和 relations。
+5. 使用 current-version/status CAS 提交 create/update/merge/supersede/invalidate。
+6. 标记 proposal/review command accepted/used，保存精确 result version。
+7. 创建 embedding job/outbox，必要时推进 contiguous memory watermark。
+8. commit。
 
-任一步失败整体回滚；不能留下 active memory 没有 evidence。
+任一步失败整体回滚；不能留下 active memory 没有 evidence、accepted proposal 没有 result，或 watermark 越过未裁决 hole。provider/Redis/Embedding API 均在事务外调用。
 
-### 16.9 Model config activation
+### 16.9 Summary version 与 watermark
+
+在 summary identity/watermark lock 下：
+
+1. 验证 input manifest、source revisions/prior summaries 仍 current 且 hash 匹配。
+2. 插入 immutable summary version 和 ordered `summary_version_sources`。
+3. 更新 current pointer/status。
+4. 使用 version CAS 推进对应 contiguous watermark。
+5. 创建 embedding/outbox 后 commit。
+
+summary version、source membership、current pointer 和 watermark 不允许拆成多个事务。source edit/delete 先将依赖 current summary 隔离并使 embedding 不可见，再异步重建。
+
+### 16.10 Embedding space activation
+
+shadow space 在事务外按 `(space, typed target, chunk_index)` 幂等构建。完成 count/dimension/source hash/sample retrieval 和 final delta 校验后，在 deployment/profile activation lock 下单事务把新 space `building -> active`、旧 space `active -> retired`。任一验证失败保持旧 space active；查询不能同时绑定两个 space。
+
+### 16.11 Model config activation
 
 在 profile row lock 下：
 
@@ -1980,11 +2201,11 @@ source 确认为 human 的事务同时：
 
 进行中的 model run 继续引用旧 config/credential version。API key 独立轮换不创建 config version；销毁 retired credential ciphertext 前必须确认没有需要恢复/重试的非终态 run。
 
-### 16.10 Job claim
+### 16.12 Job claim
 
 worker 用短事务 `SELECT ... FOR UPDATE SKIP LOCKED LIMIT n` 领取 job，设置随机 owner 和 expiry 后 commit。执行任务不持有行锁；完成时使用 `(job_id, lease_owner, state, version)` CAS。
 
-### 16.11 Account 与 conversation control
+### 16.13 Account 与 conversation control
 
 account default/global pause/maintenance 只锁 `account_orchestrator_states`，递增 `control_version`、追加 history/outbox，不批量锁 conversations。旧 run/intent 通过 snapshot gate 失效。
 
@@ -2054,7 +2275,7 @@ runtime role 不拥有 schema，不可修改 audit 历史，不可读取其他�
 
 Conversation Orchestrator 的 account control、mode overlay、reply floor、temporary takeover 和 COPILOT draft 契约以 `docs/architecture/04-conversation-orchestrator.md` 为准；后续修改必须同时更新本文的字段、约束与 migration。
 
-Memory Pipeline 可以扩展 memory typed schemas、proposal validation 和 consolidation 状态，但必须使用 immutable version、evidence 和 watermark。
+Memory Pipeline 的 trigger、input manifest、proposal validation、evidence trust、summary source、embedding rebuild、freshness 和人工 review 契约以 `docs/architecture/05-memory-pipeline.md` 为准；后续修改必须同时更新本文的字段、约束与 transaction。
 
 Context Contract 可以扩展 manifest item layer、token/image budget 和 adapter mapping，但不能把未记录来源的正文注入模型。
 
@@ -2070,7 +2291,9 @@ Test Strategy 负责把本文的约束、race、migration 和 erasure 恢复声�
 - [x] V1 单账号与未来多账号 composite boundary 已定义。
 - [x] message event/revision、media、reaction、turn、manifest、run、intent、attempt 和 job 表已定义。
 - [x] account control、mode overlay、reply floor、operational block、COPILOT draft/revision/action 和 approval intent 已定义。
-- [x] Memory identity/version/proposal/evidence/relation、summary/watermark 和 embedding space 已定义。
+- [x] Memory identity/version/proposal/target/evidence/relation、input manifest 和 contiguous watermark 已定义。
+- [x] Summary version/source membership/watermark 与 embedding shadow-space activation 已定义。
+- [x] Memory candidate review extension、action token 和 acceptance transaction 已定义。
 - [x] life event、intention、relationship state、proactive decision、agent/service state 和 audit 已定义。
 - [x] 四个独立模型 role、endpoint、draft、config version 和独立 credential version 已定义。
 - [x] canonical generation 字段与 protocol-options discriminated JSONB 边界已定义。

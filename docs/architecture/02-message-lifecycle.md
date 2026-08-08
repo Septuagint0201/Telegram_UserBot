@@ -597,14 +597,16 @@ FloodWait 不进行忙循环。记录 Telegram 指示的等待时间，将 inten
 以下事件更新 memory pending watermark：
 
 - incoming message/album 持久化。
-- 确认的 human、ai 或 proactive_ai outgoing 持久化。
+- 确认的 human、ai、proactive_ai 或 copilot_approved outgoing 持久化。
 - turn `completed`。
 - 消息 edit/delete。
 - system_pending source 完成对账。
 
-同一 conversation 的 memory job 使用安静窗口合并和幂等 watermark。completed turn 可以优先触发，但 Memory Agent 读取的是已提交 canonical messages 和允许的 validated media reference，不读取未确认 source、tombstone 正文或临时下载文件。
+同一 conversation 的 memory job 默认使用 45 秒安静窗口；20 条 eligible revision、约 6000 input tokens 或最早未处理 event 等待 10 分钟任一达到即硬触发，默认每 5 分钟的补偿扫描查找遗漏。所有触发条件是 OR。completed turn 可以提高优先级但不是 correctness 边界；已经 running 的 range 不可扩张，新 event 进入下一 generation。
 
-edit/delete 发生在已有 memory proposal 或正式 memory 之后时，创建 reconciliation job。Memory Pipeline 必须追踪 message evidence，先隔离受影响版本，再从剩余证据执行 invalidate、supersede 或重新提取；replacement 提交后清除旧派生正文和 embedding，而不是让已删除证据继续作为 active 或可恢复 memory。具体冲突和版本规则由 Memory Pipeline 文档定义。
+Memory Agent 读取 immutable input manifest 指向的已提交 canonical revisions 和允许的 validated media reference，不读取未确认 source、tombstone 正文或临时下载文件。caption 按文本处理；纯图片推断默认只能成为 candidate。AI/proactive outgoing 不得单独证明联系人事实或真人 style，`copilot_approved` 必须继续区分是否编辑。
+
+edit/delete 发生在已有 memory proposal、正式 memory 或 summary 之后时，创建不等待安静窗口的 reconciliation job。Memory Pipeline 通过 proposal evidence、formal evidence 和 summary source membership 先隔离受影响版本，再从剩余证据执行 invalidate、supersede 或重新提取；replacement 提交后清除旧派生正文和 embedding，而不是让已删除证据继续作为 active 或可恢复 memory。完整契约见 `docs/architecture/05-memory-pipeline.md`。
 
 ## 17. 隐私、安全与审计
 

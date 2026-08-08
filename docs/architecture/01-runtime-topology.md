@@ -145,6 +145,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 - 通过 Telegram Bot API long polling 运行 Control Bot。
 - 校验 Control Bot 管理员白名单。
 - 提供 `/server_status`、模式控制、`/models`、模型非密钥配置命令和 `/model_key <role>` Web App 入口。
+- 提供 `/memory`、`/memory_candidates`、`/memory_accept`、`/memory_reject`、`/forget` 和 `/memory_status`；只写 durable review command，不直接修改 active memory。
 - 展示 COPILOT draft card，处理 `/draft`、Send/Edit/Ignore 和短期 edit session；approval 只写 durable command，由 `app` 二次门禁并代发。
 - 通过绑定管理员、logical role 和随机 session ID 的短生命周期 Bot 输入会话管理 endpoint、protocol、model、生成参数、超时和启用状态；API key 输入必须拒绝。
 - 提供 Telegram Web App 静态资源和只允许设置、替换或删除 API key 的凭据 API。
@@ -162,9 +163,10 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 `worker` 负责可重试、非实时或周期性任务：
 
 - Episode memory extraction。
-- Memory proposal validation 后的持久化编排。
+- Memory input manifest、proposal validation、candidate review 和 acceptance 持久化编排。
 - Rolling summary 和 daily/weekly consolidation。
-- Embedding 生成和重建。
+- Evidence reconciliation、summary source rebuild 和 erasure propagation。
+- Embedding 生成、shadow-space 重建和原子切换准备。
 - 按 validated media reference 只读访问 Memory/summary 任务允许使用的图片。
 - Proactive 候选处理和模型判断。
 - 未处理 message watermark、未知 outbound intent 等补偿扫描。
@@ -596,7 +598,7 @@ config_version（模型调用适用时）
 - CPU、内存、磁盘和 worker concurrency 数值。
 - TLS 证书签发和更新工具。
 - PostgreSQL、Redis 和 Session 的具体备份工具。
-- 任务 retry、dead-letter 和补偿扫描的精确时间参数。
+- 除各领域文档已定义默认值外的通用 retry、dead-letter、lease 和补偿参数。
 
 具体队列库必须满足后续 Message Lifecycle 定义的 at-least-once、延迟任务、重试、幂等和 asyncio 集成要求。
 
