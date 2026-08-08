@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 PostgreSQL 逻辑数据模型、实体身份、版本化方式、业务唯一键、外键、检查约束、索引、事务边界、保留与删除语义，以及 Alembic migration 规则。
 
-总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`。后续 Conversation Orchestrator、Memory Pipeline、Context Contract 和 Proactive Pipeline 可以增加字段和受约束的扩展类型，但不得绕过本文定义的账号边界、版本快照、证据链、删除语义和发送幂等约束。
+总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`，模式与控制状态机见 `docs/architecture/04-conversation-orchestrator.md`。后续 Memory Pipeline、Context Contract 和 Proactive Pipeline 可以增加字段和受约束的扩展类型，但不得绕过本文定义的账号边界、版本快照、证据链、删除语义和发送幂等约束。
 
 当前状态：V1 架构基线。
 
@@ -134,6 +134,7 @@ accounts
   |                        |          |
   |                        |          +--< context_manifests --< context_manifest_items
   |                        |          +--< model_runs --< model_run_attempts
+  |                        |          +--< copilot_drafts --< copilot_draft_revisions
   |                        |          +--< outbound_intents --< outbound_attempts
   |                        |
   |                        +--< memories --< memory_versions --< memory_evidence
@@ -168,7 +169,7 @@ life_events / intentions / relationship_states -> proactive_decisions -> outboun
 | `id` | UUIDv7 | PK |
 | `telegram_user_id` | BIGINT | `UNIQUE NOT NULL` |
 | `display_label` | TEXT | 管理员可见非秘密标签 |
-| `status` | TEXT | `bootstrap_required/active/paused/disabled/deleting` |
+| `status` | TEXT | `bootstrap_required/active/disabled/deleting`；聊天 pause 由 orchestrator overlay 表达 |
 | `default_timezone` | TEXT | IANA timezone |
 | `created_at` | TIMESTAMPTZ | DB default |
 | `updated_at` | TIMESTAMPTZ | 受控更新 |
@@ -255,9 +256,13 @@ V1 每个允许的一对一 private contact 对应一个 conversation。unsuppor
 | `contact_id` | UUIDv7 | composite FK contacts |
 | `account_peer_id` | UUIDv7 | composite FK account_peers |
 | `telegram_chat_id` | BIGINT | canonical marked peer ID |
-| `mode` | TEXT | 当前 `AUTO/HUMAN/COPILOT/PAUSED` |
+| `base_mode_override` | TEXT | nullable `AUTO/HUMAN/COPILOT`；空表示继承 account default |
+| `contact_paused` | BOOLEAN | contact pause overlay，默认 false |
+| `temporary_human_until` | TIMESTAMPTZ | nullable；可选 temporary takeover deadline |
 | `mode_version` | BIGINT | 从 1 开始单调递增 |
 | `content_revision` | BIGINT | 从 0 开始，内容语义变化时单调递增 |
+| `automation_resume_floor_event_id` | BIGINT | nullable；恢复后不自动补回复的 event floor |
+| `last_response_covered_event_id` | BIGINT | nullable；已明确回应范围 watermark |
 | `last_message_at` | TIMESTAMPTZ | nullable projection |
 | `last_completed_turn_at` | TIMESTAMPTZ | nullable projection |
 | `created_at` | TIMESTAMPTZ | DB default |
@@ -273,9 +278,10 @@ UNIQUE (id, account_id)
 UNIQUE (id, account_id, contact_id, account_peer_id)
 CHECK (mode_version >= 1)
 CHECK (content_revision >= 0)
+CHECK (base_mode_override IS NULL OR base_mode_override IN ('AUTO','HUMAN','COPILOT'))
 ```
 
-mode 和两个 version 位于同一行，是发送前 row lock/CAS 的事实源。缓存中的 conversation 状态不能覆盖数据库值。
+conversation overlay、两个 version 和 reply watermark 位于同一行，是发送前 row lock/CAS 的事实源。effective mode 还需要组合 `account_orchestrator_states`；缓存中的状态不能覆盖数据库值。
 
 ## 6. Message、event 与 media
 
@@ -321,7 +327,7 @@ CHECK (octet_length(update_fingerprint) = 32)
 | `sender_account_peer_id` | UUIDv7 | nullable composite FK |
 | `direction` | TEXT | `incoming/outgoing` |
 | `role` | TEXT | `user/assistant/system` |
-| `source` | TEXT | `telegram_user/ai/proactive_ai/human/system_pending/system` |
+| `source` | TEXT | `telegram_user/ai/proactive_ai/copilot_approved/human/system_pending/system` |
 | `source_status` | TEXT | `resolved/pending/corrected` |
 | `current_revision_no` | INTEGER | 从 1 开始；tombstone 仍保留最后 revision number |
 | `grouped_id` | BIGINT | nullable |
@@ -478,9 +484,37 @@ UNIQUE (message_id, reaction_key)
 
 ## 7. Conversation、turn 与发送
 
-### 7.1 `conversation_mode_history`
+### 7.1 `account_orchestrator_states`
 
-`conversations.mode/mode_version` 保存当前事实，本表保存不可变变更历史。
+每个 Telegram account 一行，保存不需要批量改写 conversation 的全局控制事实：
+
+| 字段 | 类型 | 约束与语义 |
+|---|---|---|
+| `account_id` | UUIDv7 | PK/FK accounts |
+| `default_base_mode` | TEXT | `AUTO/HUMAN/COPILOT` |
+| `global_paused` | BOOLEAN | 默认 false |
+| `maintenance_state` | TEXT | `inactive/draining/active` |
+| `temporary_takeover_enabled` | BOOLEAN | V1 默认 false |
+| `temporary_takeover_seconds` | INTEGER | positive，默认 600 |
+| `resume_pending_policy` | TEXT | V1 只允许 `ignore`；future 可加 `ask` |
+| `resume_floor_event_id` | BIGINT | nullable account-level lazy floor |
+| `control_version` | BIGINT | 从 1 开始单调递增 |
+| `updated_by` | TEXT | internal admin/system ref |
+| `updated_at` | TIMESTAMPTZ | 受控更新 |
+
+```text
+CHECK (default_base_mode IN ('AUTO','HUMAN','COPILOT'))
+CHECK (maintenance_state IN ('inactive','draining','active'))
+CHECK (resume_pending_policy = 'ignore')
+CHECK (temporary_takeover_seconds > 0)
+CHECK (control_version >= 1)
+```
+
+V1 将 future `ask` 保留为 migration 扩展点，但当前数据库 CHECK 明确拒绝它，避免配置出没有完整状态机的半成品功能。
+
+### 7.2 `conversation_mode_history`
+
+`conversations` 的 override/overlay 与 `mode_version` 保存当前事实，本表保存不可变变更历史。
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -488,9 +522,10 @@ UNIQUE (message_id, reaction_key)
 | `account_id` | UUIDv7 | FK accounts |
 | `conversation_id` | UUIDv7 | composite FK conversations |
 | `mode_version` | BIGINT | 与更新后的 conversation 一致 |
-| `previous_mode` | TEXT | nullable，首次初始化为空 |
-| `new_mode` | TEXT | NOT NULL |
-| `reason` | TEXT | `control/human_outgoing/global_pause/maintenance/system` |
+| `change_kind` | TEXT | `base_override/contact_pause/temporary_human/human_outgoing/cancel/policy` |
+| `previous_state` | TEXT | nullable 受控状态，不放 JSON/正文 |
+| `new_state` | TEXT | nullable 受控状态 |
+| `reason` | TEXT | stable reason code |
 | `actor_type` | TEXT | `admin/human/system` |
 | `actor_ref` | TEXT | nullable internal ref，不存显示名 |
 | `created_at` | TIMESTAMPTZ | DB default |
@@ -501,7 +536,9 @@ UNIQUE (conversation_id, mode_version)
 
 同一事务必须同时更新 `conversations` 并插入 history；不允许只写 history。
 
-### 7.2 `conversation_turns`
+`account_control_history` 以 `(account_id, control_version)` 唯一，记录 account default、global pause、maintenance、takeover policy 和 account block 版本变化。两类 history 都不复制 message/draft 正文。
+
+### 7.3 `conversation_turns`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -513,9 +550,14 @@ UNIQUE (conversation_id, mode_version)
 | `supersedes_turn_id` | UUIDv7 | nullable self FK |
 | `collection_sequence` | BIGINT | conversation 内单调序号 |
 | `active_generation_no` | INTEGER | 从 0 开始 |
-| `mode_snapshot` | TEXT | seal 时模式 |
+| `base_mode_snapshot` | TEXT | seal 时 resolved base mode |
+| `base_mode_source_snapshot` | TEXT | `account_default/conversation_override` |
+| `effective_mode_snapshot` | TEXT | seal 时 overlay 解析后的模式 |
+| `account_control_version_snapshot` | BIGINT | seal 时 account control version |
 | `mode_version_snapshot` | BIGINT | seal 时版本 |
 | `content_revision_snapshot` | BIGINT | seal 时 conversation revision |
+| `resume_floor_event_id_snapshot` | BIGINT | nullable |
+| `coverage_event_id_snapshot` | BIGINT | nullable |
 | `debounce_seconds` | INTEGER | positive server policy snapshot |
 | `hard_cap_seconds` | INTEGER | positive server policy snapshot |
 | `collect_started_at` | TIMESTAMPTZ | NOT NULL |
@@ -537,7 +579,7 @@ CHECK (active_generation_no >= 0)
 
 对允许并存的状态分别建立 partial unique index，例如同一 conversation 至多一个 `collecting` turn、至多一个 `generating/output_ready/sending` turn。replacement collection 与正在等待 3 秒 deadline 的旧 run 可以同时存在，因此不能用一个过宽的“所有非终态唯一”索引。
 
-### 7.3 `turn_messages`
+### 7.4 `turn_messages`
 
 保存 turn 输入 membership 的不可变快照。
 
@@ -559,7 +601,7 @@ UNIQUE (turn_id, ordinal)
 
 turn、message 和 revision 使用包含 account/conversation/message 的最宽 composite FK。message edit 后 replacement turn 必须引用新 revision；旧 turn 保持原 revision ref，以便解释 discarded run。
 
-### 7.4 `context_manifests`
+### 7.5 `context_manifests`
 
 Context Contract 后续定义装配算法，本表先固定可复现快照的 identity。
 
@@ -580,7 +622,7 @@ Context Contract 后续定义装配算法，本表先固定可复现快照的 id
 UNIQUE (turn_id, builder_version, manifest_sha256)
 ```
 
-### 7.5 `context_manifest_items`
+### 7.6 `context_manifest_items`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -605,7 +647,7 @@ CHECK typed source foreign key 恰好符合 source_type
 
 正文由 version FK 重建，manifest 本身不复制 message/memory text。若 source 后续被 Telegram delete/contact purge 擦除，manifest 仍能解释选择过哪个 ID，但不能恢复已删除正文。
 
-### 7.6 `model_runs`
+### 7.7 `model_runs`
 
 表示一次逻辑模型运行，不保存完整请求或 raw response。
 
@@ -620,6 +662,7 @@ CHECK typed source foreign key 恰好符合 source_type
 | `purpose` | TEXT | 细分业务目的 |
 | `generation_no` | INTEGER | turn 内 generation；后台任务可为 1 |
 | `state` | TEXT | Message Lifecycle model run 状态 |
+| `account_control_version_snapshot` | BIGINT | nullable；conversation/proactive run 的 global gate snapshot |
 | `config_version_id` | UUIDv7 | 不可变 config snapshot FK |
 | `credential_version_id` | UUIDv7 | 同 role credential snapshot FK，不含 secret |
 | `context_manifest_id` | UUIDv7 | nullable FK |
@@ -651,7 +694,7 @@ UNIQUE (id, account_id, conversation_id, turn_id, logical_role)
 
 业务输出由目标表反向引用 `model_run_id`：Main AI 由 outbound intent 引用，Memory Agent 由 proposal 引用，Proactive Agent 由 decision 引用。避免 `model_runs` 使用不可约束的 polymorphic output ID。
 
-### 7.7 `model_run_attempts`
+### 7.8 `model_run_attempts`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -674,7 +717,7 @@ UNIQUE (model_run_id, attempt_no)
 
 attempt 不保存 API key、header、prompt、消息正文或 raw body。
 
-### 7.8 `turn_grace_authorizations`
+### 7.9 `turn_grace_authorizations`
 
 持久化条件式 3 秒发送例外，不能只保存在进程内存。
 
@@ -695,7 +738,71 @@ CHECK 要求 `model_role = 'main_ai'` 且 `model_completed_at <= grace_deadline_
 
 authorization 使用 `(model_run_id, account_id, conversation_id, turn_id, model_role)` composite FK 保证 run 确属该 turn。`turn_grace_events` 以 `(authorization_id, message_event_id)` 为主键，列明唯一允许忽略的 `message.incoming.created` revision delta。edit、delete、human outgoing 或 mode change 不得插入该表。
 
-### 7.9 `outbound_intents`
+### 7.10 COPILOT draft
+
+`copilot_drafts` 保存 response/proactive draft identity 和审批状态，不把 draft 塞入 generic job JSONB：
+
+| 字段 | 类型 | 约束与语义 |
+|---|---|---|
+| `id` | UUIDv7 | PK |
+| `account_id` | UUIDv7 | FK accounts |
+| `contact_id` | UUIDv7 | composite FK contacts |
+| `conversation_id` | UUIDv7 | composite FK conversations |
+| `turn_id` | UUIDv7 | composite FK turns |
+| `model_run_id` | UUIDv7 | nullable composite FK；生成开始后绑定 Main AI |
+| `model_role` | TEXT | nullable；run 存在时固定 `main_ai` |
+| `proactive_decision_id` | UUIDv7 | nullable；proactive draft provenance |
+| `draft_kind` | TEXT | `reactive/proactive` |
+| `state` | TEXT | `requested/collecting/generating/ready/editing/approved/send_queued/send_unknown/sent/ignored/expired/invalidated/failed` |
+| `current_revision_no` | INTEGER | nullable；ready 后从 1 开始 |
+| `account_control_version_snapshot` | BIGINT | NOT NULL |
+| `mode_version_snapshot` | BIGINT | NOT NULL |
+| `content_revision_snapshot` | BIGINT | NOT NULL |
+| `requested_by` | TEXT | internal admin/system ref |
+| `approved_by` | TEXT | nullable internal admin ref |
+| `requested_at` | TIMESTAMPTZ | DB default |
+| `ready_at` | TIMESTAMPTZ | nullable |
+| `approved_at` | TIMESTAMPTZ | nullable |
+| `expires_at` | TIMESTAMPTZ | nullable；ready 时为 30 分钟 deadline |
+| `terminal_at` | TIMESTAMPTZ | nullable |
+| `terminal_reason` | TEXT | nullable stable code |
+
+```text
+UNIQUE (id, account_id, conversation_id)
+UNIQUE (conversation_id)
+  WHERE state IN ('requested','collecting','generating','ready','editing','approved','send_queued','send_unknown')
+UNIQUE (proactive_decision_id)
+  WHERE proactive_decision_id IS NOT NULL
+CHECK ((model_run_id IS NULL AND model_role IS NULL) OR
+       (model_run_id IS NOT NULL AND model_role = 'main_ai'))
+CHECK ((draft_kind = 'reactive' AND proactive_decision_id IS NULL) OR
+       (draft_kind = 'proactive' AND proactive_decision_id IS NOT NULL))
+CHECK (state NOT IN ('ready','editing','approved','send_queued','send_unknown','sent')
+       OR current_revision_no IS NOT NULL)
+```
+
+`copilot_draft_revisions` 保存 immutable sensitive text：
+
+```text
+id UUIDv7 PK
+account_id
+conversation_id
+draft_id
+revision_no
+author_type model|admin_edit
+content_text
+content_sha256
+created_at
+redacted_at?
+UNIQUE (draft_id, revision_no)
+UNIQUE (id, account_id, draft_id)
+```
+
+`copilot_drafts.current_revision_no` 使用 deferrable composite FK。30 分钟 TTL 终止可操作状态，但 terminal draft正文实际保留期限由 Operations确定；contact purge/account wipe和Telegram证据delete reconciliation执行单向redaction。
+
+`copilot_action_tokens` 只保存 token hash、admin ID、draft/revision、purpose、expires/used_at；`copilot_edit_sessions` 绑定 Bot chat/admin/reply message/draft 并强制短期过期。两表都不保存 callback 明文 token 或重复 draft正文。
+
+### 7.11 `outbound_intents`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -706,9 +813,12 @@ authorization 使用 `(model_run_id, account_id, conversation_id, turn_id, model
 | `model_run_id` | UUIDv7 | NOT NULL composite FK |
 | `model_role` | TEXT | 与 source 一致的 `main_ai/proactive_agent` snapshot |
 | `proactive_decision_id` | UUIDv7 | nullable FK，延后添加 |
-| `source` | TEXT | `ai/proactive_ai` |
+| `copilot_draft_id` | UUIDv7 | nullable composite FK |
+| `approved_draft_revision_id` | UUIDv7 | nullable composite FK |
+| `source` | TEXT | `ai/proactive_ai/copilot_approved` |
 | `state` | TEXT | Message Lifecycle intent 状态 |
 | `generation_no` | INTEGER | NOT NULL |
+| `account_control_version_snapshot` | BIGINT | NOT NULL |
 | `mode_version_snapshot` | BIGINT | NOT NULL |
 | `content_revision_snapshot` | BIGINT | NOT NULL |
 | `idempotency_key` | BYTEA | 32-byte stable key |
@@ -737,17 +847,22 @@ UNIQUE (account_id, conversation_id, telegram_message_id)
 UNIQUE (turn_id, generation_no, source)
 UNIQUE (proactive_decision_id)
   WHERE proactive_decision_id IS NOT NULL
+UNIQUE (copilot_draft_id)
+  WHERE copilot_draft_id IS NOT NULL
 CHECK (octet_length(idempotency_key) = 32)
 CHECK (model_run_id IS NOT NULL)
 CHECK ((source = 'ai' AND model_role = 'main_ai' AND turn_id IS NOT NULL
-        AND proactive_decision_id IS NULL) OR
+        AND proactive_decision_id IS NULL AND copilot_draft_id IS NULL) OR
        (source = 'proactive_ai' AND model_role = 'proactive_agent'
-        AND proactive_decision_id IS NOT NULL))
+        AND proactive_decision_id IS NOT NULL AND copilot_draft_id IS NULL) OR
+       (source = 'copilot_approved' AND model_role = 'main_ai'
+        AND turn_id IS NOT NULL AND proactive_decision_id IS NULL
+        AND copilot_draft_id IS NOT NULL AND approved_draft_revision_id IS NOT NULL))
 ```
 
-`(model_run_id, account_id, conversation_id, model_role)` 使用 composite FK 指向 model run；AI turn 还以包含 `turn_id` 的最宽 FK 保证 run 确属该 turn，不能把 Memory Agent 的输出或其他会话 run 错绑到发送。proactive intent 的 decision FK 同样包含 account/conversation scope。同一 intent 的所有发送重试复用 `telegram_random_id`。content_text 在 intent reconciled 后仍可短期保留用于审计一致性，但 contact purge/account wipe 必须擦除；默认长期正文事实是 reconciled `messages/message_revisions`。
+`(model_run_id, account_id, conversation_id, model_role)` 使用 composite FK 指向 model run；AI/COPILOT turn 还以包含 `turn_id` 的最宽 FK 保证 run 确属该 turn，不能把 Memory Agent 的输出或其他会话 run 错绑到发送。proactive intent 的 decision FK、COPILOT intent 的 draft/revision FK 同样包含 account/conversation scope。同一 intent 的所有发送重试复用 `telegram_random_id`。content_text 在 intent reconciled 后仍可短期保留用于审计一致性，但 contact purge/account wipe 必须擦除；默认长期正文事实是 reconciled `messages/message_revisions`。
 
-### 7.10 `outbound_attempts`
+### 7.12 `outbound_attempts`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -1149,12 +1264,14 @@ updated_at
 | `contact_id` | UUIDv7 | composite FK contacts |
 | `conversation_id` | UUIDv7 | composite FK conversations |
 | `idempotency_key` | BYTEA | 32-byte，候选/预算窗口稳定键 |
-| `state` | TEXT | `candidate/rejected/approved/generating/send_ready/sent/skipped/failed` |
+| `state` | TEXT | `candidate/rejected/approved/generating/send_ready/draft_ready/sent/skipped/failed` |
 | `decision_code` | TEXT | 受控原因，不存完整 chain-of-thought |
 | `rule_snapshot_schema_version` | SMALLINT | NOT NULL |
 | `rule_snapshot` | JSONB | 不含证据 ID 的规则数值与结果 |
 | `relationship_state_version` | BIGINT | snapshot |
+| `account_control_version_snapshot` | BIGINT | global gate snapshot |
 | `mode_version_snapshot` | BIGINT | snapshot |
+| `content_revision_snapshot` | BIGINT | conversation content snapshot |
 | `budget_version` | BIGINT | snapshot |
 | `model_run_id` | UUIDv7 | nullable composite FK |
 | `model_role` | TEXT | run 存在时固定为 `proactive_agent` |
@@ -1424,9 +1541,55 @@ UNIQUE (account_id, state_key) WHERE account_id IS NOT NULL
 UNIQUE (state_key) WHERE account_id IS NULL
 ```
 
-global pause、maintenance mode、预算代次等安全关键值应提升为 typed column 或独立表；不得只依赖任意 JSONB。`agent_state_history` 保存 versioned change metadata。
+global pause、maintenance mode、预算代次等安全关键值应提升为 typed column 或独立表；Conversation Orchestrator 使用第 7.1 节 typed table，不得把这些值重复放入任意 JSONB。`agent_state_history` 只保存其他低频 versioned change metadata。
 
-### 12.2 服务状态
+### 12.2 Control command 与 operational block
+
+`control_commands` 持久化 Control Bot 写操作的幂等 identity：
+
+```text
+id UUIDv7 PK
+bot_identity_id
+telegram_update_id BIGINT
+admin_user_id BIGINT
+command_kind
+scope_type
+account_id
+conversation_id?
+expected_version?
+result_version?
+state received|confirmed|applied|rejected|expired
+idempotency_key BYTEA
+result_code
+created_at
+completed_at?
+UNIQUE (bot_identity_id, telegram_update_id)
+UNIQUE (idempotency_key)
+```
+
+command row 不保存 contact/message/draft 正文或 callback token。重复 update 返回既有 result，不再次递增 control/mode version。
+
+`orchestrator_blocks` 使用 typed scope：
+
+```text
+id UUIDv7 PK
+account_id
+model_profile_id?
+conversation_id?
+turn_id?
+reason_code
+state active|probing|cleared
+version
+first_seen_at
+retry_after?
+last_probe_at?
+cleared_at?
+CHECK scope columns match scope_type
+```
+
+同一 scope/reason 至多一个 active generation。block 不保存 provider raw body；clear 后旧 row 保留最小 operational audit。
+
+### 12.3 服务状态
 
 `service_instances` 保存当前 heartbeat projection：
 
@@ -1445,7 +1608,7 @@ UNIQUE (service_name, instance_id)
 
 `service_status_events` 使用 BIGINT IDENTITY append-only 记录状态变化，不按每次 heartbeat 写历史，避免无价值增长。
 
-### 12.3 `audit_log`
+### 12.4 `audit_log`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -1492,6 +1655,8 @@ updated_at
 | read/typing/service transient event | 短期 retention |
 | debug raw capture | 强制短期 TTL，默认功能关闭 |
 | model/outbound attempts | terminal 后有限 retention，保留错误码和 usage，不保留 raw body |
+| COPILOT draft/revision/edit session | active 时可操作；ready 30 分钟过期，terminal 正文有限 retention |
+| control command/action token | command metadata 有界 retention；token/session 强制短期 TTL |
 | audit | 有界长期 retention，不能复制 sensitive content |
 | credential retired version | 受控轮换后销毁 ciphertext，保留非秘密版本审计 |
 
@@ -1518,7 +1683,7 @@ updated_at
 
 1. 创建 durable erasure request，contact/conversation 标记 `deleting`，关闭自动发送。
 2. 在同一逻辑边界让 messages、media、memories、summaries、embeddings、proactive candidates 不再可见。
-3. 擦除所有 message revisions、outbound payload、memory/summary versions、debug capture 和关系派生正文。
+3. 擦除所有 message revisions、COPILOT draft revisions/edit sessions、outbound payload、memory/summary versions、debug capture 和关系派生正文。
 4. 删除 `media-data` 物理对象并确认结果。
 5. 删除或匿名化可删除的 operational rows；保留最小 tombstone、erasure ledger 和不含正文的法定/安全 audit。
 6. 完成后 conversation/contact 标记 deleted，写 completion audit。
@@ -1623,7 +1788,7 @@ last_error_code?
 
 ### 14.2 One-way redaction
 
-message revision、debug capture、model run content fingerprint、outbound payload、proposal payload、memory/summary version 和 credential version 的 redaction/destroy 只允许：
+message revision、COPILOT draft revision、debug capture、model run content fingerprint、outbound payload、proposal payload、memory/summary version 和 credential version 的 redaction/destroy 只允许：
 
 ```text
 content present -> content cleared + redacted/destroyed timestamp
@@ -1656,13 +1821,20 @@ Context 查询 active message 使用 partial/covering index 时包含 `deleted_a
 ### 15.2 Turn、run 与 intent
 
 ```text
+account_orchestrator_states(account_id) PRIMARY KEY
 conversation_turns(conversation_id, collection_sequence) UNIQUE
 conversation_turns(conversation_id, state, quiet_deadline_at)
 model_runs(turn_id, logical_role, generation_no) UNIQUE
 model_runs(state, started_at)
   WHERE state IN ('queued','running','cancel_requested','failed_retryable')
+copilot_drafts(conversation_id)
+  UNIQUE WHERE state IN ('requested','collecting','generating','ready','editing','approved','send_queued','send_unknown')
+copilot_drafts(expires_at)
+  WHERE state IN ('ready','editing')
+copilot_draft_revisions(draft_id, revision_no) UNIQUE
 outbound_intents(account_id, idempotency_key) UNIQUE
 outbound_intents(account_id, telegram_random_id) UNIQUE
+outbound_intents(copilot_draft_id) UNIQUE WHERE copilot_draft_id IS NOT NULL
 outbound_intents(state, next_attempt_at)
   WHERE state IN ('pending','sending','sent_unconfirmed','retry_wait','unknown')
 outbound_intents(conversation_id, telegram_message_id)
@@ -1678,6 +1850,11 @@ transactional_outbox(id) WHERE published_at IS NULL
 debug_payload_captures(expires_at) WHERE redacted_at IS NULL
 media_objects(expires_at) WHERE status = 'ready' AND expires_at IS NOT NULL
 media_objects(delete_requested_at) WHERE status = 'delete_pending'
+orchestrator_blocks(scope_type, account_id, reason_code)
+  WHERE state IN ('active','probing')
+control_commands(bot_identity_id, telegram_update_id) UNIQUE
+copilot_action_tokens(expires_at) WHERE used_at IS NULL
+copilot_edit_sessions(expires_at) WHERE completed_at IS NULL
 ```
 
 ### 15.4 Memory 与 proactive
@@ -1733,7 +1910,7 @@ V1 不分区。`message_events`、`audit_log`、`model_run_attempts`、`outbound
 
 在 conversation row lock 下：
 
-1. 确认 mode、mode_version、content_revision 和 active turn。
+1. 确认 account control version、effective mode、mode_version、content_revision、resume floor、coverage 和 active turn。
 2. seal turn membership/revision snapshot。
 3. 创建 context manifest 和 model run `queued`。
 4. 更新 turn `generating`，写 outbox 后 commit。
@@ -1743,7 +1920,7 @@ provider 返回后使用 model run state/generation CAS 提交 succeeded/discard
 
 ### 16.4 Outbound intent 与 Telegram send
 
-在 conversation row lock/CAS 事务中执行所有发送门禁，创建唯一 outbound intent 并 commit。事务外调用 Telegram。RPC 返回或 listener update 在新事务按 random ID/message ID 对账。
+在 account control snapshot + conversation row lock/CAS 事务中执行所有发送门禁，按 `ai/proactive_ai/copilot_approved` 的独立授权约束创建唯一 outbound intent 并 commit。事务外调用 Telegram。RPC 返回或 listener update 在新事务按 random ID/message ID 对账。
 
 如果 RPC 结果 unknown，不回滚或删除 intent；reconciler 继续使用同一 random ID。
 
@@ -1759,13 +1936,26 @@ source 确认为 human 的事务同时：
 
 - 更新 message source；
 - 递增 conversation mode_version/content_revision；
-- 写 mode/history 原因；
-- cancel active pre-send turn/run/intent；
+- 在功能启用时创建/续期 temporary HUMAN deadline；
+- 写 mode/history 原因并更新 response coverage；
+- cancel active pre-send turn/run/intent/COPILOT draft；
 - refresh memory job 和 outbox。
 
 如果 source 仍是 `system_pending`，不能提前作为 human 提交上述不可逆状态；reconciler 必须先解析。
 
-### 16.7 Memory proposal acceptance
+### 16.7 COPILOT approval
+
+`control` 先按 Bot update/action token 幂等写 approval command，不直接发送。`app` 在 account snapshot + conversation row lock 下：
+
+1. 锁 draft，确认 `ready`、exact revision、admin、token、30 分钟 deadline。
+2. 确认 effective COPILOT、account/mode/content version 和 turn evidence 未变化。
+3. 将 action token 标记 used、draft 标记 approved。
+4. 创建唯一 `source=copilot_approved` outbound intent并写outbox。
+5. commit 后由 app 执行 Telegram RPC。
+
+任一步失败整体回滚；已 used token、旧 revision 或 invalidated draft 不能再次批准。RPC unknown 后只运行 intent reconciliation。
+
+### 16.8 Memory proposal acceptance
 
 在 account/contact scope lock 下：
 
@@ -1778,7 +1968,7 @@ source 确认为 human 的事务同时：
 
 任一步失败整体回滚；不能留下 active memory 没有 evidence。
 
-### 16.8 Model config activation
+### 16.9 Model config activation
 
 在 profile row lock 下：
 
@@ -1790,9 +1980,15 @@ source 确认为 human 的事务同时：
 
 进行中的 model run 继续引用旧 config/credential version。API key 独立轮换不创建 config version；销毁 retired credential ciphertext 前必须确认没有需要恢复/重试的非终态 run。
 
-### 16.9 Job claim
+### 16.10 Job claim
 
 worker 用短事务 `SELECT ... FOR UPDATE SKIP LOCKED LIMIT n` 领取 job，设置随机 owner 和 expiry 后 commit。执行任务不持有行锁；完成时使用 `(job_id, lease_owner, state, version)` CAS。
+
+### 16.11 Account 与 conversation control
+
+account default/global pause/maintenance 只锁 `account_orchestrator_states`，递增 `control_version`、追加 history/outbox，不批量锁 conversations。旧 run/intent 通过 snapshot gate 失效。
+
+conversation override/contact pause/takeover/cancel 锁 conversation，单次动作只递增一次 `mode_version` 并追加 history。resume、takeover expiry和operational block clear同时推进automation resume floor，不创建backlog turn。重复同值command写`no_change`result但不递增版本。
 
 ## 17. Alembic migration
 
@@ -1856,7 +2052,7 @@ runtime role 不拥有 schema，不可修改 audit 历史，不可读取其他�
 
 ## 19. 后续文档边界
 
-Conversation Orchestrator 可以扩展 mode state、temporary takeover 和 COPILOT draft 表，但必须使用 `mode_version`、turn snapshot 和 outbound gate。
+Conversation Orchestrator 的 account control、mode overlay、reply floor、temporary takeover 和 COPILOT draft 契约以 `docs/architecture/04-conversation-orchestrator.md` 为准；后续修改必须同时更新本文的字段、约束与 migration。
 
 Memory Pipeline 可以扩展 memory typed schemas、proposal validation 和 consolidation 状态，但必须使用 immutable version、evidence 和 watermark。
 
@@ -1873,12 +2069,13 @@ Test Strategy 负责把本文的约束、race、migration 和 erasure 恢复声�
 - [x] account、peer、account peer、contact、conversation 和 message identity 已定义。
 - [x] V1 单账号与未来多账号 composite boundary 已定义。
 - [x] message event/revision、media、reaction、turn、manifest、run、intent、attempt 和 job 表已定义。
+- [x] account control、mode overlay、reply floor、operational block、COPILOT draft/revision/action 和 approval intent 已定义。
 - [x] Memory identity/version/proposal/evidence/relation、summary/watermark 和 embedding space 已定义。
 - [x] life event、intention、relationship state、proactive decision、agent/service state 和 audit 已定义。
 - [x] 四个独立模型 role、endpoint、draft、config version 和独立 credential version 已定义。
 - [x] canonical generation 字段与 protocol-options discriminated JSONB 边界已定义。
 - [x] 主键、业务唯一键、composite foreign key、CHECK 和必要索引已定义。
 - [x] UTC 时间、状态类型、JSONB、敏感数据和账号隔离约定已定义。
-- [x] ingest、turn、send、edit/delete、human outgoing、memory、config 和 job 事务边界已定义。
+- [x] ingest、control、turn、send、edit/delete、human outgoing、COPILOT approval、memory、config 和 job 事务边界已定义。
 - [x] memory forget、contact purge、account wipe、export、backup 和 erasure ledger 已定义。
 - [x] Alembic expand/migrate/contract 与 migration 验证规则已定义。

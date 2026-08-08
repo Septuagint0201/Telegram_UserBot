@@ -33,7 +33,7 @@
 本设计需要保证：
 
 - Telegram update 重复、乱序或重放时不会重复回复。
-- AI、proactive AI 和真人共享同一账号时，outgoing source 仍可确定并对账。
+- AI、proactive AI、COPILOT approved 和真人共享同一账号时，outgoing source 仍可确定并对账。
 - 同一 conversation 同时只有一个有权创建自动回复副作用的协调者。
 - 模型结果即使无法取消，也不能绕过 mode、revision 和 intent 门禁发送。
 - 进程在持久化、模型调用、Telegram RPC 或确认阶段崩溃后可以安全恢复。
@@ -137,7 +137,7 @@ payload
 message_key = account_id + chat_id + telegram_message_id
 direction = incoming | outgoing
 role = user | assistant | system
-source = telegram_user | ai | proactive_ai | human | system_pending | system
+source = telegram_user | ai | proactive_ai | copilot_approved | human | system_pending | system
 text_content?
 caption?
 reply_to_message_id?
@@ -317,7 +317,7 @@ outgoing update 的分类顺序：
 3. 若存在同 chat 的 `sending`/`unknown` intent，暂存为 `system_pending` 并立即运行 reconciler。
 4. 不存在系统发送候选时，分类为 `human`。
 
-`system_pending` 不进入长期上下文，直到解析为 `ai`、`proactive_ai` 或 `human`。content hash、发送时间和 reply target 只能用于缩小候选或告警，不能在多个候选时自行决定 source。
+`system_pending` 不进入长期上下文，直到解析为 `ai`、`proactive_ai`、`copilot_approved` 或 `human`。content hash、发送时间和 reply target 只能用于缩小候选或告警，不能在多个候选时自行决定 source。
 
 真人 outgoing 一经确定：
 
@@ -493,10 +493,10 @@ service message 只保存 action kind、涉及的受控 peer reference 和时间
 |---|---:|---:|---:|---:|---:|
 | AUTO | 是 | 是 | 是 | 是 | 是 |
 | HUMAN | 是 | 否 | 否 | 否 | 否 |
-| COPILOT | 是 | 可生成 draft | 否 | 否 | 否 |
+| COPILOT | 是 | 响应式仅 `/draft`；proactive 可生成待批草稿 | 仅管理员批准后 | 否 | 否 |
 | PAUSED/maintenance | 是，依赖持久化可用 | 否 | 否 | 否 | 否 |
 
-COPILOT draft 是内部建议，不创建 Telegram outbound intent，除非真人显式采用并由真人客户端发送；最终 Telegram outgoing 仍按 `source=human` 摄取。
+COPILOT draft 默认不创建 Telegram outbound intent。管理员在 Control Bot 对精确 draft revision 执行 Send 后，由 `app` 在完整门禁下创建唯一 intent，最终 Telegram outgoing 按 `source=copilot_approved` 摄取并保留是否经过人工编辑的 provenance。真人在普通 Telegram 客户端独立发送仍是 `source=human`。响应式 COPILOT incoming 不自动生成草稿，具体状态机见 `docs/architecture/04-conversation-orchestrator.md`。
 
 ### 13.2 Read acknowledgement
 
@@ -522,14 +522,15 @@ typing 刷新是可丢失的临时副作用，不进入可靠队列。进程崩�
 
 同一 `conversation_key` 最多一个 active coordinator。Redis lease 使用随机 owner token、有限 TTL 和续租；只有 owner 可以续租或释放。lease 丢失时协调者必须停止创建新副作用。
 
-Redis lease 不是正确性事实源。PostgreSQL 中的 turn state、active generation、`mode_version`、`content_revision`、intent 唯一约束和 compare-and-set 更新共同防止重复发送。即使两个进程短暂都认为持有 lease，也只有一个能提交合法状态转换。
+Redis lease 不是正确性事实源。PostgreSQL 中的 account `control_version`、turn state、active generation、`mode_version`、`content_revision`、draft/approval revision、intent 唯一约束和 compare-and-set 更新共同防止重复发送。即使两个进程短暂都认为持有 lease，也只有一个能提交合法状态转换。
 
 ### 14.2 发送前检查
 
 从 `output_ready` 创建 outbound intent 必须在 conversation 数据库锁/原子 CAS 内完成，并同时检查：
 
 ```text
-mode = AUTO
+effective mode permits intent source
+account_control_version = run/decision/draft snapshot
 mode_version = run.mode_version_snapshot
 global pause and maintenance gates = open
 turn = active and state = output_ready
@@ -662,7 +663,7 @@ correlation 至少可以从 event -> message -> turn -> model run -> outbound in
 | 真人 outgoing 与模型返回竞态 | `mode_version` 使 AI 结果无法发送 |
 | Control Bot 切 HUMAN 与模型返回竞态 | 非 AUTO 门禁阻止发送 |
 | intent 提交后进程崩溃 | 使用同一 random ID 对账，不重复发送 |
-| outgoing listener 先于 send caller 返回 | source 最终为 ai/proactive_ai，不误判 human |
+| outgoing listener 先于 send caller 返回 | source 最终为 ai/proactive_ai/copilot_approved，不误判 human |
 | photo 与 image document | 验证后以 `detail=auto` 进入支持图片的模型 |
 | 伪造 image MIME 或超限图片 | 拒绝，不传 provider，不回复猜测内容 |
 | voice/video/sticker | 不下载，只保存允许的元数据 |

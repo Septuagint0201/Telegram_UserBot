@@ -17,8 +17,9 @@ The planned system will:
 - use a Telethon Session to control an authenticated Telegram user account;
 - observe incoming messages and outgoing messages sent by the account owner;
 - generate automatic and proactive messages under the same Telegram identity;
-- retain raw conversation history and derived long-term memories;
-- allow an administrator to change conversation modes and model configuration through a Control Bot and Telegram Web App;
+- retain canonical conversation revisions and derived long-term memories;
+- allow an administrator to change conversation modes and non-secret model configuration through a Control Bot, while the Telegram Web App remains key-only;
+- present COPILOT response or proactive drafts to an allowlisted administrator through the Control Bot for explicit send, edit, or ignore decisions;
 - store model endpoint credentials and use them for outbound model API requests; and
 - maintain persistent account, database, cache, queue, and model configuration state.
 
@@ -45,12 +46,13 @@ The design currently specifies:
 - a persistent Telethon Session file mounted only by the Telegram `app` process;
 - a private media volume for validated incoming images, with no general public media route;
 - outbound connections to Telegram and administrator-configured model endpoints;
+- Control Bot messages that may contain a minimum contact label and COPILOT draft text in the administrator's Telegram chat;
 - a public HTTPS route limited to the key-only Telegram Web App and its dedicated credential API; and
 - no general public database, Redis, health, or management endpoint.
 
 Canonical message and memory content is designed to remain queryable in PostgreSQL, protected by host-disk encryption, encrypted backups, network isolation, and database permissions. Full raw Telegram updates and provider request or response payloads are disabled by default; temporary raw diagnostic capture, when explicitly enabled, must be separately encrypted and have a mandatory expiration.
 
-Canonical messages and active memories do not automatically expire by default. Message edits retain version history, while a Telegram delete removes content from every stored revision and removes associated media, then isolates and rebuilds or redacts derived memories, summaries, and embeddings before leaving only non-content tombstone and audit metadata. Memory forget, contact-level purge, and account-wide wipe are separate durable operations. Backup restoration must replay an erasure ledger before model access or automatic sending resumes. Exact time limits for media, operational history, and diagnostic data remain to be set by the Operations design. The current documentation itself performs no collection, network request, telemetry, persistence, or code execution.
+Canonical messages and active memories do not automatically expire by default. Message edits retain version history, while a Telegram delete removes content from every stored revision and removes associated media, then isolates and rebuilds or redacts derived memories, summaries, embeddings, and COPILOT drafts before leaving only non-content tombstone and audit metadata. COPILOT draft actions expire after 30 minutes; the later Operations design must set the shorter or equal storage retention for terminal draft content and Bot-side notifications. Memory forget, contact-level purge, and account-wide wipe are separate durable operations. Backup restoration must replay an erasure ledger before model access or automatic sending resumes. Exact time limits for media, other operational history, and diagnostic data remain to be set by the Operations design. The current documentation itself performs no collection, network request, telemetry, persistence, or code execution.
 
 ## Planned safeguards and controls
 
@@ -58,8 +60,11 @@ The architecture requires:
 
 - a single owner process for each Telethon Session;
 - administrator allowlisting and Telegram Web App authentication;
-- manual AUTO, HUMAN, COPILOT, PAUSED, and maintenance controls;
-- version checks that prevent stale AI results from being sent after takeover or mode changes;
+- account-default and contact-override AUTO, HUMAN, and COPILOT controls, with PAUSED, maintenance, and temporary HUMAN overlays;
+- account-control, conversation-mode, content, turn, draft-revision, and approval checks that prevent stale AI results from being sent;
+- no automatic backlog reply after pause, takeover, or dependency recovery unless the administrator explicitly invokes the pending-reply command;
+- allowlisted, single-use, short-lived Control Bot action tokens for COPILOT approval, followed by an independent final send gate in the Telethon-owning `app` process;
+- distinct `copilot_approved` provenance so approved AI drafts are not silently classified as independently written human messages;
 - outbound intent records, idempotency, and Telegram message reconciliation;
 - proactive-message budgets, quiet hours, intervals, and final send gates;
 - API key input through HTTPS rather than Telegram messages;
@@ -80,7 +85,7 @@ A future deployment will hold credentials capable of controlling a Telegram acco
 
 Even with the planned controls:
 
-- compromise of the host, Telethon Session, Control Bot token, master key, or model credential may expose sensitive data or account control;
+- compromise of the host, Telethon Session, Control Bot token, administrator Telegram account, master key, or model credential may expose sensitive data or account control;
 - an incorrect mode, prompt, memory, or proactive decision may send an inappropriate message;
 - contacts may not distinguish AI-generated and human-generated messages under the shared identity;
 - long-term storage increases privacy and breach impact; and

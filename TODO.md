@@ -27,6 +27,11 @@
 - [x] Telegram 消息发送采用 outbound intent、幂等写入和发送结果对账。
 - [x] AI 与真人 outgoing 消息通过系统发送记录和 Telegram message ID 对账区分。
 - [x] 手动模式控制优先，使用会话模式版本门禁阻止过期 AI 结果发送。
+- [x] 基础模式采用 account default + conversation override；pause、maintenance 和 temporary HUMAN 作为覆盖层。
+- [x] 全局控制使用独立 `account_control_version`，不批量改写所有 conversation 的 `mode_version`。
+- [x] 恢复 AUTO、pause 或 dependency 后默认不补回复 backlog；V1 只允许显式 `/reply_pending`。
+- [x] COPILOT 响应式草稿仅由 `/draft` 触发，批准代发记录为 `source=copilot_approved`。
+- [x] temporary HUMAN 默认关闭；启用后使用 10 分钟 inactivity window，恢复时不补 backlog。
 - [x] V1 自动对话只覆盖非 Bot 用户的一对一 private chat。
 - [x] V1 下载并理解验证后的图片，图片预算为 `auto`；语音、音频、视频和其他非图片媒体不下载二进制。
 - [x] 生成期间收到新 incoming 时，完整 API 结果在 run 开始 3 秒内返回则允许发送，否则 supersede 并合并重生成。
@@ -98,14 +103,14 @@
 
 目标文档：`docs/architecture/04-conversation-orchestrator.md`
 
-- [ ] 定义 AUTO、HUMAN、COPILOT、PAUSED 和维护状态的语义。
-- [ ] 定义 Control Bot 命令、真人发言和系统故障触发的状态转换。
-- [ ] 定义全局模式、联系人模式和临时接管状态的优先级。
-- [ ] 定义 `mode_version` 的递增条件和发送前验证规则。
-- [ ] 定义 debounce 后的 conversation turn 输入和输出契约。
-- [ ] 定义 COPILOT 草稿的投递、接受、修改、忽略和过期流程。
-- [ ] 定义恢复 AUTO 的显式策略；自动恢复作为可配置能力，不作为默认假设。
-- [ ] 定义每次模式变更和 AI 决策所需的审计信息。
+- [x] 定义 AUTO、HUMAN、COPILOT、PAUSED 和维护状态的语义。
+- [x] 定义 Control Bot 命令、真人发言和系统故障触发的状态转换。
+- [x] 定义全局模式、联系人模式和临时接管状态的优先级。
+- [x] 定义 `mode_version` 的递增条件和发送前验证规则。
+- [x] 定义 debounce 后的 conversation turn 输入和输出契约。
+- [x] 定义 COPILOT 草稿的投递、接受、修改、忽略和过期流程。
+- [x] 定义恢复 AUTO 的显式策略；自动恢复作为可配置能力，不作为默认假设。
+- [x] 定义每次模式变更和 AI 决策所需的审计信息。
 
 完成标准：任意模式下收到 incoming 或 outgoing 消息时，系统行为唯一且可预测。
 
@@ -205,6 +210,10 @@
 - [ ] 测试 Data Model 的 composite foreign key、partial unique、CHECK、CAS 和 one-way redaction 约束。
 - [ ] 测试 memory forget、contact purge、account wipe、backup restore 后 erasure ledger 重放和数据不复现。
 - [ ] 测试 Alembic 从空库、上一支持 revision、中断 backfill 到 head 的迁移路径。
+- [ ] 测试 account default/override、pause overlay、maintenance、BLOCKED 和 control/mode version 优先级。
+- [ ] 测试 HUMAN/COPILOT/PAUSED/temporary HUMAN/BLOCKED 恢复后不自动回复 backlog，及 `/reply_pending` 幂等范围。
+- [ ] 测试 COPILOT manual `/draft`、30 分钟 expiry、edit revision、action token、approval 和 `copilot_approved` 对账。
+- [ ] 测试 temporary HUMAN start/renew/expiry、停机补偿和 human outgoing 与 AI/COPILOT 发送竞态。
 - [ ] 测试 debounce、顺序保证、会话锁和多 worker 竞争。
 - [ ] 测试真人发送、模式切换和模型返回同时发生的竞态。
 - [ ] 测试发送前、发送中、发送后各崩溃点的恢复行为。

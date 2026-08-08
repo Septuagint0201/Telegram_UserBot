@@ -264,7 +264,7 @@ assistant / source=human:
 
 这保证真人和 AI 共同塑造同一个长期人格。
 
-`outgoing=true` 本身不能证明消息来自真人，因为 `app` 通过 Telethon 发送的 AI 消息同样属于 outgoing。系统发送前必须创建 outbound intent，发送成功后绑定 Telegram message ID。监听器通过该记录识别 `ai` 或 `proactive_ai`；无法匹配任何系统发送记录的 outgoing 消息才归类为 `human`。
+`outgoing=true` 本身不能证明消息来自真人，因为 `app` 通过 Telethon 发送的 AI 消息同样属于 outgoing。系统发送前必须创建 outbound intent，发送成功后绑定 Telegram message ID。监听器通过该记录识别 `ai`、`proactive_ai` 或 `copilot_approved`；无法匹配任何系统发送记录的 outgoing 消息才归类为 `human`。
 
 消息表使用 Telegram 账号、会话和 message ID 组成业务唯一键。同一个 update 被重复接收时只允许对账和补全状态，不得重复触发回复或记忆处理。
 
@@ -295,6 +295,7 @@ telegram_user
 ai
 human
 proactive_ai
+copilot_approved
 control
 system
 ```
@@ -328,6 +329,13 @@ source=proactive_ai
 ```
 
 代表 AI 主动发出的消息。
+
+```text
+role=assistant
+source=copilot_approved
+```
+
+代表管理员在 Control Bot 中批准、由 `app` 代发的 COPILOT 草稿。它保留是否人工编辑的 provenance，不等同于纯 `human` 写作证据。
 
 ---
 
@@ -384,6 +392,10 @@ V1 的消息生命周期基线见 `docs/architecture/02-message-lifecycle.md`。
 
 # 8. 会话模式
 
+完整状态、优先级、命令、草稿、版本与恢复契约见 `docs/architecture/04-conversation-orchestrator.md`。
+
+`AUTO/HUMAN/COPILOT` 是基础模式。account 保存默认基础模式，conversation 可以设置 override；maintenance、global/contact pause 和 temporary HUMAN 是不破坏基础模式的覆盖层。运行依赖不可用使用独立 `BLOCKED(reason)`，不把基础模式永久改成 PAUSED。
+
 建议至少提供三种主要模式。
 
 ## AUTO
@@ -424,7 +436,7 @@ AI 不自动发送回复。
 
 ## COPILOT
 
-AI 只生成建议回复，不直接发送。
+AI 只生成建议回复，不直接发送。响应式 incoming 不自动生成草稿，管理员执行 `/draft <contact>` 后才生成一次。
 
 例如：
 
@@ -442,7 +454,7 @@ AI Draft：
 - 修改
 - 忽略
 
-真人最终发出去的文本进入 `assistant` 历史。
+Control Bot 通过 Send/Edit/Ignore card 完成审批；Send 由 `app` 在完整版本门禁后代发，最终进入 `assistant` 历史并记录 `source=copilot_approved`。直接在普通 Telegram 客户端发送的内容仍是 `source=human`。
 
 这个模式非常适合训练 AI 学习真实表达风格。
 
@@ -474,7 +486,10 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 /ai 123456789
 /human 123456789
 /copilot 123456789
+/mode_inherit 123456789
 ```
+
+不带联系人时修改 account default，只影响没有 override 的 conversation；带联系人时设置 override，`/mode_inherit` 清除 override。
 
 其他建议命令：
 
@@ -514,7 +529,15 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 /resume
 ```
 
-重新运行。
+重新开放对应 pause gate 并恢复原基础模式，不自动回复暂停期间积压消息。`/pause <contact>` 和 `/resume <contact>` 操作联系人覆盖层；无参数操作 global gate。
+
+```text
+/draft <contact>
+/reply_pending <contact>
+/cancel <contact>
+```
+
+`/draft` 只在 COPILOT 手动生成一次响应式草稿；`/reply_pending` 是恢复 AUTO 后显式补一次未回应片段的唯一 V1 路径；`/cancel` 失效当前 pre-send work 但不改变基础模式。
 
 ```text
 /forget
@@ -1666,7 +1689,13 @@ identity:
 message lifecycle:
   message_events, messages, message_revisions, media_objects,
   message_media, message_reactions, conversation_turns, turn_messages,
-  context_manifests, model_runs, outbound_intents
+  context_manifests, model_runs, copilot_drafts,
+  copilot_draft_revisions, outbound_intents
+
+conversation control:
+  account_orchestrator_states, account_control_history,
+  conversation_mode_history, control_commands, orchestrator_blocks,
+  copilot_action_tokens, copilot_edit_sessions
 
 durable work:
   background_jobs, transactional_outbox, domain watermarks
@@ -1756,9 +1785,13 @@ conversation_id
 source
 state
 content_hash
+account_control_version_snapshot
 mode_version_snapshot
 content_revision_snapshot
 turn_id
+proactive_decision_id
+copilot_draft_id
+approved_draft_revision_id
 generation_no
 telegram_random_id
 telegram_message_id
@@ -1769,7 +1802,7 @@ reconciled_at
 last_error
 ```
 
-`source` 在发送前已确定为 `ai` 或 `proactive_ai`。发送前持久化稳定的 Telegram random ID，发送成功后将其映射到 Telegram message ID；监听器使用该映射与 outgoing update 对账，不能仅凭正文和时间窗口猜测来源。
+`source` 在发送前已确定为 `ai`、`proactive_ai` 或 `copilot_approved`。COPILOT intent 必须绑定唯一 draft 和 approved revision。发送前持久化 account/mode/content snapshot 与稳定的 Telegram random ID，发送成功后将其映射到 Telegram message ID；监听器使用该映射与 outgoing update 对账，不能仅凭正文和时间窗口猜测来源。
 
 ---
 
@@ -1865,23 +1898,24 @@ interaction_frequency
 
 # 40. agent_states
 
-系统级运行状态，例如：
+安全关键的 conversation control 不放入 generic agent state；它使用 typed `account_orchestrator_states`：
 
 ```text
-global_ai_enabled
-default_mode
-proactive_enabled
-maintenance_mode
+default_base_mode
+global_paused
+maintenance_state
+temporary_takeover_enabled / seconds
+resume_pending_policy
+control_version
 ```
 
-也可以保存：
+`agent_states` 只保存低频、非发送门禁的可解释拟人格状态，例如：
 
 ```text
 current_social_energy
-daily_message_budget
 ```
 
-但这些拟人格状态应该保持简单和可解释。
+主动消息预算和全局 proactive 开关同样应使用 typed policy/budget 表，而不是任意 JSONB。拟人格状态应该保持简单和可解释。
 
 ---
 
@@ -2177,21 +2211,22 @@ AI 2 秒后：
 
 造成身份割裂。
 
-因此主要保护规则是会话模式版本门禁：
+因此主要保护规则是 account control version 与会话模式版本的组合门禁：
 
 ```text
-AI 开始生成 -> 记录 mode=AUTO, mode_version=N
+AI 开始生成 -> 记录 effective=AUTO,
+                account_control_version=A, mode_version=N
         |
 真人 outgoing 或 Control Bot 切换模式
         |
 mode_version += 1，并尽力取消请求
         |
-AI 发送前重新读取 mode 和 mode_version
+AI 发送前重新读取 effective mode 和两个 version
         |
-不是 AUTO 或版本不等于 N -> 丢弃结果，不发送
+不是 AUTO 或 A/N 任一不匹配 -> 丢弃结果，不发送
 ```
 
-`mode_version` 还需要在全局 pause、维护模式和其他会使旧结果失效的控制操作中递增。发送前检查应在 conversation lock 内完成。
+account default、global pause、maintenance 和 account/model 级 block 递增 account `control_version`，不批量改写所有 conversation；联系人 override、contact pause、temporary HUMAN、真人 outgoing 和显式 cancel 递增 conversation `mode_version`。发送前检查应在 account snapshot + conversation lock 内完成。
 
 新的联系人 incoming 与真人 outgoing 采用不同规则。新的 incoming 可以按第 49 节的条件式 3 秒策略决定旧结果是否仍可发送；真人 outgoing、Control Bot 模式切换、global pause 以及发送前 edit/delete 没有宽限，始终使旧结果失效。
 
@@ -2215,9 +2250,9 @@ AUTO 只在 sealed turn 真正开始生成时标记本 turn 的 incoming 已读�
 10 分钟
 ```
 
-真人停止后再恢复 AUTO。
+10 分钟没有新的 confirmed human outgoing 后结束覆盖层，恢复原 account default 或 conversation override。
 
-这个策略可以做成可配置项。
+这个策略可以做成可配置项。到期、resume 或 dependency 恢复都会把 automation reply floor 推进到当前 event watermark，因此不会自动回复覆盖期间积压的旧消息；需要时由管理员显式执行 `/reply_pending <contact>`。
 
 V1 以 Control Bot 的手动模式切换为主要接管方式，自动 temporary HUMAN 默认关闭。
 
@@ -2385,9 +2420,11 @@ minimum interval?
 chat currently active?
 human mode?
 blocked contact?
+account/global/contact pause or maintenance?
+account_control_version and mode_version still match?
 ```
 
-满足后才进入 Main AI。Main AI 生成完成后，还需要在 conversation lock 内再次检查这些规则、幂等键和 `mode_version`，通过后才能创建 outbound intent。
+AUTO 满足后才进入 Main AI 并可能自动发送；COPILOT 下 proactive candidate 只能生成待管理员审批的草稿；HUMAN、temporary HUMAN 和 PAUSED 不生成或发送。Main AI 生成完成后，还需要在 conversation lock 内再次检查规则、幂等键、account control、mode/content version，通过后才能创建相应 draft 或 outbound intent。
 
 ---
 
@@ -2411,7 +2448,7 @@ Committed Memory + Recent Canonical Messages
       |
 Main AI
       |
-Check mode_version in Conversation Lock
+Check account control + mode/content versions in Conversation Lock
       |
 Create Outbound Intent source=ai
       |
@@ -2456,13 +2493,24 @@ Rules
    |
 Main AI
    |
-Final Rules + mode_version in Conversation Lock
+Resolve mode: AUTO sends, COPILOT creates approval draft,
+HUMAN/PAUSED skips
+      |
+Final Rules + account/mode/content versions in Conversation Lock
    |
-Create Outbound Intent source=proactive_ai
+   +-- AUTO --> Create Outbound Intent source=proactive_ai
+   |                |
+   |            Telegram Send
+   |                |
+   |            Reconcile Telegram Message ID
    |
-Telegram Send
+   +-- COPILOT --> Create Approval Draft
+   |                   |
+   |              Control Bot Send/Edit/Ignore
+   |                   |
+   |              Approved -> source=copilot_approved
    |
-Reconcile Telegram Message ID
+   +-- HUMAN/PAUSED --> Skip
    |
 Refresh Pending Memory Job --------> Async Memory Pipeline
 ```

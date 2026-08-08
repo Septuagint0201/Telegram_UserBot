@@ -107,7 +107,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 |---|---:|---|---|
 | `https-gateway` | 1 | TLS 终止；转发 key-only Web App 页面和凭据 API | 不访问数据库；不持有业务或模型密钥 |
 | `app` | 1 | Telethon；消息接收；Conversation Engine；Context Builder；Main AI；最终发送 | 不运行 Control Bot；不执行记忆整理和 proactive 判断 |
-| `control` | 1 | Control Bot；Web App；模型配置；模式控制；`/server_status` | 不持有 Telethon Session；不发送真人账号消息 |
+| `control` | 1 | Control Bot；Web App；模型配置；模式控制；COPILOT draft 审批；`/server_status` | 不持有 Telethon Session；不直接发送真人账号消息 |
 | `worker` | 1..N | Memory、summary、embedding、proactive、补偿任务 | 不直接调用 Telethon；不直接产生 Telegram 副作用 |
 | `postgres` | 1 | 持久化事实源；pgvector；配置版本；审计 | 不对公网开放 |
 | `redis` | 1 | 任务队列；缓存；短期心跳；通知；短期租约 | 不作为 canonical message 或长期记忆的唯一事实源 |
@@ -128,7 +128,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 - 账号级运行所有权锁。
 - Telegram incoming/outgoing update 接收。
 - incoming 图片下载、验证、私有持久化和清理。
-- 真人、AI 和 proactive outgoing 来源对账。
+- 真人、AI、proactive 和 COPILOT-approved outgoing 来源对账。
 - 会话 debounce、模式检查、Context 构建和 Main AI 调用。
 - 所有真人账号消息的最终发送动作。
 
@@ -145,6 +145,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 - 通过 Telegram Bot API long polling 运行 Control Bot。
 - 校验 Control Bot 管理员白名单。
 - 提供 `/server_status`、模式控制、`/models`、模型非密钥配置命令和 `/model_key <role>` Web App 入口。
+- 展示 COPILOT draft card，处理 `/draft`、Send/Edit/Ignore 和短期 edit session；approval 只写 durable command，由 `app` 二次门禁并代发。
 - 通过绑定管理员、logical role 和随机 session ID 的短生命周期 Bot 输入会话管理 endpoint、protocol、model、生成参数、超时和启用状态；API key 输入必须拒绝。
 - 提供 Telegram Web App 静态资源和只允许设置、替换或删除 API key 的凭据 API。
 - 校验 Telegram Web App `initData`、时效和管理员身份。
@@ -259,7 +260,7 @@ domain   -> Python standard library and domain-local types
 | Telethon Session | `app` 专用 volume | `app` | `app` |
 | Telegram canonical message/revision | PostgreSQL | `app` | `app`、`worker`、`control` 的受限查询 |
 | Outbound intent 和发送结果 | PostgreSQL | `app` | `app`、`worker`、`control` 状态查询 |
-| Conversation mode | PostgreSQL | `control`、授权的 `app` 流程 | `app`、`control`、`worker` |
+| Conversation/account control、COPILOT draft/approval | PostgreSQL | `control`、授权的 `app`/worker 流程 | `app`、`control`、受限 `worker` |
 | 长期记忆和 summary | PostgreSQL | `worker` | `app`、`worker`、受限的 `control` 查询 |
 | 模型非密钥配置 | PostgreSQL | `control` | `app`、`control`、`worker` |
 | 模型凭据密文 | PostgreSQL | `control` | `app`、`control`、`worker` |
@@ -294,7 +295,7 @@ app
   -> outbound reconciliation job
 
 control
-  -> mode/config invalidation notification
+  -> mode/config invalidation or COPILOT approval notification
   -> explicit maintenance task
 
 worker
@@ -303,9 +304,10 @@ worker
 
 app
   <- proactive send request
+  <- COPILOT approval notification
 ```
 
-队列负责及时投递，PostgreSQL 中的消息 sequence、job record、decision 和 watermark 负责恢复。关键任务不能只存在于 Redis 的瞬时消息中。
+队列负责及时投递，PostgreSQL 中的消息 sequence、job record、decision、COPILOT approval command 和 watermark 负责恢复。关键任务不能只存在于 Redis 的瞬时消息中。`app` 收到 approval notification 后必须重读 draft、action、account/conversation version 并创建唯一 `copilot_approved` intent；`control` 不能直接调用 Telethon 或未鉴权 send RPC。
 
 ### 11.3 模型配置传播
 
