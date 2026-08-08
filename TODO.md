@@ -27,6 +27,10 @@
 - [x] Telegram 消息发送采用 outbound intent、幂等写入和发送结果对账。
 - [x] AI 与真人 outgoing 消息通过系统发送记录和 Telegram message ID 对账区分。
 - [x] 手动模式控制优先，使用会话模式版本门禁阻止过期 AI 结果发送。
+- [x] V1 自动对话只覆盖非 Bot 用户的一对一 private chat。
+- [x] V1 下载并理解验证后的图片，图片预算为 `auto`；语音、音频、视频和其他非图片媒体不下载二进制。
+- [x] 生成期间收到新 incoming 时，完整 API 结果在 run 开始 3 秒内返回则允许发送，否则 supersede 并合并重生成。
+- [x] AUTO 在生成开始时自动 read 并维持 typing；HUMAN、COPILOT 和 PAUSED 不自动执行两者。
 - [x] Memory Agent 先生成候选变更，再由应用层验证并事务提交。
 - [x] Proactive Agent 只处理规则层筛选后的候选，不负责常规记忆调度。
 
@@ -45,6 +49,7 @@
 - [x] 定义进程间通信方式、队列边界和共享状态归属。
 - [x] 定义单实例组件与允许水平扩展的组件。
 - [x] 记录主要故障模式及其隔离范围。
+- [x] 定义 incoming 图片持久化 volume 的所有权和非公开访问边界。
 
 完成标准：每个运行组件只有一个明确职责和状态所有者，不存在多个进程同时使用同一 Telethon session 的路径。
 
@@ -52,20 +57,20 @@
 
 目标文档：`docs/architecture/02-message-lifecycle.md`
 
-- [ ] 定义 V1 支持的 private chat、group、channel、topic 和 bot peer 范围。
-- [ ] 定义 incoming、outgoing、edit、delete、reply、forward、album 和 media 事件模型。
-- [ ] 定义 text、caption、photo、audio、voice、video、document 和 sticker 的保存与下载边界。
-- [ ] 定义 reaction、service message、read acknowledgement 和 typing action 的行为。
-- [ ] 定义 Telegram 消息的业务唯一键和重复 update 处理方式。
-- [ ] 定义 AI、真人和 proactive outgoing 消息的来源识别与对账流程。
-- [ ] 定义消息持久化、debounce、turn 聚合、生成、发送和确认状态机。
-- [ ] 定义 AI 生成期间出现新 incoming message 时的 supersede 或排队策略。
-- [ ] 定义 AI 已回复后联系人 edit/delete 原消息时是否触发后续动作。
-- [ ] 定义 outbound intent、发送结果记录和启动后对账流程。
-- [ ] 定义同一 conversation 的串行化和锁租约规则。
-- [ ] 定义模型请求取消与 `mode_version` 发送门禁。
-- [ ] 定义超时、重试、死信、补偿和不可恢复失败的处理方式。
-- [ ] 定义消息顺序以及迟到、乱序和重复 update 的处理规则。
+- [x] 定义 V1 支持的 private chat、group、channel、topic 和 bot peer 范围。
+- [x] 定义 incoming、outgoing、edit、delete、reply、forward、album 和 media 事件模型。
+- [x] 定义 text、caption、photo、audio、voice、video、document 和 sticker 的保存与下载边界。
+- [x] 定义 reaction、service message、read acknowledgement 和 typing action 的行为。
+- [x] 定义 Telegram 消息的业务唯一键和重复 update 处理方式。
+- [x] 定义 AI、真人和 proactive outgoing 消息的来源识别与对账流程。
+- [x] 定义消息持久化、debounce、turn 聚合、生成、发送和确认状态机。
+- [x] 定义 AI 生成期间出现新 incoming message 时的 supersede 或排队策略。
+- [x] 定义 AI 已回复后联系人 edit/delete 原消息时是否触发后续动作。
+- [x] 定义 outbound intent、发送结果记录和启动后对账流程。
+- [x] 定义同一 conversation 的串行化和锁租约规则。
+- [x] 定义模型请求取消与 `mode_version` 发送门禁。
+- [x] 定义超时、重试、死信、补偿和不可恢复失败的处理方式。
+- [x] 定义消息顺序以及迟到、乱序和重复 update 的处理规则。
 
 完成标准：任意处理步骤崩溃或重复执行时，不会重复回复，也不会把 AI 消息误判为真人消息。
 
@@ -74,7 +79,7 @@
 目标文档：`docs/architecture/03-data-model.md`
 
 - [ ] 绘制核心实体关系并定义 account、peer、conversation 和 message 的身份模型。
-- [ ] 细化消息、发送意图、模型运行、会话模式和后台任务表。
+- [ ] 细化 message event/revision、media object、conversation turn、发送意图、模型运行、会话模式和后台任务表。
 - [ ] 细化 memory、memory proposal、memory evidence、summary 和 embedding 表。
 - [ ] 细化 event、intention、relationship state、proactive decision 和 audit log 表。
 - [ ] 细化 model endpoint、model profile、credential、config version 和服务状态数据。
@@ -136,6 +141,8 @@
 - [ ] 定义模型 provider adapter、能力声明、超时和结构化输出契约。
 - [ ] 定义 Responses、Chat Completions 和 Messages 的请求映射与响应归一化。
 - [ ] 定义 Chat Completions 的 `max_completion_tokens` / `max_tokens` 兼容策略。
+- [ ] 定义 text、caption、reply、forward、album 和 image content part 的选择、预算与来源记录。
+- [ ] 定义三种生成协议对图片输入和 canonical `detail=auto` 的能力校验、wire 映射及等价默认值。
 - [ ] 定义模型配置草稿、验证、激活、版本切换和运行中请求的快照语义。
 - [ ] 定义 `temperature`、`max_output_tokens` 和 Provider 特有参数的能力映射。
 - [ ] 定义 prompt、模型和检索算法的版本管理方式。
@@ -172,6 +179,7 @@
 - [ ] 定义模型端点 URL 验证、私有 HTTP 允许列表和 SSRF 防护。
 - [ ] 定义数据库和 pgvector migration 的部署流程。
 - [ ] 定义 PostgreSQL、Telethon session 和必要配置的备份恢复流程。
+- [ ] 定义 `media-data` 的字节/像素限制、下载超时、磁盘配额、保留、清理和备份策略。
 - [ ] 定义结构化日志、敏感信息脱敏、metrics 和告警。
 - [ ] 定义 liveness、readiness 和依赖服务状态检查。
 - [ ] 定义 SIGTERM、队列任务收尾和 Telethon session 关闭流程。
@@ -192,6 +200,8 @@
 - [ ] 为 Responses、Chat Completions 和 Messages adapter 建立固定 wire contract fixtures。
 - [ ] 测试三个生成 ModelProfile 独立修改和激活时互不影响。
 - [ ] 测试 incoming/outgoing 来源识别、重复 update、edit/delete 和 album。
+- [ ] 测试 Telegram random ID 映射、system pending source 和启动后 outgoing reconciliation。
+- [ ] 测试图片格式校验、伪造 MIME、解码炸弹、模型能力门禁和 `detail=auto` 映射。
 - [ ] 测试 debounce、顺序保证、会话锁和多 worker 竞争。
 - [ ] 测试真人发送、模式切换和模型返回同时发生的竞态。
 - [ ] 测试发送前、发送中、发送后各崩溃点的恢复行为。

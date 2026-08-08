@@ -378,6 +378,8 @@ Reconcile Message ID and Source
 
 Memory Agent 不位于 Main AI 的同步回复路径中。它暂时尚未提取的新内容仍然通过 recent raw messages 进入 Context，因此异步记忆处理不会使 Main AI 丢失当前对话。
 
+V1 的消息生命周期基线见 `docs/architecture/02-message-lifecycle.md`。自动对话只覆盖非 Bot 用户的一对一 private chat；支持 text、caption 和经过验证的 photo/image document 输入，图片模型预算使用 `detail=auto`。语音、音频、视频、video note、贴纸和非图片 document 不下载二进制，只保存允许的元数据；其中只有 caption 可以作为文本输入。
+
 ---
 
 # 8. 会话模式
@@ -1653,7 +1655,10 @@ Vector DB
 users
 contacts
 conversations
+message_events
 messages
+message_media
+conversation_turns
 outbound_messages
 conversation_modes
 model_runs
@@ -1711,6 +1716,8 @@ telegram_message_id
 
 重复 Telegram update 必须命中同一记录并进行幂等更新。
 
+消息还需要通过独立 event/revision/media 记录表达 edit、delete tombstone、album membership、媒体验证状态和可重放投影。V1 的正文与自动回复范围、业务键和稳定排序规则由 `docs/architecture/02-message-lifecycle.md` 固定，物理表结构在 Data Model 文档中细化。
+
 ## outbound_messages
 
 系统发送前创建 outbound intent，核心字段包括：
@@ -1723,6 +1730,10 @@ source
 status
 content_hash
 mode_version
+content_revision
+turn_id
+generation_number
+telegram_random_id
 telegram_message_id
 attempt_count
 created_at
@@ -1731,7 +1742,7 @@ reconciled_at
 last_error
 ```
 
-`source` 在发送前已确定为 `ai` 或 `proactive_ai`。发送成功后绑定 Telegram message ID，监听器使用它与 outgoing update 对账。
+`source` 在发送前已确定为 `ai` 或 `proactive_ai`。发送前持久化稳定的 Telegram random ID，发送成功后将其映射到 Telegram message ID；监听器使用该映射与 outgoing update 对账，不能仅凭正文和时间窗口猜测来源。
 
 ---
 
@@ -2088,15 +2099,11 @@ Telegram 真人聊天通常连续发送多条：
 
 不要每条调用一次主模型。
 
-建议等待一个短 debounce window，将连续消息合并。
+默认使用 sliding 3 秒 debounce，将连续消息合并；从首条可触发 incoming 开始最多收集 10 秒，达到 hard cap 后必须 seal 当前 conversation turn。两个数值均可由服务器配置，并保存到 turn snapshot。
 
-例如：
+reaction、service message 和没有 caption 的 metadata-only 媒体不延长 debounce。album item、text 和 caption 属于可触发 content。
 
-```text
-2～5 秒
-```
-
-然后作为一个 conversation turn 处理。
+如果新的 incoming content 在模型生成期间到达，以本次 model run 的请求开始时间 `t0` 为基准：完整且验证通过的 API 结果在 `t0 + 3 秒` 前返回时，允许旧结果通过其他门禁后发送，新消息进入下一 turn；到该时刻仍未完成时，旧 turn 必须 supersede、尽力取消并与 pending incoming 合并重生成。首 token 或部分 stream 不算完成，这个 3 秒分界也不是模型的通用 timeout。
 
 ---
 
@@ -2146,6 +2153,10 @@ AI 发送前重新读取 mode 和 mode_version
 
 `mode_version` 还需要在全局 pause、维护模式和其他会使旧结果失效的控制操作中递增。发送前检查应在 conversation lock 内完成。
 
+新的联系人 incoming 与真人 outgoing 采用不同规则。新的 incoming 可以按第 49 节的条件式 3 秒策略决定旧结果是否仍可发送；真人 outgoing、Control Bot 模式切换、global pause 以及发送前 edit/delete 没有宽限，始终使旧结果失效。
+
+AUTO 只在 sealed turn 真正开始生成时标记本 turn 的 incoming 已读并启动 typing，typing 持续到发送、取消或失败。HUMAN、COPILOT 和 PAUSED 不自动标记已读，也不发送 typing。
+
 ---
 
 # 51. Human takeover 自动判断
@@ -2191,6 +2202,7 @@ Telethon Session 等价于账号登录权限。
 - API key 必须应用层加密保存，数据库密文与主密钥分离
 - API key 不得出现在日志、异常、审计记录或配置读取响应中
 - 模型端点必须经过协议、地址和 SSRF 安全校验
+- incoming 图片必须经过内容与资源限制校验后写入私有 `media-data`，不得由 gateway 公开；其他媒体不得越过 metadata-only 边界下载
 
 ---
 

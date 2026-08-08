@@ -127,6 +127,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 - Telethon `.session` 文件的读写挂载。
 - 账号级运行所有权锁。
 - Telegram incoming/outgoing update 接收。
+- incoming 图片下载、验证、私有持久化和清理。
 - 真人、AI 和 proactive outgoing 来源对账。
 - 会话 debounce、模式检查、Context 构建和 Main AI 调用。
 - 所有真人账号消息的最终发送动作。
@@ -163,6 +164,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 - Memory proposal validation 后的持久化编排。
 - Rolling summary 和 daily/weekly consolidation。
 - Embedding 生成和重建。
+- 按 validated media reference 只读访问 Memory/summary 任务允许使用的图片。
 - Proactive 候选处理和模型判断。
 - 未处理 message watermark、未知 outbound intent 等补偿扫描。
 - Scheduler tick 发布。
@@ -359,10 +361,13 @@ backend
 | `postgres-data` | `postgres` | 读写 | PostgreSQL 和 pgvector 数据 |
 | `redis-data` | `redis` | 读写 | AOF/持久化队列状态 |
 | `telethon-session` | `app` | 读写、独占 | Telethon `.session` 文件 |
+| `media-data` | `app` 读写；`worker` 只读 | 私有、非公开 | 已验证的 incoming 图片和供模型使用的无 metadata 副本 |
 
 `telethon-session` 不挂载到 `control`、`worker`、`migrate` 或 gateway。镜像构建上下文和日志中都不能包含 Session 文件。
 
 Session 备份必须使用与 SQLite 状态一致的受控快照，备份产物在离开主机前加密。不能在文件正在变化时使用无协调的普通复制作为唯一备份方案。
+
+`media-data` 由 `app` 负责下载、原子写入和清理；`worker` 只能按数据库中的 validated media reference 只读访问，不能创建或修改文件。`control`、gateway、PostgreSQL、Redis 和 `migrate` 不挂载该 volume。它不得通过静态文件服务发布，字节/像素限制、磁盘配额、保留期和备份策略由 Message Lifecycle 与 Operations 文档定义。
 
 ### 13.2 Secret 分配
 
@@ -603,6 +608,7 @@ config_version（模型调用适用时）
 - [x] worker 和 control 不能直接发送真人账号 Telegram 消息。
 - [x] PostgreSQL 和 Redis 不发布公网端口。
 - [x] 公网只暴露 gateway 的 key-only Telegram Web App HTTPS 路径。
+- [x] `media-data` 仅由 `app` 读写和 `worker` 只读，不通过 gateway 暴露。
 - [x] API key 只写不读，且基础设施服务无法解密。
 - [x] 服务启动和停止不依赖理想容器顺序。
 - [x] 每个主要故障都有 fail-open 或 fail-closed 的明确选择。
