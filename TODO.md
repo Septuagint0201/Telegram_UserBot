@@ -14,8 +14,11 @@
 - [x] Telethon session 使用 `app` 专用持久化 `.session` 文件，备份单独加密。
 - [x] Control Bot 独立运行，并通过 `/server_status` 监控业务服务状态。
 - [x] Scheduler 运行在 `worker` 中，并使用单例租约避免重复调度。
-- [x] 不提供通用管理 API，只暴露 Telegram Web App 所需的专用 HTTPS 配置入口。
-- [x] Telegram Web App 管理模型端点、模型名称、只写 API key 和生成参数。
+- [x] 不提供通用管理 API，只暴露 Telegram Web App 所需的 key-only HTTPS 凭据入口。
+- [x] 模型非密钥配置由 Control Bot 命令和短生命周期输入会话管理，Web App 只设置、替换或删除 API key。
+- [x] Main AI、Memory Agent 和 Proactive Agent 使用三个独立生成 ModelProfile，默认协议均为 Responses。
+- [x] 生成模型可独立选择 Responses、Chat Completions 或 Messages；Embedding 配置保持独立。
+- [x] 模型配置保存 canonical 语义字段，由 protocol adapter 映射实际请求和响应字段。
 - [x] 模型凭据应用层加密保存，数据库密文与主密钥分离。
 - [x] `control`、`app` 和 `worker` 构成受信任计算边界并只读挂载主密钥，基础设施服务不具备解密能力。
 - [x] Memory Agent 不阻塞 Main AI 的实时回复流程。
@@ -36,7 +39,7 @@
 - [x] 定义 Docker Compose 中的 `https-gateway`、`app`、`control`、`worker`、`postgres`、`redis` 和一次性 `migrate` 任务。
 - [x] 定义 Python 包和模块边界，以及允许的依赖方向。
 - [x] 明确 Telethon session、Control Bot 和 scheduler 的进程所有权。
-- [x] 定义 Telegram Web App 静态页面和专用配置 API 的网络入口。
+- [x] 定义 Telegram Web App 静态页面和 key-only 凭据 API 的网络入口。
 - [x] 定义各服务心跳、readiness 和 `/server_status` 状态聚合方式。
 - [x] 定义进程启动、初始化、迁移、停止和重启顺序。
 - [x] 定义进程间通信方式、队列边界和共享状态归属。
@@ -49,10 +52,15 @@
 
 目标文档：`docs/architecture/02-message-lifecycle.md`
 
+- [ ] 定义 V1 支持的 private chat、group、channel、topic 和 bot peer 范围。
 - [ ] 定义 incoming、outgoing、edit、delete、reply、forward、album 和 media 事件模型。
+- [ ] 定义 text、caption、photo、audio、voice、video、document 和 sticker 的保存与下载边界。
+- [ ] 定义 reaction、service message、read acknowledgement 和 typing action 的行为。
 - [ ] 定义 Telegram 消息的业务唯一键和重复 update 处理方式。
 - [ ] 定义 AI、真人和 proactive outgoing 消息的来源识别与对账流程。
 - [ ] 定义消息持久化、debounce、turn 聚合、生成、发送和确认状态机。
+- [ ] 定义 AI 生成期间出现新 incoming message 时的 supersede 或排队策略。
+- [ ] 定义 AI 已回复后联系人 edit/delete 原消息时是否触发后续动作。
 - [ ] 定义 outbound intent、发送结果记录和启动后对账流程。
 - [ ] 定义同一 conversation 的串行化和锁租约规则。
 - [ ] 定义模型请求取消与 `mode_version` 发送门禁。
@@ -70,6 +78,8 @@
 - [ ] 细化 memory、memory proposal、memory evidence、summary 和 embedding 表。
 - [ ] 细化 event、intention、relationship state、proactive decision 和 audit log 表。
 - [ ] 细化 model endpoint、model profile、credential、config version 和服务状态数据。
+- [ ] 定义三个生成 ModelProfile 的独立活动版本约束，以及 Embedding 配置的独立模型。
+- [ ] 定义 canonical generation 字段和三种 protocol options 的 discriminated schema。
 - [ ] 定义主键、业务唯一键、外键、检查约束和必要索引。
 - [ ] 定义时间字段、时区、Telegram 原始数据和 JSONB 扩展字段规则。
 - [ ] 定义各业务流程的事务边界和并发更新策略。
@@ -124,6 +134,8 @@
 - [ ] 定义用户内容、记忆内容和系统指令之间的信任边界。
 - [ ] 定义 prompt injection、恶意转发内容和不可信历史的隔离方式。
 - [ ] 定义模型 provider adapter、能力声明、超时和结构化输出契约。
+- [ ] 定义 Responses、Chat Completions 和 Messages 的请求映射与响应归一化。
+- [ ] 定义 Chat Completions 的 `max_completion_tokens` / `max_tokens` 兼容策略。
 - [ ] 定义模型配置草稿、验证、激活、版本切换和运行中请求的快照语义。
 - [ ] 定义 `temperature`、`max_output_tokens` 和 Provider 特有参数的能力映射。
 - [ ] 定义 prompt、模型和检索算法的版本管理方式。
@@ -155,7 +167,7 @@
 - [ ] 定义 Ubuntu 原生运行方式与 Docker 运行方式的支持边界。
 - [ ] 定义配置分层、环境变量、密钥注入和启动校验。
 - [ ] 定义 Telethon session、Bot token、模型密钥和数据库凭据的保护方式。
-- [ ] 定义 Telegram Web App HTTPS 发布、`initData` 验证和管理员授权。
+- [ ] 定义 key-only Telegram Web App HTTPS 发布、`initData` 验证和管理员授权。
 - [ ] 定义 API key 只写不读、加密保存、轮换和主密钥恢复流程。
 - [ ] 定义模型端点 URL 验证、私有 HTTP 允许列表和 SSRF 防护。
 - [ ] 定义数据库和 pgvector migration 的部署流程。
@@ -175,8 +187,10 @@
 - [ ] 定义单元测试、契约测试、集成测试和端到端测试边界。
 - [ ] 建立 Telegram gateway fake 和可重放 update fixtures。
 - [ ] 建立 LLM、embedding 和时间服务 fake。
-- [ ] 测试 Telegram Web App 认证、过期重放、非管理员访问和密钥不回显。
+- [ ] 测试 key-only Telegram Web App 认证、过期重放、非管理员访问、越权字段拒绝和密钥不回显。
 - [ ] 测试模型配置验证失败、原子激活、版本切换和进行中请求行为。
+- [ ] 为 Responses、Chat Completions 和 Messages adapter 建立固定 wire contract fixtures。
+- [ ] 测试三个生成 ModelProfile 独立修改和激活时互不影响。
 - [ ] 测试 incoming/outgoing 来源识别、重复 update、edit/delete 和 album。
 - [ ] 测试 debounce、顺序保证、会话锁和多 worker 竞争。
 - [ ] 测试真人发送、模式切换和模型返回同时发生的竞态。

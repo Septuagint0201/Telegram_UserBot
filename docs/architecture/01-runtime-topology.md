@@ -16,7 +16,7 @@ Runtime Topology 需要保证：
 - Control Bot 在聊天主进程故障时仍有机会报告状态和执行控制操作。
 - 实时聊天不被记忆、摘要或主动性后台任务阻塞。
 - 后台 worker 可以扩展，而不会产生重复调度或绕过 Telegram 发送门禁。
-- Telegram Web App 只暴露必要的模型配置能力。
+- Telegram Web App 只暴露设置、替换和删除模型 API key 所需的凭据能力。
 - PostgreSQL、Redis、Telethon Session 和模型凭据不直接暴露到公网。
 - 任一服务故障时，其影响范围和恢复路径可预测。
 
@@ -56,7 +56,7 @@ Ubuntu 原生进程运行仅用于开发和故障排查，不作为与 Docker Co
 | Control Bot | 独立 `control` 进程 |
 | Telethon Session | `app` 专用持久化 `.session` 文件 |
 | Scheduler | 位于 `worker`，使用单例租约 |
-| 管理入口 | Control Bot + 专用 Telegram Web App |
+| 管理入口 | Control Bot 管理非密钥配置 + key-only Telegram Web App |
 | 通用管理 API | 不提供 |
 | 模型凭据 | API key 只写不读，数据库密文与主密钥分离 |
 | 时间存储 | 持久化时间统一使用 UTC |
@@ -99,13 +99,13 @@ External model endpoints are called by app, control, and worker as permitted.
 
 只有 `https-gateway` 向公网发布业务入口 TCP 443。证书签发工具如需 TCP 80，只允许用于 ACME challenge 或跳转到 HTTPS，不得在 80 上提供管理 API。Control Bot 使用出站 Bot API long polling，因此不需要公开 Telegram Bot webhook。
 
-Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gateway` 访问 `control` 提供的静态资源和专用配置 API。
+Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gateway` 访问 `control` 提供的静态资源和 key-only 凭据 API。endpoint、protocol、model、生成参数和启用状态等非密钥配置只通过 Control Bot 命令与短生命周期输入会话管理。
 
 ## 7. 服务清单
 
 | 服务 | 副本 | 核心职责 | 明确不负责 |
 |---|---:|---|---|
-| `https-gateway` | 1 | TLS 终止；转发 Web App 页面和专用配置 API | 不访问数据库；不持有业务或模型密钥 |
+| `https-gateway` | 1 | TLS 终止；转发 key-only Web App 页面和凭据 API | 不访问数据库；不持有业务或模型密钥 |
 | `app` | 1 | Telethon；消息接收；Conversation Engine；Context Builder；Main AI；最终发送 | 不运行 Control Bot；不执行记忆整理和 proactive 判断 |
 | `control` | 1 | Control Bot；Web App；模型配置；模式控制；`/server_status` | 不持有 Telethon Session；不发送真人账号消息 |
 | `worker` | 1..N | Memory、summary、embedding、proactive、补偿任务 | 不直接调用 Telethon；不直接产生 Telegram 副作用 |
@@ -143,8 +143,9 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 
 - 通过 Telegram Bot API long polling 运行 Control Bot。
 - 校验 Control Bot 管理员白名单。
-- 提供 `/server_status`、模式控制和 Web App 入口。
-- 提供 Telegram Web App 静态资源和专用配置 API。
+- 提供 `/server_status`、模式控制、`/models`、模型非密钥配置命令和 `/model_key <role>` Web App 入口。
+- 通过绑定管理员、logical role 和随机 session ID 的短生命周期 Bot 输入会话管理 endpoint、protocol、model、生成参数、超时和启用状态；API key 输入必须拒绝。
+- 提供 Telegram Web App 静态资源和只允许设置、替换或删除 API key 的凭据 API。
 - 校验 Telegram Web App `initData`、时效和管理员身份。
 - 创建、验证和激活模型配置版本。
 - 接收一次性输入的 API key 并加密保存。
@@ -273,7 +274,7 @@ Redis 丢失后允许缓存、通知和心跳丢失，但不能造成 PostgreSQL
 
 - `app -> Telegram MTProto`：接收和发送真人账号消息。
 - `control -> Telegram Bot API`：Control Bot long polling 和消息回复。
-- `Telegram Web App -> https-gateway -> control`：配置页面和专用 API。
+- `Telegram Web App -> https-gateway -> control`：key-only 凭据页面和专用 API。
 - `app/control/worker -> PostgreSQL`：事务状态和持久化查询。
 - `app/control/worker -> Redis`：队列、缓存、通知和短期状态。
 - `app -> Main AI endpoint`：实时聊天生成。
@@ -306,10 +307,12 @@ app
 
 ### 11.3 模型配置传播
 
+`main_ai`、`memory_agent` 和 `proactive_agent` 分别拥有独立的生成 ModelProfile、credential reference、草稿版本和活动版本。三个 profile 默认使用 Responses adapter，但可以独立切换为 Chat Completions 或 Messages adapter。Embedding 使用独立的非生成配置，不参与这三个 profile 的协议选择。
+
 模型配置采用版本化读取：
 
-1. `control` 将 draft 和 credential 写入 PostgreSQL。
-2. `control` 验证端点、模型名称和能力参数。
+1. `control` 将 Bot 命令产生的非密钥 draft 和 key-only Web App 产生的 credential 分别写入 PostgreSQL。
+2. `control` 验证端点、模型名称、兼容协议、canonical 参数和协议特有参数。
 3. `control` 在一个事务中激活新版本。
 4. 提交成功后发布 Redis invalidation 通知。
 5. `app` 和 `worker` 在下一个模型请求开始时读取或确认活动版本。
@@ -338,7 +341,7 @@ backend
 | `redis` | 否 | 是 | 否 |
 | `migrate` | 否 | 是 | 否 |
 
-`https-gateway` 只能访问 `control` 的 Web App 内部端口。它不能解析或访问 PostgreSQL、Redis、`app` 或 `worker` 的内部服务名。
+`https-gateway` 只能访问 `control` 的 key-only Web App 内部端口。它不能解析或访问 PostgreSQL、Redis、`app` 或 `worker` 的内部服务名。
 
 各服务可以发起必要的公网出站连接，但模型 endpoint 需要经过 adapter 的 URL policy 检查：
 
@@ -399,7 +402,7 @@ app + control + worker
         |
 individual readiness
         |
-https-gateway routes Web App traffic
+https-gateway routes key-only Web App traffic
 ```
 
 具体要求：
@@ -410,7 +413,7 @@ https-gateway routes Web App traffic
 4. `app` 检查 Session volume、取得 account advisory lock、验证 Session 已授权并连接 Telethon。
 5. `control` 启动内部 Web 服务和 Bot API long polling。
 6. `worker` 启动消费者；其中一个实例取得 Scheduler leader lock。
-7. gateway 只有在 `control` ready 时才把 Web App 请求视为可用。
+7. gateway 只有在 `control` ready 时才把 key-only Web App 请求视为可用。
 
 不能依赖 Compose 的启动顺序等同于依赖已经 ready。每个进程都必须自行处理依赖暂时不可用。
 
@@ -429,7 +432,7 @@ https-gateway routes Web App traffic
 
 ### control
 
-1. 停止接受新的 Web App 配置写入。
+1. 停止接受新的 Bot 配置会话和 Web App credential 写入。
 2. 完成已提交事务，未提交的 draft 不激活。
 3. 停止 Bot API long polling 和内部 Web server。
 4. 清理短生命周期管理会话后退出。
@@ -546,13 +549,13 @@ shared control / workers / postgres / redis
 | 故障 | 影响 | 必须采取的行为 | 恢复 |
 |---|---|---|---|
 | `app` 崩溃 | AI 不再接收或发送；真人客户端仍可使用账号 | 不由 worker/control 代发 | 重启后取得 account lock，恢复 update 并对账 outbound intent |
-| `control` 崩溃 | Control Bot、Web App、状态查询不可用 | `app` 按最后已提交模式和模型配置继续运行 | 重启并恢复 Bot polling；不回滚已提交配置 |
+| `control` 崩溃 | Control Bot、key-only Web App、状态查询不可用 | `app` 按最后已提交模式和模型配置继续运行 | 重启并恢复 Bot polling；不回滚已提交配置 |
 | worker 崩溃 | 记忆、summary、proactive 延迟 | 实时聊天使用已提交记忆和 recent raw messages | 队列重试；watermark 补偿扫描 |
 | Scheduler leader 崩溃 | 周期任务短暂不发布 | 普通 worker 继续消费 | advisory lock 释放后重新选 leader |
 | PostgreSQL 不可用 | 无法保证事实持久化和所有权 | 自动发送 fail closed；worker 停止提交；control 报告 degraded/down | 重连、重新校验 schema/lock 后恢复 |
 | Redis 不可用 | 队列、锁、通知、heartbeat 不可用 | 原始 update 尽可能先入 PostgreSQL；自动副作用暂停；不无锁发送 | Redis 恢复后根据 DB watermark 重新发布 |
 | 模型端点不可用 | 对应模型调用失败 | Main AI 不发送；Memory 重试；Proactive 跳过 | 按模型调用策略重试或切换已验证配置 |
-| gateway 不可用 | Web App 不可访问 | Control Bot 文本控制仍可工作 | gateway 恢复后重新开放配置页面 |
+| gateway 不可用 | API key 无法设置、替换或删除 | Control Bot 的非密钥模型配置和其他文本控制仍可工作 | gateway 恢复后重新开放 key-only Web App |
 | Session volume 丢失或损坏 | `app` 无法登录 | fail closed，不自动创建新 Session | 从加密备份恢复或显式重新登录 |
 | Credential master key 不可用 | 无法读取模型凭据 | 模型调用和 credential 写入 fail closed；状态接口仍可报告原因 | 恢复同一主密钥或执行受控密钥恢复 |
 
@@ -599,7 +602,7 @@ config_version（模型调用适用时）
 - [x] worker 可以扩展，但只有一个 Scheduler leader。
 - [x] worker 和 control 不能直接发送真人账号 Telegram 消息。
 - [x] PostgreSQL 和 Redis 不发布公网端口。
-- [x] 公网只暴露 gateway 的 Telegram Web App HTTPS 路径。
+- [x] 公网只暴露 gateway 的 key-only Telegram Web App HTTPS 路径。
 - [x] API key 只写不读，且基础设施服务无法解密。
 - [x] 服务启动和停止不依赖理想容器顺序。
 - [x] 每个主要故障都有 fail-open 或 fail-closed 的明确选择。

@@ -68,7 +68,7 @@ worker
 其中：
 
 - `app` 是 Telethon Session 的唯一持有者，初期固定单实例。
-- `control` 独立运行 Control Bot、Telegram Web App 配置 API 和服务状态监控。
+- `control` 独立运行 Control Bot、key-only Telegram Web App 凭据 API 和服务状态监控。
 - `worker` 执行记忆、摘要、embedding 和主动性任务，并承载带单例租约的 Scheduler。
 - PostgreSQL 保存持久化业务状态，Redis 提供任务队列、缓存、租约和短期服务心跳。
 - V1 只运行一个 Telegram 真人账号，但数据库身份模型和模块接口不写死为单账号。
@@ -536,7 +536,18 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 /models
 ```
 
-打开 Telegram Web App，管理各 Agent 使用的模型端点和生成参数。API key 不通过 Telegram 消息发送。
+显示三个生成模型 profile 和独立 Embedding 配置的活动版本、启用状态、credential 是否已配置，以及可用的模型配置命令；不显示 API key。
+
+```text
+/model_show <role>
+/model_config <role>
+/model_activate <role>
+/model_key <role>
+```
+
+`/model_show` 查看某角色的非密钥配置；`/model_config` 启动短生命周期多步输入会话，用于修改 endpoint、兼容协议、模型名称、temperature、最大输出 token、超时、启用状态和协议特有选项；`/model_activate` 验证并激活 draft；`/model_key` 打开只处理该角色 API key 的 Telegram Web App。API key 禁止通过命令参数、Bot 消息或多步输入会话提交。
+
+多步输入会话绑定管理员 Telegram User ID、目标 logical role 和随机 session ID，同一管理员同一时间只允许一个活动配置会话；会话必须支持显式取消、超时失效、逐项校验和最终确认。Bot 删除消息不作为秘密清除机制，因此任何可能包含密钥的输入都必须直接拒绝且不得落入配置或审计记录。
 
 Control Bot 必须设置管理员白名单。
 
@@ -548,35 +559,42 @@ allowed_admin_ids
 
 只有指定 Telegram User ID 可以控制服务器。
 
-## Telegram Web App 管理界面
+## 模型配置与 key-only Web App
 
-Control Bot 通过 Web App 按钮打开部署在本服务器上的管理页面。
+模型配置以 Control Bot 命令和输入控件为主。命令使用按钮、选择菜单或 ForceReply 驱动短生命周期会话；适合单条表达的非密钥字段也可使用带参数命令。所有修改先写入目标 role 的 draft，经校验和显式确认后再激活。
 
-Web App 只提供受限的控制面功能，初期主要用于管理：
+Web App 只提供受限的 API key 凭据功能：
 
 ```text
 模型逻辑角色
-Provider / API 协议
-API Base URL
-模型名称
-API key
-temperature
-最大输出 token
-请求超时
-启用状态
-Provider 特有参数
+API key 设置或替换
+API key 删除
+credential 状态（仅“已配置”或“未配置”）
 ```
 
-模型逻辑角色至少包括：
+生成模型固定为三个彼此独立的逻辑配置：
 
 ```text
 main_ai
 memory_agent
 proactive_agent
-embedding
 ```
 
-Web App 浏览器直接通过 HTTPS 连接服务器上的 `control` 配置 API。该入口是专用 Telegram Web App API，不扩展为通用业务管理 API，也不直接访问 `app`、worker、PostgreSQL 或 Redis。
+每个逻辑角色都拥有独立的 endpoint、model、credential reference、兼容协议、生成参数、草稿版本和活动版本。修改或激活其中一个角色的配置，不得隐式改变另外两个角色。
+
+Embedding 是独立的非生成模型配置，不使用本节的 Responses、Chat Completions 或 Messages 对话协议，也不计入这三个生成模型 profile。
+
+Control Bot 允许三个生成模型分别选择：
+
+```text
+openai_responses
+openai_chat_completions
+anthropic_messages
+```
+
+这里的 Completions 指 Chat Completions，不支持旧式纯文本 `/completions` 协议。
+
+Web App 浏览器直接通过 HTTPS 连接服务器上的 `control` 凭据 API。该入口只接受 credential 的设置、替换或删除，不得读取或修改 endpoint、protocol、model、生成参数、启用状态、draft 或活动版本；它不扩展为通用业务管理 API，也不直接访问 `app`、worker、PostgreSQL 或 Redis。
 
 每次 Web App 会话必须：
 
@@ -584,7 +602,7 @@ Web App 浏览器直接通过 HTTPS 连接服务器上的 `control` 配置 API�
 - 校验认证数据的新鲜度，拒绝过期重放。
 - 再次检查 Telegram User ID 是否位于管理员白名单。
 - 使用短生命周期的服务端管理会话。
-- 对配置写入执行审计和速率限制。
+- 对凭据写入执行审计和速率限制，审计中只记录 role、动作、结果和 credential version，不记录 key。
 
 API key 采用只写不读语义：
 
@@ -596,7 +614,7 @@ API key 采用只写不读语义：
 
 V1 将 `control`、`app` 和 `worker` 视为受信任计算边界，并向这三个服务只读挂载同一主密钥。只有 `control` 可以接受和写入模型配置；`app` 与 `worker` 只能按 credential reference 读取密文，并在发起模型请求时于进程内存中短暂解密。`https-gateway`、PostgreSQL 和 Redis 不挂载主密钥，也不能获得明文 API key。
 
-模型端点默认只允许 HTTPS。需要访问 Docker 内部或本机私有模型服务时，HTTP 地址必须先由服务器侧配置显式加入允许列表；Web App 本身不能任意放开内网、链路本地地址或云元数据地址，避免形成 SSRF 通道。
+模型端点默认只允许 HTTPS。需要访问 Docker 内部或本机私有模型服务时，HTTP 地址必须先由服务器侧配置显式加入允许列表；Control Bot 配置流程不能绕过内网、链路本地地址或云元数据地址限制，避免形成 SSRF 通道。
 
 模型配置采用草稿、连通性验证、激活三步流程。新配置验证失败时继续保留旧的活动配置。配置激活后只影响新创建的模型请求；已在运行的请求继续使用启动时记录的配置版本。
 
@@ -1485,28 +1503,94 @@ DeepSeek v4 Flash
 
 ## 运行时模型配置
 
-每个逻辑角色绑定一个活动模型配置版本，例如：
+三个生成模型默认都使用 `openai_responses`，因为当前预设模型只需要 Responses 请求与响应格式。Chat Completions 和 Messages 作为可选兼容 adapter。
+
+每个逻辑角色绑定自己的活动 ModelProfile 版本，例如：
 
 ```json
 {
-  "role": "main_ai",
-  "provider": "openai_compatible",
-  "base_url": "https://api.example.com/v1",
+  "logical_role": "main_ai",
+  "protocol": "openai_responses",
+  "endpoint": {
+    "base_url": "https://api.example.com/v1"
+  },
   "model": "configured-model-name",
-  "credential_status": "configured",
-  "temperature": 0.8,
-  "max_output_tokens": 1200,
+  "credential_ref": "credential-id",
+  "generation": {
+    "temperature": 0.8,
+    "max_output_tokens": 1200
+  },
   "timeout_seconds": 90,
-  "enabled": true,
-  "provider_options": {}
+  "protocol_options": {},
+  "config_version": 3,
+  "enabled": true
 }
 ```
 
-`max token` 在内部统一表示 `max_output_tokens`，即单次生成允许的最大输出 token。输入上下文预算和模型上下文窗口由 Context Builder 与模型能力信息分别管理，不能与输出上限混为一项。
+## Canonical 配置与协议字段映射
+
+数据库和 Agent 代码使用统一语义字段，不直接保存某个 Provider 的实际请求字段名。内部请求至少包括：
+
+```text
+system_instructions
+messages
+temperature
+max_output_tokens
+response_schema
+stream
+```
+
+`max_output_tokens` 始终表示单次生成允许的最大输出 token。输入上下文预算和模型上下文窗口由 Context Builder 与模型能力信息分别管理，不能与输出上限混为一项。
+
+协议 adapter 在发送时完成字段映射：
+
+| protocol | 默认路径 | 系统指令 | 对话输入 | 输出上限 wire 字段 | 主要响应位置 |
+|---|---|---|---|---|---|
+| `openai_responses` | `/responses` | `instructions` | `input` | `max_output_tokens` | `output` / `output_text` |
+| `openai_chat_completions` | `/chat/completions` | `messages` 中的 system/developer message | `messages` | `max_completion_tokens`；兼容端点可选 `max_tokens` | `choices[0].message` |
+| `anthropic_messages` | `/messages` | 顶层 `system` | `messages` | `max_tokens` | `content` blocks |
+
+鉴权 header、请求路径和 Provider 版本 header 也由 endpoint 与 protocol adapter 生成，不由 Agent 拼接。
+
+协议特有字段存入带类型的 `protocol_options`，使用 protocol 作为 discriminator，而不是允许任意请求 JSON。例如：
+
+```text
+ResponsesOptions
+ChatCompletionsOptions
+MessagesOptions
+```
+
+其中 Chat Completions adapter 可以配置：
+
+```text
+token_limit_field:
+auto
+max_completion_tokens
+max_tokens
+```
+
+Messages adapter 可以配置 API version、认证方式和经过验证的请求路径。任意路径 override 仍必须经过 endpoint URL 与 SSRF 规则验证。
+
+三个 adapter 的响应必须归一化为统一结果：
+
+```text
+text
+structured_output
+finish_reason
+input_tokens
+output_tokens
+provider_request_id
+raw_response_ref
+```
+
+Agent 和 Memory proposal 逻辑只能读取归一化结果，不能依赖 `choices`、`content blocks` 或 Responses output item 等 wire 结构。
+
+Control Bot 根据 protocol 只提供可用的字段和输入选项。切换 protocol 时创建新 draft，保留语义相同的 canonical 字段，重新校验协议特有字段、endpoint 和 credential；旧活动版本在新 draft 验证并激活前继续生效。Web App 不参与 protocol 或其他非密钥字段配置。
 
 不同模型和 Provider 支持的参数不同，因此模型适配器必须声明能力：
 
 ```text
+supported_protocols
 supports_temperature
 supports_structured_output
 supports_streaming
@@ -1524,6 +1608,7 @@ max_output_tokens_limit
 ```text
 logical role
 provider
+protocol
 endpoint id
 model name
 config version
@@ -1913,7 +1998,7 @@ migrate（一次性任务）
 
 其中：
 
-- `https-gateway` 只把 Telegram Web App 页面和专用配置 API 通过 HTTPS 暴露给外部。
+- `https-gateway` 只把 key-only Telegram Web App 页面和凭据 API 通过 HTTPS 暴露给外部。
 - `app` 固定一个副本，独占挂载的 Telethon `.session` 文件。
 - `control` 独立运行 Control Bot、Web App 和状态查询；不挂载 Telethon Session。
 - `worker` 初期使用一个服务承载多个逻辑任务队列，后续可以增加副本。
@@ -2097,7 +2182,7 @@ Telethon Session 等价于账号登录权限。
 - 文件权限严格限制
 - Session 加密备份
 - 服务器使用 SSH Key
-- 除 Telegram Web App 专用 HTTPS 入口外，禁止暴露管理和健康检查端口
+- 除 key-only Telegram Web App 专用 HTTPS 入口外，禁止暴露管理和健康检查端口
 - Control Bot 设置 User ID 白名单
 - 数据库禁止公网直连
 - Redis 禁止公网直连
