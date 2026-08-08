@@ -23,7 +23,7 @@
 - [x] `control`、`app` 和 `worker` 构成受信任计算边界并只读挂载主密钥，基础设施服务不具备解密能力。
 - [x] Memory Agent 不阻塞 Main AI 的实时回复流程。
 - [x] 记忆提取采用事件驱动、安静窗口合并、硬阈值触发和定期补偿扫描。
-- [x] Main AI 使用最近一次已提交的长期记忆，同时直接读取当前会话的最新原始消息。
+- [x] Main AI 使用最近一次已提交的长期记忆，同时直接读取当前会话最新的 canonical message revision。
 - [x] Telegram 消息发送采用 outbound intent、幂等写入和发送结果对账。
 - [x] AI 与真人 outgoing 消息通过系统发送记录和 Telegram message ID 对账区分。
 - [x] 手动模式控制优先，使用会话模式版本门禁阻止过期 AI 结果发送。
@@ -78,19 +78,19 @@
 
 目标文档：`docs/architecture/03-data-model.md`
 
-- [ ] 绘制核心实体关系并定义 account、peer、conversation 和 message 的身份模型。
-- [ ] 细化 message event/revision、media object、conversation turn、发送意图、模型运行、会话模式和后台任务表。
-- [ ] 细化 memory、memory proposal、memory evidence、summary 和 embedding 表。
-- [ ] 细化 event、intention、relationship state、proactive decision 和 audit log 表。
-- [ ] 细化 model endpoint、model profile、credential、config version 和服务状态数据。
-- [ ] 定义三个生成 ModelProfile 的独立活动版本约束，以及 Embedding 配置的独立模型。
-- [ ] 定义 canonical generation 字段和三种 protocol options 的 discriminated schema。
-- [ ] 定义主键、业务唯一键、外键、检查约束和必要索引。
-- [ ] 定义时间字段、时区、Telegram 原始数据和 JSONB 扩展字段规则。
-- [ ] 定义各业务流程的事务边界和并发更新策略。
-- [ ] 定义软删除、Telegram edit/delete 同步和历史版本保留策略。
-- [ ] 定义数据保留、导出、删除、备份和恢复边界。
-- [ ] 制定 Alembic migration 规则。
+- [x] 绘制核心实体关系并定义 account、peer、conversation 和 message 的身份模型。
+- [x] 细化 message event/revision、media object、conversation turn、发送意图、模型运行、会话模式和后台任务表。
+- [x] 细化 memory、memory proposal、memory evidence、summary 和 embedding 表。
+- [x] 细化 event、intention、relationship state、proactive decision 和 audit log 表。
+- [x] 细化 model endpoint、model profile、credential、config version 和服务状态数据。
+- [x] 定义三个生成 ModelProfile 的独立活动版本约束，以及 Embedding 配置的独立模型。
+- [x] 定义 canonical generation 字段和三种 protocol options 的 discriminated schema。
+- [x] 定义主键、业务唯一键、外键、检查约束和必要索引。
+- [x] 定义时间字段、时区、Telegram 原始数据和 JSONB 扩展字段规则。
+- [x] 定义各业务流程的事务边界和并发更新策略。
+- [x] 定义软删除、Telegram edit/delete 同步和历史版本保留策略。
+- [x] 定义数据保留、导出、删除、备份和恢复边界。
+- [x] 制定 Alembic migration 规则。
 
 完成标准：Message Lifecycle、Memory Pipeline 和 Proactive Pipeline 所需状态都能持久化，并有明确的唯一性与事务约束。
 
@@ -125,7 +125,7 @@
 - [ ] 定义低置信度候选、冲突判断、遗忘和淡化策略。
 - [ ] 定义队列积压时 Context Builder 的记忆新鲜度降级策略。
 
-完成标准：任意原始消息范围可以安全重放，重复处理不会重复创建记忆，所有正式记忆都能追溯到证据消息。
+完成标准：任意 canonical message/event 范围可以安全重放，重复处理不会重复创建记忆，所有正式记忆都能追溯到证据 revision。
 
 ### 6. Context Contract
 
@@ -134,7 +134,7 @@
 - [ ] 定义 identity、personality、relationship、memory、summary、recent messages 和 current message 的装配顺序。
 - [ ] 定义各上下文层的 token 预算、截断规则和总预算。
 - [ ] 定义结构化记忆、向量记忆和最近历史的选择与排序算法。
-- [ ] 定义记忆处理滞后时扩大原始消息窗口的降级策略。
+- [ ] 定义记忆处理滞后时扩大 canonical message 窗口的降级策略。
 - [ ] 定义上下文快照、来源 ID、token 数和检索理由的记录方式。
 - [ ] 定义用户内容、记忆内容和系统指令之间的信任边界。
 - [ ] 定义 prompt injection、恶意转发内容和不可信历史的隔离方式。
@@ -186,7 +186,7 @@
 - [ ] 定义资源限制、磁盘增长、队列积压和模型 API 故障的处理方式。
 - [ ] 定义升级、回滚和灾难恢复演练流程。
 
-完成标准：全新 Ubuntu 主机可按文档完成部署，服务异常重启不会破坏 session、重复发送消息或丢失已接收的原始消息。
+完成标准：全新 Ubuntu 主机可按文档完成部署，服务异常重启不会破坏 session、重复发送消息或丢失已接收的 canonical message。
 
 ### 9. Test Strategy
 
@@ -202,6 +202,9 @@
 - [ ] 测试 incoming/outgoing 来源识别、重复 update、edit/delete 和 album。
 - [ ] 测试 Telegram random ID 映射、system pending source 和启动后 outgoing reconciliation。
 - [ ] 测试图片格式校验、伪造 MIME、解码炸弹、模型能力门禁和 `detail=auto` 映射。
+- [ ] 测试 Data Model 的 composite foreign key、partial unique、CHECK、CAS 和 one-way redaction 约束。
+- [ ] 测试 memory forget、contact purge、account wipe、backup restore 后 erasure ledger 重放和数据不复现。
+- [ ] 测试 Alembic 从空库、上一支持 revision、中断 backfill 到 head 的迁移路径。
 - [ ] 测试 debounce、顺序保证、会话锁和多 worker 竞争。
 - [ ] 测试真人发送、模式切换和模型返回同时发生的竞态。
 - [ ] 测试发送前、发送中、发送后各崩溃点的恢复行为。

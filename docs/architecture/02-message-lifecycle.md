@@ -234,7 +234,7 @@ content_part.detail = auto
 
 protocol adapter 将 canonical `detail=auto` 映射到 provider 支持的对应字段。协议没有显式 detail 字段时，只有 adapter 明确声明 provider 默认行为与 `auto` 等价才可以省略 wire 字段；否则能力校验失败。adapter 和活动 Main AI profile 都必须声明图片输入能力，不能识别能力时按不支持处理。
 
-包含图片的 turn 在图片仍为 `pending` 时不能开始生成。图片下载/验证失败或模型不支持图片时，整个包含该图片的自动回复 turn 标记为 `blocked_unsupported_media`，不调用纯文本模型猜测图片内容，也不自动发送降级回复。caption 和原始消息仍保存，真人可在 HUMAN/COPILOT 流程处理。
+包含图片的 turn 在图片仍为 `pending` 时不能开始生成。图片下载/验证失败或模型不支持图片时，整个包含该图片的自动回复 turn 标记为 `blocked_unsupported_media`，不调用纯文本模型猜测图片内容，也不自动发送降级回复。caption 与 canonical message/media metadata 仍保存，真人可在 HUMAN/COPILOT 流程处理。
 
 ## 7. 顺序、幂等与投影
 
@@ -475,7 +475,7 @@ content_revision incremented
 cleanup and memory reconciliation queued
 ```
 
-逻辑删除必须在同一事务提交后立即对 Context 查询生效。物理正文清理、事件证据最小化和媒体删除按幂等 job 完成；具体保留要求由 Data Model/Operations 定义，但任何 retained audit 都不得继续被模型检索。
+逻辑删除必须在同一事务提交后立即对 Context 查询生效。物理正文清理、事件证据最小化和媒体删除按幂等 job 完成；引用被删 revision 的 memory、summary 和 embedding 同时退出 active Context，重建后对旧派生正文与向量执行单向 redaction。具体保留要求由 Data Model/Operations 定义，但任何 retained audit 都不得继续被模型检索。
 
 发送前 delete 与 edit 一样使 turn 失效。发送后不自动追发，也不自动删除 AI 已发送消息。
 
@@ -603,7 +603,7 @@ FloodWait 不进行忙循环。记录 Telegram 指示的等待时间，将 inten
 
 同一 conversation 的 memory job 使用安静窗口合并和幂等 watermark。completed turn 可以优先触发，但 Memory Agent 读取的是已提交 canonical messages 和允许的 validated media reference，不读取未确认 source、tombstone 正文或临时下载文件。
 
-edit/delete 发生在已有 memory proposal 或正式 memory 之后时，创建 reconciliation job。Memory Pipeline 必须追踪 message evidence，执行 invalidate、supersede 或重新提取，而不是让已删除证据继续作为 active memory。具体冲突和版本规则由 Memory Pipeline 文档定义。
+edit/delete 发生在已有 memory proposal 或正式 memory 之后时，创建 reconciliation job。Memory Pipeline 必须追踪 message evidence，先隔离受影响版本，再从剩余证据执行 invalidate、supersede 或重新提取；replacement 提交后清除旧派生正文和 embedding，而不是让已删除证据继续作为 active 或可恢复 memory。具体冲突和版本规则由 Memory Pipeline 文档定义。
 
 ## 17. 隐私、安全与审计
 

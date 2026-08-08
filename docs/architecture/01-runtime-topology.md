@@ -110,7 +110,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 | `control` | 1 | Control Bot；Web App；模型配置；模式控制；`/server_status` | 不持有 Telethon Session；不发送真人账号消息 |
 | `worker` | 1..N | Memory、summary、embedding、proactive、补偿任务 | 不直接调用 Telethon；不直接产生 Telegram 副作用 |
 | `postgres` | 1 | 持久化事实源；pgvector；配置版本；审计 | 不对公网开放 |
-| `redis` | 1 | 任务队列；缓存；短期心跳；通知；短期租约 | 不作为原始消息或长期记忆的唯一事实源 |
+| `redis` | 1 | 任务队列；缓存；短期心跳；通知；短期租约 | 不作为 canonical message 或长期记忆的唯一事实源 |
 | `migrate` | 按需一次 | 获取 migration lock；执行 Alembic migration；退出 | 不常驻；不处理业务流量 |
 
 `postgres` 和 `redis` 在 V1 中均为单实例。可用性依赖备份、自动重启和补偿流程，而不是集群切换。
@@ -257,7 +257,7 @@ domain   -> Python standard library and domain-local types
 | 状态 | 事实源 | 写入者 | 读取者 |
 |---|---|---|---|
 | Telethon Session | `app` 专用 volume | `app` | `app` |
-| Telegram 原始消息 | PostgreSQL | `app` | `app`、`worker`、`control` 的受限查询 |
+| Telegram canonical message/revision | PostgreSQL | `app` | `app`、`worker`、`control` 的受限查询 |
 | Outbound intent 和发送结果 | PostgreSQL | `app` | `app`、`worker`、`control` 状态查询 |
 | Conversation mode | PostgreSQL | `control`、授权的 `app` 流程 | `app`、`control`、`worker` |
 | 长期记忆和 summary | PostgreSQL | `worker` | `app`、`worker`、受限的 `control` 查询 |
@@ -268,7 +268,7 @@ domain   -> Python standard library and domain-local types
 | 服务心跳 | Redis TTL | 对应服务自身 | `control` |
 | 服务状态变更审计 | PostgreSQL | `control` 或状态记录器 | `control`、运维查询 |
 
-Redis 丢失后允许缓存、通知和心跳丢失，但不能造成 PostgreSQL 中原始消息、正式记忆或活动配置丢失。后台任务通过 watermark 和补偿扫描重新发布。
+Redis 丢失后允许缓存、通知和心跳丢失，但不能造成 PostgreSQL 中 canonical message、正式记忆或活动配置丢失。后台任务通过 watermark 和补偿扫描重新发布。
 
 ## 11. 服务通信
 
@@ -555,7 +555,7 @@ shared control / workers / postgres / redis
 |---|---|---|---|
 | `app` 崩溃 | AI 不再接收或发送；真人客户端仍可使用账号 | 不由 worker/control 代发 | 重启后取得 account lock，恢复 update 并对账 outbound intent |
 | `control` 崩溃 | Control Bot、key-only Web App、状态查询不可用 | `app` 按最后已提交模式和模型配置继续运行 | 重启并恢复 Bot polling；不回滚已提交配置 |
-| worker 崩溃 | 记忆、summary、proactive 延迟 | 实时聊天使用已提交记忆和 recent raw messages | 队列重试；watermark 补偿扫描 |
+| worker 崩溃 | 记忆、summary、proactive 延迟 | 实时聊天使用已提交记忆和 recent canonical messages | 队列重试；watermark 补偿扫描 |
 | Scheduler leader 崩溃 | 周期任务短暂不发布 | 普通 worker 继续消费 | advisory lock 释放后重新选 leader |
 | PostgreSQL 不可用 | 无法保证事实持久化和所有权 | 自动发送 fail closed；worker 停止提交；control 报告 degraded/down | 重连、重新校验 schema/lock 后恢复 |
 | Redis 不可用 | 队列、锁、通知、heartbeat 不可用 | 原始 update 尽可能先入 PostgreSQL；自动副作用暂停；不无锁发送 | Redis 恢复后根据 DB watermark 重新发布 |

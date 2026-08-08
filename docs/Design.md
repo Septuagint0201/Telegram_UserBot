@@ -341,7 +341,7 @@ Conversation Engine 是实时消息系统的中心。
 - 识别会话
 - 判断联系人
 - 判断当前工作模式
-- 保存原始消息
+- 保存归一化 canonical message/revision
 - 获取最近聊天历史
 - 获取最近一次已提交的 Memory System 状态
 - 刷新异步记忆处理任务
@@ -358,14 +358,14 @@ Telegram Message
         |
  Conversation Engine
         |
-Idempotent Save Raw Message
+Idempotent Save Canonical Message
         |
 Refresh Pending Memory Job ---------> Async Memory Pipeline
         |
   Check Chat Mode
         |
 Build Context from Committed Memory
-and Recent Raw Messages
+and Recent Canonical Messages
         |
   Main AI Agent
         |
@@ -376,7 +376,7 @@ Telegram Send
 Reconcile Message ID and Source
 ```
 
-Memory Agent 不位于 Main AI 的同步回复路径中。它暂时尚未提取的新内容仍然通过 recent raw messages 进入 Context，因此异步记忆处理不会使 Main AI 丢失当前对话。
+Memory Agent 不位于 Main AI 的同步回复路径中。它暂时尚未提取的新内容仍然通过 recent canonical messages 进入 Context，因此异步记忆处理不会使 Main AI 丢失当前对话。
 
 V1 的消息生命周期基线见 `docs/architecture/02-message-lifecycle.md`。自动对话只覆盖非 Bot 用户的一对一 private chat；支持 text、caption 和经过验证的 photo/image document 输入，图片模型预算使用 `detail=auto`。语音、音频、视频、video note、贴纸和非图片 document 不下载二进制，只保存允许的元数据；其中只有 caption 可以作为文本输入。
 
@@ -659,7 +659,7 @@ Relevant Long-term Memory
 +
 Conversation Summary
 +
-Recent Raw Messages
+Recent Canonical Messages
 +
 Current Time Context
 +
@@ -713,7 +713,7 @@ Memory Agent 是高频运行的小模型。
 
 它不负责直接聊天。
 
-它在异步 worker 中运行，不阻塞 Main AI 的实时回复。Main AI 使用最近一次成功提交的长期记忆，同时直接读取当前会话的最新原始消息。
+它在异步 worker 中运行，不阻塞 Main AI 的实时回复。Main AI 使用最近一次成功提交的长期记忆，同时直接读取当前会话最新的 canonical message revision。
 
 核心问题只有：
 
@@ -889,15 +889,15 @@ Bob 8 月 15 日面试。
 
 ---
 
-# 16. 原始历史
+# 16. Canonical 消息历史
 
-所有 Telegram 原始消息永久存入：
+所有受支持的 Telegram 消息先归一化、去重并按 revision 保存到：
 
 ```text
 messages
 ```
 
-不依赖 LLM 的总结版本。
+除 Telegram delete、memory/contact/account 删除策略和显式 retention 边界外，canonical message 不自动过期，也不依赖 LLM 的总结版本。完整 Telegram raw update 不属于这份长期历史。
 
 这样以后：
 
@@ -907,7 +907,7 @@ messages
 - 可以更换主模型
 - 可以审计历史
 
-原始历史是系统的 source of truth。
+已归一化、可追踪 revision 的 canonical message history 是系统的 source of truth；默认不长期保存完整 Telegram raw update payload。
 
 ---
 
@@ -952,7 +952,7 @@ weekly/
 例如：
 
 ```text
-Raw Conversation
+Canonical Conversation
        |
    Daily Summary
        |
@@ -964,7 +964,7 @@ Raw Conversation
 建议层级：
 
 ```text
-recent raw messages
+recent canonical messages
 daily summary
 weekly summary
 relationship summary
@@ -1029,10 +1029,10 @@ Vector Memory 负责：
 
 # 21. Memory 生命周期
 
-原始消息进入以后，实时聊天和记忆处理分成两条流水线。记忆流水线按合并后的 conversation episode 工作：
+canonical message 提交以后，实时聊天和记忆处理分成两条流水线。记忆流水线按合并后的 conversation episode 工作：
 
 ```text
-Raw Messages
+Canonical Message Revisions
      |
 Pending Memory Job
      |
@@ -1081,7 +1081,7 @@ Memory Agent 应识别：
 }
 ```
 
-旧数据不要一定物理删除。
+普通 supersede 不要求物理删除旧版本，可以：
 
 可以：
 
@@ -1090,7 +1090,7 @@ active=false
 superseded_by=id
 ```
 
-保持历史变化轨迹。
+保持历史变化轨迹。但 Telegram delete、memory forget、contact purge 或 account wipe 触发的内容 redaction 具有更高优先级，旧版本不得借“历史审计”继续保留已要求清除的正文。
 
 ---
 
@@ -1582,10 +1582,10 @@ finish_reason
 input_tokens
 output_tokens
 provider_request_id
-raw_response_ref
+diagnostic_capture_ref?
 ```
 
-Agent 和 Memory proposal 逻辑只能读取归一化结果，不能依赖 `choices`、`content blocks` 或 Responses output item 等 wire 结构。
+`diagnostic_capture_ref` 只在服务器显式开启加密、强制 TTL 的 debug capture 时存在。Agent 和 Memory proposal 逻辑只能读取归一化结果，不能依赖 `choices`、`content blocks` 或 Responses output item 等 wire 结构。
 
 Control Bot 根据 protocol 只提供可用的字段和输入选项。切换 protocol 时创建新 draft，保留语义相同的 canonical 字段，重新校验协议特有字段、endpoint 和 credential；旧活动版本在新 draft 验证并激活前继续生效。Web App 不参与 protocol 或其他非密钥字段配置。
 
@@ -1643,45 +1643,54 @@ Vector DB
 
 这样未来可以单独替换 embedding 模型。
 
+每个 embedding model/version/dimension 对应独立 `embedding_space`。更换模型时创建新 space、重建并原子切换 active binding，不能在同一检索空间混用不同维度或模型的向量。
+
 ---
 
 # 34. 数据库设计
 
-建议使用 PostgreSQL。
+使用 PostgreSQL + pgvector。详细逻辑模型、字段、约束、索引、事务和 migration 基线见 `docs/architecture/03-data-model.md`，该文档是物理 schema 设计的权威来源。
 
-核心表：
+身份采用全局 `telegram_peers` 与账号级 `account_peers` 分离，所有主要业务表显式保存 `account_id` 并使用 composite foreign key 防止跨账号关联。核心业务实体使用 UUIDv7，高吞吐 append-only event/attempt/audit 使用 BIGINT identity。
+
+消息、记忆和 summary 正文在 PostgreSQL 中使用可查询明文列，部署必须使用宿主机磁盘加密和加密备份。Telegram/provider raw payload 默认不保存，只允许显式启用、独立加密且带强制 TTL 的 debug capture。
+
+消息 current projection 与 `message_revisions` 分离：edit 保留历史 revision；Telegram delete 时清除所有 revision 中的正文和媒体，并隔离、重建或擦除依赖该证据的记忆、summary 与向量，只保留 tombstone 与必要审计元数据。memory forget、contact purge 和 account wipe 是三个不同的 durable operation。
+
+核心表族：
 
 ```text
-users
-contacts
-conversations
-message_events
-messages
-message_media
-conversation_turns
-outbound_messages
-conversation_modes
-model_runs
-background_jobs
-memories
-memory_jobs
-memory_proposals
-memory_evidence
-memory_relations
-summaries
-summary_watermarks
-events
-intentions
-relationship_states
-agent_states
-proactive_logs
-control_logs
-model_endpoints
-model_profiles
-model_credentials
-model_config_versions
-service_status_events
+identity:
+  accounts, telegram_peers, account_peers, contacts, conversations
+
+message lifecycle:
+  message_events, messages, message_revisions, media_objects,
+  message_media, message_reactions, conversation_turns, turn_messages,
+  context_manifests, model_runs, outbound_intents
+
+durable work:
+  background_jobs, transactional_outbox, domain watermarks
+
+memory:
+  memories, memory_versions, memory_proposals, memory_evidence,
+  memory_relations, memory_jobs, summaries, summary_versions,
+  summary_watermarks, embedding_spaces, embedding_records
+
+proactive and state:
+  life_events, intentions, relationship_states,
+  proactive_decisions, agent_states, service_status_events
+
+model control:
+  model_endpoints, model_profiles, model_config_drafts,
+  model_config_versions, model_credentials,
+  model_credential_versions, control_input_sessions
+
+governance:
+  audit_log, data_erasure_requests, erasure_ledger,
+  data_export_requests, debug_payload_captures
 ```
+
+普通状态机使用 `TEXT + CHECK`，安全关键字段不得隐藏在 JSONB。JSONB 只用于带 schema version 和大小限制的 Telegram/provider 扩展、protocol options 和 typed memory payload。
 
 ---
 
@@ -1693,17 +1702,35 @@ service_status_events
 id
 account_id
 telegram_message_id
-chat_id
-sender_id
+conversation_id
 direction
 role
 source
-content
-reply_to
-created_at
+source_status
+current_revision_no
+grouped_id
+reply_to_telegram_message_id
+telegram_created_at
 edited_at
 deleted_at
 metadata
+```
+
+正文版本：
+
+```text
+message_revisions:
+id
+account_id
+message_id
+revision_no
+body_kind
+text_content / caption
+entities
+content_sha256
+source_event_id
+created_at
+redacted_at
 ```
 
 消息业务唯一键至少包含：
@@ -1716,9 +1743,9 @@ telegram_message_id
 
 重复 Telegram update 必须命中同一记录并进行幂等更新。
 
-消息还需要通过独立 event/revision/media 记录表达 edit、delete tombstone、album membership、媒体验证状态和可重放投影。V1 的正文与自动回复范围、业务键和稳定排序规则由 `docs/architecture/02-message-lifecycle.md` 固定，物理表结构在 Data Model 文档中细化。
+消息通过独立 event/revision/media 记录表达 edit、delete tombstone、album membership、媒体验证状态和可重放投影。`message_events` 不复制正文；正文位于可单向 redaction 的 `message_revisions`。V1 的正文与自动回复范围、业务键和稳定排序规则由 `docs/architecture/02-message-lifecycle.md` 固定，物理结构由 `docs/architecture/03-data-model.md` 固定。
 
-## outbound_messages
+## outbound_intents
 
 系统发送前创建 outbound intent，核心字段包括：
 
@@ -1727,12 +1754,12 @@ id
 account_id
 conversation_id
 source
-status
+state
 content_hash
-mode_version
-content_revision
+mode_version_snapshot
+content_revision_snapshot
 turn_id
-generation_number
+generation_no
 telegram_random_id
 telegram_message_id
 attempt_count
@@ -1749,29 +1776,42 @@ last_error
 # 36. memories
 
 ```text
+memories:
 id
+account_id
 contact_id
-type
-content
-importance
-confidence
-active
+conversation_id
+memory_type
+status
+current_version_no
+superseded_by_memory_id
 created_at
 updated_at
-last_accessed_at
-superseded_by
+forgotten_at
+
+memory_versions:
+id
+account_id
+memory_id
+version_no
+operation
+payload
+rendered_text
+importance
+confidence
 valid_from
 valid_to
-extractor_model
+model_run_id
 prompt_version
-metadata
+created_at
+redacted_at
 ```
 
-正式记忆必须通过 `memory_evidence` 关联一个或多个来源消息。没有证据链的模型输出不能直接进入正式长期记忆。
+`memories` 只保存稳定 identity 和 current version pointer，实际内容位于不可变 `memory_versions`。正式版本必须通过 `memory_evidence` 关联一个或多个来源 revision；没有证据链的模型输出不能直接进入正式长期记忆。forget 默认清除该 memory 的 payload、rendered text 和 embedding，但不等于删除来源消息。
 
 ---
 
-# 37. events
+# 37. life_events
 
 ```text
 id
@@ -1880,7 +1920,7 @@ Current Time
 Relevant Structured Memories
 Relevant Semantic Memories
 Conversation Summary
-Recent Raw Messages
+Recent Canonical Messages
 Current Message
 ```
 
@@ -1905,7 +1945,7 @@ Relevant memory:
 Summary:
 中预算
 
-Recent raw messages:
+Recent canonical messages:
 较大预算
 ```
 
@@ -2308,7 +2348,7 @@ last model endpoint check
 如果 Memory Agent 失败：
 
 ```text
-原始消息仍然保存
+未被删除的 canonical message/revision 仍然保存
 任务按策略重试
 补偿扫描稍后重新整理
 ```
@@ -2360,14 +2400,14 @@ Telegram Incoming
       |
 Conversation Engine
       |
-Idempotent Save Raw Message
+Idempotent Save Canonical Message
       |
 Refresh Pending Memory Job --------> Async Memory Pipeline
       |
 Debounce / Check Mode
       |
 Context Builder
-Committed Memory + Recent Raw Messages
+Committed Memory + Recent Canonical Messages
       |
 Main AI
       |

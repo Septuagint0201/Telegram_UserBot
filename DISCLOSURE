@@ -5,7 +5,7 @@
 - Project: Telegram Personal AI Digital Twin
 - Public source target: `https://gitlab.com/Septuagintks/telegram_userbot`
 - Maintainer: GitLab user `Septuagintks`
-- Review date: 2026-08-08 (Asia/Shanghai)
+- Review date: 2026-08-09 (Asia/Shanghai)
 - Current artifact status: architecture and design documentation only
 
 The repository currently contains no runnable implementation, container image, package, binary, deployment, or release artifact. The capabilities below describe the system being designed and must not be interpreted as completed or independently audited safeguards.
@@ -40,14 +40,17 @@ The project is not intended for:
 
 The design currently specifies:
 
-- PostgreSQL storage for raw messages, memories, configuration versions, decisions, and audit state;
+- PostgreSQL storage for canonical messages and editable history, versioned memories and summaries, configuration versions, decisions, embeddings, jobs, and audit state;
 - Redis for queues, cache, short-lived locks, notifications, and service heartbeat state;
 - a persistent Telethon Session file mounted only by the Telegram `app` process;
+- a private media volume for validated incoming images, with no general public media route;
 - outbound connections to Telegram and administrator-configured model endpoints;
-- a public HTTPS route limited to the Telegram Web App and its dedicated configuration API; and
+- a public HTTPS route limited to the key-only Telegram Web App and its dedicated credential API; and
 - no general public database, Redis, health, or management endpoint.
 
-Raw Telegram messages are planned to be retained as the system's source of truth. The detailed retention, export, and deletion policy has not yet been finalized. The current documentation itself performs no collection, network request, telemetry, persistence, or code execution.
+Canonical message and memory content is designed to remain queryable in PostgreSQL, protected by host-disk encryption, encrypted backups, network isolation, and database permissions. Full raw Telegram updates and provider request or response payloads are disabled by default; temporary raw diagnostic capture, when explicitly enabled, must be separately encrypted and have a mandatory expiration.
+
+Canonical messages and active memories do not automatically expire by default. Message edits retain version history, while a Telegram delete removes content from every stored revision and removes associated media, then isolates and rebuilds or redacts derived memories, summaries, and embeddings before leaving only non-content tombstone and audit metadata. Memory forget, contact-level purge, and account-wide wipe are separate durable operations. Backup restoration must replay an erasure ledger before model access or automatic sending resumes. Exact time limits for media, operational history, and diagnostic data remain to be set by the Operations design. The current documentation itself performs no collection, network request, telemetry, persistence, or code execution.
 
 ## Planned safeguards and controls
 
@@ -61,7 +64,9 @@ The architecture requires:
 - proactive-message budgets, quiet hours, intervals, and final send gates;
 - API key input through HTTPS rather than Telegram messages;
 - application-layer credential encryption with the database ciphertext separated from the master key;
+- independent credentials and immutable configuration payload versions for each logical model role;
 - API key read responses, logs, errors, and audit records that never reveal the complete key;
+- normalized message events that do not copy message bodies, one-way content redaction, and explicit data-erasure jobs;
 - no Docker Socket access by the Control Bot; and
 - private PostgreSQL and Redis network exposure.
 
