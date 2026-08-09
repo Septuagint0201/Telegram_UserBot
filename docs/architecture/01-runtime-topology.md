@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的运行时拓扑、进程所有权、模块依赖、网络边界和故障隔离规则。
 
-总体产品目标与概念架构见 `docs/Design.md`。消息状态机、数据库字段、队列具体实现和部署命令由后续详细架构文档定义。
+总体产品目标与概念架构见`docs/Design.md`；消息状态机见`docs/architecture/02-message-lifecycle.md`；数据库字段见`docs/architecture/03-data-model.md`；Caddy、arq、Compose、资源、备份和部署命令见`docs/architecture/08-operations.md`。
 
 当前状态：V1 架构基线。
 
@@ -25,7 +25,7 @@ Runtime Topology 需要保证：
 本文档覆盖：
 
 - 单台 Ubuntu Server 上的 Docker Compose 拓扑。
-- `https-gateway`、`app`、`control`、`worker`、`postgres`、`redis` 和 `migrate`。
+- `https-gateway`、`app`、`control`、`worker`、`postgres`、`redis`、`migrate`以及one-shot`session-backup/data-export`。
 - Python 模块边界和允许的依赖方向。
 - 服务之间的同步调用、持久化通信和通知方式。
 - 进程启动、停止、健康状态、扩展和故障隔离。
@@ -39,8 +39,7 @@ V1 不包含：
 - PostgreSQL、Redis 或 Control Bot 的高可用集群。
 - 同时运行多个 Telegram 真人账号。
 - 对外提供通用管理 API。
-- 在本阶段确定 Redis 任务队列的具体 Python 库。
-- 在本阶段确定 Caddy、Nginx 或其他 HTTPS gateway 产品。
+- 在Runtime Topology重复定义arq job/retry、Caddy TLS、backup或retention参数；这些由Operations负责。
 - 把 Main AI、Memory Agent 和 Proactive Agent 拆成独立微服务。
 - 让 worker 或 control 直接持有 Telethon Session 或发送用户账号消息。
 
@@ -60,6 +59,8 @@ Ubuntu 原生进程运行仅用于开发和故障排查，不作为与 Docker Co
 | 通用管理 API | 不提供 |
 | 模型凭据 | API key 只写不读，数据库密文与主密钥分离 |
 | 时间存储 | 持久化时间统一使用 UTC |
+| HTTPS/队列 | Caddy + arq/Redis，PostgreSQL仍是durable job事实源 |
+| 资源profile | Ubuntu 24.04 amd64，2 vCPU/4 GiB/40 GiB |
 
 ## 6. 总体拓扑
 
@@ -97,7 +98,7 @@ Ubuntu 原生进程运行仅用于开发和故障排查，不作为与 Docker Co
 External model endpoints are called by app, control, and worker as permitted.
 ```
 
-只有 `https-gateway` 向公网发布业务入口 TCP 443。证书签发工具如需 TCP 80，只允许用于 ACME challenge 或跳转到 HTTPS，不得在 80 上提供管理 API。Control Bot 使用出站 Bot API long polling，因此不需要公开 Telegram Bot webhook。
+只有`https-gateway`向公网发布业务入口TCP 443；稳态不开放80。Caddy必须通过443上的TLS-ALPN-01或显式批准的证书方案完成签发/续期，不能为了失败恢复静默开放新端口。Control Bot使用出站Bot API long polling，因此不需要公开Telegram Bot webhook。
 
 Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gateway` 访问 `control` 提供的静态资源和 key-only 凭据 API。endpoint、protocol、model、生成参数和启用状态等非密钥配置只通过 Control Bot 命令与短生命周期输入会话管理。
 
@@ -108,10 +109,12 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 | `https-gateway` | 1 | TLS 终止；转发 key-only Web App 页面和凭据 API | 不访问数据库；不持有业务或模型密钥 |
 | `app` | 1 | Telethon；消息接收；Conversation Engine；Context Builder；Main AI；最终发送 | 不运行 Control Bot；不执行记忆整理和 proactive 判断 |
 | `control` | 1 | Control Bot；Web App；模型配置；模式控制；COPILOT draft 审批；`/server_status` | 不持有 Telethon Session；不直接发送真人账号消息 |
-| `worker` | 1..N | Memory、summary、embedding、proactive、补偿任务 | 不直接调用 Telethon；不直接产生 Telegram 副作用 |
+| `worker` | 1（V1） | Memory、summary、embedding、proactive、补偿任务 | 不直接调用 Telethon；不直接产生 Telegram 副作用 |
 | `postgres` | 1 | 持久化事实源；pgvector；配置版本；审计 | 不对公网开放 |
 | `redis` | 1 | 任务队列；缓存；短期心跳；通知；短期租约 | 不作为 canonical message 或长期记忆的唯一事实源 |
 | `migrate` | 按需一次 | 获取 migration lock；执行 Alembic migration；退出 | 不常驻；不处理业务流量 |
+| `session-backup` | 按需一次 | app停止后只读Session volume；校验并写入加密off-host backup | 不常驻；不连接Telegram或数据库 |
+| `data-export` | 按需一次 | 读取受限导出view；写root-only加密export staging | 不常驻；不通过Web App/Bot公开artifact |
 
 `postgres` 和 `redis` 在 V1 中均为单实例。可用性依赖备份、自动重启和补偿流程，而不是集群切换。
 
@@ -174,7 +177,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 - 未处理 message watermark、partial delivery group、未知 outbound intent 等补偿扫描。
 - Scheduler tick 发布。
 
-worker 可以增加副本。任务交付语义为 at-least-once，因此每种任务都必须拥有稳定幂等键。
+2 vCPU / 4 GiB RAM 基线固定运行一个 worker 容器。更高资源档位可以在重新完成资源预算和soak验证后增加副本；任务交付语义始终为 at-least-once，因此每种任务都必须拥有稳定幂等键。
 
 所有 worker 实例都可以消费普通任务，但只有通过专用 PostgreSQL 长连接取得 Scheduler session-level advisory lock 的实例可以发布周期任务。非 leader worker 保持正常消费能力。leader 退出或该专用连接断开后锁自动释放，由其他实例重新竞争。
 
@@ -331,24 +334,27 @@ Redis 通知丢失时，本地缓存 TTL 和版本检查确保最终加载新配
 
 ## 12. 网络拓扑
 
-Compose 至少定义两个逻辑网络：
+Compose定义三个逻辑网络：
 
 ```text
 edge
 backend
+backup-egress
 ```
 
 连接规则：
 
-| 服务 | edge | backend | 公网入站 |
-|---|---:|---:|---|
-| `https-gateway` | 是 | 否 | TCP 443 |
-| `control` | 是 | 是 | 否 |
-| `app` | 否 | 是 | 否 |
-| `worker` | 否 | 是 | 否 |
-| `postgres` | 否 | 是 | 否 |
-| `redis` | 否 | 是 | 否 |
-| `migrate` | 否 | 是 | 否 |
+| 服务 | edge | backend | backup-egress | 公网入站 |
+|---|---:|---:|---:|---|
+| `https-gateway` | 是 | 否 | 否 | TCP 443 |
+| `control` | 是 | 是 | 否 | 否 |
+| `app` | 否 | 是 | 否 | 否 |
+| `worker` | 否 | 是 | 否 | 否 |
+| `postgres` | 否 | 是 | 否 | 否 |
+| `redis` | 否 | 是 | 否 | 否 |
+| `migrate` | 否 | 是 | 否 | 否 |
+| `session-backup` | 否 | 否 | 是 | 否 |
+| `data-export` | 否 | 是 | 否 | 否 |
 
 `https-gateway` 只能访问 `control` 的 key-only Web App 内部端口。它不能解析或访问 PostgreSQL、Redis、`app` 或 `worker` 的内部服务名。
 
@@ -366,26 +372,31 @@ backend
 | Volume | 挂载者 | 权限 | 内容 |
 |---|---|---|---|
 | `postgres-data` | `postgres` | 读写 | PostgreSQL 和 pgvector 数据 |
+| `pgbackrest-spool` | `postgres` | 读写 | async WAL archive spool；不是DR事实备份 |
 | `redis-data` | `redis` | 读写 | AOF/持久化队列状态 |
 | `telethon-session` | `app` | 读写、独占 | Telethon `.session` 文件 |
 | `media-data` | `app` 读写；`worker` 只读 | 私有、非公开 | 已验证的 incoming 图片和供模型使用的无 metadata 副本 |
+| `caddy-data` | `https-gateway` | 读写 | 自动HTTPS证书和私钥状态 |
+| `export-staging` | `data-export`写；host operator读 | root-only、短期 | age加密export artifact，24小时内删除 |
 
-`telethon-session` 不挂载到 `control`、`worker`、`migrate` 或 gateway。镜像构建上下文和日志中都不能包含 Session 文件。
+`telethon-session`不挂载到`control`、`worker`、`migrate`或gateway。唯一例外是app已优雅停止并释放account lock后的one-shot`session-backup`/restore helper只读挂载；它退出后立即解除。镜像构建上下文和日志中都不能包含Session文件。
 
 Session 备份必须使用与 SQLite 状态一致的受控快照，备份产物在离开主机前加密。不能在文件正在变化时使用无协调的普通复制作为唯一备份方案。
 
-`media-data` 由 `app` 负责下载、原子写入和清理；`worker` 只能按数据库中的 validated media reference 只读访问，不能创建或修改文件。`control`、gateway、PostgreSQL、Redis 和 `migrate` 不挂载该 volume。它不得通过静态文件服务发布，字节/像素限制、磁盘配额、保留期和备份策略由 Message Lifecycle 与 Operations 文档定义。
+`media-data`由`app`负责下载、原子写入和清理；`worker`只能按validated reference只读。它不得公开或备份；Operations固定20 MiB、40 MP、16384 px、30秒、10 GiB、original 30天/provider copy 24小时。
 
 ### 13.2 Secret 分配
 
-| Secret | app | control | worker | gateway | postgres/redis |
-|---|---:|---:|---:|---:|---:|
-| Telegram API ID/Hash | 是 | 否 | 否 | 否 | 否 |
-| Control Bot token | 否 | 是 | 否 | 否 | 否 |
-| Credential master key | 只读 | 只读 | 只读 | 否 | 否 |
-| TLS private key | 否 | 否 | 否 | 是 | 否 |
-| PostgreSQL credential | 是 | 是 | 是 | 否 | 服务端自身 |
-| Redis credential | 是 | 是 | 是 | 否 | 服务端自身 |
+| Secret | app | control | worker | migrate | gateway | postgres/redis | session-backup | data-export |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Telegram API ID/Hash | 是 | 否 | 否 | 否 | 否 | 否 | 否 | 否 |
+| Control Bot token | 否 | 是 | 否 | 否 | 否 | 否 | 否 | 否 |
+| Credential master key | 只读 | 只读 | 只读 | 否 | 否 | 否 | 否 | 否 |
+| TLS private key | 否 | 否 | 否 | 否 | Caddy data | 否 | 否 | 否 |
+| PostgreSQL credential | app role | control role | worker role | migrator role | 否 | 服务端自身 | 否 | export role |
+| Redis credential | 是 | 是 | 是 | 否 | 否 | 服务端自身 | 否 | 否 |
+| pgBackRest repository secret | 否 | 否 | 否 | 否 | 否 | postgres只读 | 否 | 否 |
+| restic Session repository secret | 否 | 否 | 否 | 否 | 否 | 否 | 只读 | 否 |
 
 `control`、`app` 和 `worker` 构成 V1 的受信任计算边界：
 
@@ -395,7 +406,7 @@ Session 备份必须使用与 SQLite 状态一致的受控快照，备份产物�
 - API key 不通过环境变量动态下发，不进入日志、trace、异常、审计内容或读取响应。
 - gateway、PostgreSQL 和 Redis 不持有 credential master key。
 
-主密钥使用 Docker Secret 或宿主机 root-only 文件只读挂载。主密钥轮换和恢复流程由 Operations 文档定义。
+`data-export`只获得allowlisted export view的受限数据库角色和非秘密age recipient，服务器不持有age私钥。主密钥使用root控制、仅`app/control/worker` reader GID可读的host file作为Compose secret只读挂载；不能假设本地Compose file secret会重写UID/GID，部署必须验证非root读取与未授权服务隔离。AES-256-GCM keyring、轮换、离线恢复及全部backup secret分离见Operations。
 
 ## 14. 启动顺序
 
@@ -431,7 +442,7 @@ https-gateway routes key-only Web App traffic
 
 ## 15. 优雅停止
 
-所有常驻 Python 进程必须处理 SIGTERM，并在有限时间内完成收尾。
+所有常驻Python进程必须处理SIGTERM。Compose stop grace为app/worker 90秒、control/gateway 30秒、Redis 60秒、PostgreSQL 120秒。
 
 ### app
 
@@ -470,6 +481,8 @@ https-gateway routes key-only Web App traffic
 /health/ready
 ```
 
+默认healthcheck为interval 10秒、timeout 3秒、retries 3、start period 30秒；公网gateway不代理这些路径。
+
 语义：
 
 - `live`：进程事件循环和内部健康服务仍可响应。
@@ -496,7 +509,7 @@ readiness
 last_successful_operation_at
 ```
 
-建议默认每 10 秒刷新、30 秒过期，最终数值作为可配置运维参数。PostgreSQL 只记录重要状态转换，不保存每次高频 heartbeat。
+服务每10秒刷新heartbeat，30秒未刷新即视为过期；两者是Operations固定的V1默认值，修改时必须版本化并重新验证状态告警。PostgreSQL只记录重要状态转换，不保存每次高频heartbeat。
 
 ### 16.3 server_status 输出
 
@@ -535,12 +548,12 @@ unknown
 |---|---:|---|
 | `app` | 1 | 否；一个账号只能有一个 owner |
 | `control` | 1 | 否；V1 Bot long polling 和配置写入口保持单一 |
-| `worker` | 1 起 | 是；依赖幂等任务和 Scheduler leader lock |
+| `worker` | 1 | 是；提高资源档位并重新完成资源预算和soak验证后，依赖幂等任务和 Scheduler leader lock 扩展 |
 | `https-gateway` | 1 | V1 不要求 |
 | `postgres` | 1 | V1 不要求 |
 | `redis` | 1 | V1 不要求 |
 
-worker 即使增加副本，也不能突破会话级锁、任务幂等键、proactive 幂等键或 Memory watermark。
+worker 在更高资源档位增加副本时，也不能突破会话级锁、任务幂等键、proactive 幂等键或 Memory watermark。
 
 ### 17.2 未来多账号
 
@@ -593,22 +606,12 @@ config_version（模型调用适用时）
 
 ## 20. 明确延后到后续文档的选择
 
-以下选择不会改变本文件定义的服务边界，因此延后决定：
-
-- Redis 任务队列具体采用的 Python 库。
-- HTTPS gateway 使用 Caddy、Nginx 或其他实现。
-- 内部 HTTP 端口号和 Compose service name 的最终拼写。
-- CPU、内存、磁盘和 worker concurrency 数值。
-- TLS 证书签发和更新工具。
-- PostgreSQL、Redis 和 Session 的具体备份工具。
-- 除各领域文档已定义默认值外的通用 retry、dead-letter、lease 和补偿参数。
-
-具体队列库必须满足后续 Message Lifecycle 定义的 at-least-once、延迟任务、重试、幂等和 asyncio 集成要求。
+Operations已固定Caddy、arq、2/4/40 profile、TLS、pgBackRest/restic、retry/dead-letter/lease和backup参数。实现阶段仍需在不改变本文边界的情况下固定内部port拼写、image version/digest、CPython/PostgreSQL/pgvector compatibility set和实际外部告警目标，并由Test Strategy返回运行证据。
 
 ## 21. 验收条件
 
 - [x] 每个运行组件都有唯一职责和明确状态所有者。
-- [x] 只有 `app` 挂载和使用 Telethon Session。
+- [x] 只有`app`运行时挂载和使用Telethon Session；app停止后仅one-shot backup/restore helper可受控只读挂载。
 - [x] `app` 无法取得 account ownership lock 时 fail closed。
 - [x] `control` 独立于 `app`，可以根据心跳报告 `app` 故障。
 - [x] worker 可以扩展，但只有一个 Scheduler leader。
@@ -619,4 +622,4 @@ config_version（模型调用适用时）
 - [x] API key 只写不读，且基础设施服务无法解密。
 - [x] 服务启动和停止不依赖理想容器顺序。
 - [x] 每个主要故障都有 fail-open 或 fail-closed 的明确选择。
-- [x] Runtime Topology 未提前固定后续文档负责的实现库。
+- [x] Runtime Topology 与 Operations 的 Caddy、arq、backup、resource 和 one-shot Session mount 例外一致。

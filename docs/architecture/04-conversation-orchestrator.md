@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 Conversation Orchestrator：基础模式、覆盖门禁、运行阻塞、Control Bot 命令、turn 创建、真人接管、COPILOT 草稿、恢复语义、版本门禁、并发边界、故障恢复与审计契约。
 
-总体设计见 `docs/Design.md`；消息事件、发送和3秒supersede状态机见`docs/architecture/02-message-lifecycle.md`；持久化约束见`docs/architecture/03-data-model.md`；Memory extraction与来源信任见`docs/architecture/05-memory-pipeline.md`；主动候选、quiet/bypass、预算和最终门禁见`docs/architecture/07-proactive-pipeline.md`。本文不重新定义Telegram update幂等、模型adapter、Memory extraction或Proactive候选算法。
+总体设计见`docs/Design.md`；消息/发送见`docs/architecture/02-message-lifecycle.md`；持久化见`docs/architecture/03-data-model.md`；Memory见`docs/architecture/05-memory-pipeline.md`；主动门禁见`docs/architecture/07-proactive-pipeline.md`；maintenance、disk、backup/restore和shutdown参数见`docs/architecture/08-operations.md`。本文不重新定义Telegram update幂等、模型adapter、Memory extraction或Proactive候选算法。
 
 当前状态：V1 架构基线。
 
@@ -721,7 +721,7 @@ pause 的目标是立即关闭新的模型聊天副作用，同时保留可恢�
 - canonical ingest、edit/delete reconciliation；
 - source reconciliation 和 unknown-send recovery；
 - erasure、retention 和安全清理；
-- Memory job refresh；是否执行非实时 Memory model run由 Operations maintenance scope控制。
+- Memory job refresh；`draining`允许已领取Memory job在grace内结束，`active`不领取或启动新的Memory model run。
 
 ### 16.2 Maintenance
 
@@ -734,6 +734,10 @@ active
 ```
 
 `draining` 停止领取新 conversation side effect，让已安全开始的 provider call尽快提交或取消；RPC unknown 必须对账。`active` 禁止所有新 conversation/proactive生成和发送。进入、升级或退出均递增 account control version。
+
+Restore使用host-owned`BOOTSTRAP_MAINTENANCE=1`作为数据库row之上的硬门禁：即使恢复的旧数据库显示AUTO，也不能发送。只有最新erasure ledger、Session/credential/schema和unknown-send reconciliation全部通过并经维护者确认后才可清除。
+
+Session每日/升级前backup通过`draining -> active -> stop app -> one-shot backup -> start/verify app -> inactive`执行；backup helper不能直接修改mode row或绕过account lock。整机disk达到95%/剩余不足1 GiB、Session unauthorized、account lock丢失或restore gate存在时进入operational BLOCKED。
 
 完整基础设施 shutdown 由 Runtime Topology 处理；数据库已不可用时无法通过 maintenance row 提供正确性，因此服务 readiness 和启动顺序仍必须 fail closed。
 
@@ -1094,7 +1098,7 @@ Context Contract 定义 AUTO、COPILOT reactive、COPILOT proactive 和 manual p
 
 Proactive Pipeline 定义候选、预算、quiet hours和decision状态；必须遵守本文的mode mapping和最终gate。
 
-Operations 确定draft/control history retention、timer scan interval、maintenance runbook和block probe policy。
+Operations固定terminal draft/review正文30分钟、control session 30分钟、10/30秒heartbeat、Session/upgrade maintenance、disk 70/80/90/95%门禁和block probe/runbook，见`docs/architecture/08-operations.md`。
 
 Test Strategy 将第22节实现为fake Telegram/provider、并发事务、时钟和崩溃恢复测试。
 

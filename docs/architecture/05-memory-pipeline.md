@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 Memory Pipeline：episode extraction、rolling summary、daily/weekly consolidation、reconciliation、触发与范围合并、Memory Agent 输入输出、proposal 验证、证据与冲突、summary watermark、embedding 重建、遗忘淡化、积压降级、并发恢复和人工审计契约。
 
-总体设计见 `docs/Design.md`；消息 revision、媒体和 memory refresh 入口见 `docs/architecture/02-message-lifecycle.md`；持久化骨架见 `docs/architecture/03-data-model.md`；模式控制和来源语义见 `docs/architecture/04-conversation-orchestrator.md`。本文不重新定义 Telegram update 摄取、Main AI 上下文总预算、Proactive 候选算法或 Operations 的最终 retention 数值。
+总体设计见`docs/Design.md`；消息revision/media入口见`docs/architecture/02-message-lifecycle.md`；持久化见`docs/architecture/03-data-model.md`；模式见`docs/architecture/04-conversation-orchestrator.md`；worker/retry/retention/backup见`docs/architecture/08-operations.md`。本文不重新定义Telegram ingest、Main AI预算、Proactive候选或Operations参数。
 
 当前状态：V1 架构基线。
 
@@ -1623,7 +1623,7 @@ Context Contract 定义各 context layer 的精确 token/image 配额、structur
 
 Proactive Pipeline只读取accepted active memory、event/intention、relationship projection和freshness。Memory可以从已验证event/intention投影暴露typed、bounded proactive window metadata（source version、expected/start/end、timezone、importance、status），但不能输出任意自由文本“建议联系”来绕过Proactive reason allowlist。它不得消费memory candidate、stale/quarantined summary，不能把AI/proactive output反向自证为联系人事实，也不能让Proactive Agent发明候选。
 
-Operations 确定 proposal/review/job/audit/old embedding space 的 retention 数值、provider timeout/retry、磁盘/备份加密、queue 配额、时钟和 alert threshold。
+Operations固定memory candidate active最多30天、terminal review正文30分钟、Memory Agent默认180秒/最多3 attempts、arq job最多5 executions、worker concurrency 2/CPU-heavy semaphore 1，以及backup/clock/disk/alert门禁；见`docs/architecture/08-operations.md`。
 
 Test Strategy 将第 28 节实现为 fake Memory/Embedding provider、可重放 revision fixtures、并发事务、虚拟时钟、故障注入和 restore/erasure 测试。
 

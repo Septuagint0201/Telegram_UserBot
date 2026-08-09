@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的主动候选产生、时间窗口、规则筛选、Proactive Agent 决策、Main AI 最终生成、预算、quiet hours、幂等、最终发送门禁和审计契约。
 
-总体设计见 `docs/Design.md`；运行进程和 Scheduler 所有权见 `docs/architecture/01-runtime-topology.md`；消息与发送恢复见 `docs/architecture/02-message-lifecycle.md`；持久化模型见 `docs/architecture/03-data-model.md`；模式与控制门禁见 `docs/architecture/04-conversation-orchestrator.md`；Memory、event、intention 和 relationship 投影见 `docs/architecture/05-memory-pipeline.md`；模型上下文、adapter 和长输出见 `docs/architecture/06-context-contract.md`。
+总体设计见`docs/Design.md`；运行进程见`docs/architecture/01-runtime-topology.md`；消息恢复见`docs/architecture/02-message-lifecycle.md`；持久化见`docs/architecture/03-data-model.md`；模式门禁见`docs/architecture/04-conversation-orchestrator.md`；Memory投影见`docs/architecture/05-memory-pipeline.md`；模型上下文见`docs/architecture/06-context-contract.md`；worker、retry、retention、metrics和DR见`docs/architecture/08-operations.md`。
 
 当前状态：V1 架构基线。本文的数值默认值属于不可变 proactive policy version，可由 allowlisted 管理员通过 Control Bot 创建、验证和激活新版本；消息、模型输出和普通配置 JSON 不能修改它们。
 
@@ -59,7 +59,7 @@
 - 保证主动联系一定符合联系人的期望；
 - 用模型 priority 取代确定性预算和门禁；
 - 在错过窗口、服务恢复或模式恢复后追补主动消息；
-- 定义 Operations 的最终 worker 数、重试次数、告警阈值和 retention 天数。
+- 在本文重复定义Operations已经固定的worker、retry、alert、backup和retention参数。
 
 ## 4. 术语与事实源
 
@@ -749,7 +749,7 @@ optional bypass bucket
 6. 保存authorization版本、deadline和outbox。
 7. commit。
 
-失败时不调用Main AI。Reservation默认不跨candidate window；具体短TTL由deadline与Operations上限的较小值决定。
+失败时不调用Main AI。AUTO reservation上限10分钟，COPILOT上限30分钟，且均取candidate/draft deadline与Operations上限的较小值；每分钟reaper只能释放可证明没有副作用的held reservation。
 
 ### 15.4 Minimum interval
 
@@ -1092,7 +1092,7 @@ contact、conversation、消息正文、topic和memory ID不作为metrics label�
 
 ## 31. 后续文档边界
 
-- Operations确定scheduler/lease具体参数、retention、日志/metrics、恢复命令和告警阈值。
+- Operations固定worker concurrency 2、job lease 60秒/20秒renew、最多5 executions、Proactive Agent 60秒/3 attempts、terminal topic/brief 30天、disk/backup/restore/metrics/alerts，见`docs/architecture/08-operations.md`。
 - Test Strategy实现第30节的时钟、provider、Telegram、并发和数据库测试。
 - 实现阶段可以调优阈值，但必须通过新policy version和回归数据，不得静默改变本文语义。
 

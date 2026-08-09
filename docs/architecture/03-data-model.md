@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 PostgreSQL 逻辑数据模型、实体身份、版本化方式、业务唯一键、外键、检查约束、索引、事务边界、保留与删除语义，以及 Alembic migration 规则。
 
-总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`，模式与控制状态机见 `docs/architecture/04-conversation-orchestrator.md`，记忆运行语义见 `docs/architecture/05-memory-pipeline.md`，上下文、adapter和长输出契约见 `docs/architecture/06-context-contract.md`，主动候选、静默窗口、预算和最终门禁见 `docs/architecture/07-proactive-pipeline.md`。后续实现不得绕过本文定义的账号边界、版本快照、证据链、删除语义、预算事务和发送幂等约束。
+总体设计见`docs/Design.md`，运行组件所有权见`docs/architecture/01-runtime-topology.md`，消息状态机见`docs/architecture/02-message-lifecycle.md`，模式与控制状态机见`docs/architecture/04-conversation-orchestrator.md`，记忆运行语义见`docs/architecture/05-memory-pipeline.md`，上下文与adapter见`docs/architecture/06-context-contract.md`，主动门禁见`docs/architecture/07-proactive-pipeline.md`，retention、加密、backup和migration运行规则见`docs/architecture/08-operations.md`。后续实现不得绕过本文定义的账号边界、版本快照、证据链、删除语义、预算事务和发送幂等约束。
 
 当前状态：V1 架构基线。
 
@@ -436,7 +436,7 @@ CHECK redacted_at IS NULL OR 正文、entities、content_sha256 全部已清空
 | `ready_at` | TIMESTAMPTZ | nullable |
 | `delete_requested_at` | TIMESTAMPTZ | nullable |
 | `deleted_at` | TIMESTAMPTZ | nullable |
-| `retention_class` | TEXT | Operations 定义数值 |
+| `retention_class` | TEXT | `media_original_30d/media_provider_copy_24h` |
 | `expires_at` | TIMESTAMPTZ | nullable |
 
 ready、rejected 和 deleted 状态使用 CHECK 保证字段组合一致。`storage_key` 不得包含绝对路径、`..` 或联系人原始文件名。
@@ -897,7 +897,7 @@ UNIQUE (draft_id, revision_no)
 UNIQUE (id, account_id, draft_id)
 ```
 
-`copilot_drafts.current_revision_no` 使用 deferrable composite FK。30 分钟 TTL 终止可操作状态，但 terminal draft正文实际保留期限由 Operations确定；contact purge/account wipe和Telegram证据delete reconciliation执行单向redaction。
+`copilot_drafts.current_revision_no`使用deferrable composite FK。30分钟TTL终止可操作状态，terminal draft正文在30分钟内redact；contact purge/account wipe和Telegram证据delete reconciliation优先执行单向redaction。
 
 `copilot_action_tokens` 只保存 token hash、admin ID、draft/revision、purpose、expires/used_at；`copilot_edit_sessions` 绑定 Bot chat/admin/reply message/draft 并强制短期过期。两表都不保存 callback 明文 token 或重复 draft正文。
 
@@ -1496,7 +1496,7 @@ UNIQUE (embedding_space_id, message_revision_id, chunk_index)
   WHERE message_revision_id IS NOT NULL
 ```
 
-`embedding_spaces` 提供 `(id, dimensions)` unique key，record 使用 composite FK 保证声明维度一致。pgvector ANN index 必须绑定固定 dimension/active space；具体 HNSW/IVFFlat 选择和查询参数留给 Context Contract/Operations，不建立跨 space 的无约束全局 ANN index。
+`embedding_spaces`提供`(id, dimensions)`unique key，record使用composite FK保证声明维度一致。Pgvector ANN index绑定固定dimension/active space；V1默认HNSW `m=16/ef_construction=64/ef_search=100`，参数变化需真实dataset证据，不建立跨space的无约束全局ANN index。
 
 active query 必须显式绑定一个 `embedding_space_id`，不能跨 space 混合分数。更换模型/config/dimension/metric/chunker 时创建 `building` shadow space；只有 eligible target coverage、dimension、source hash、抽样检索和 final delta 均验证后，才在 activation transaction 中把新 space 设为 active、旧 space 设为 retired。构建失败时旧 active space 保持可用。
 
@@ -1978,9 +1978,11 @@ updated_at
 | `credential_id` | UUIDv7 | FK credentials |
 | `profile_id` | UUIDv7 | 冗余 composite scope |
 | `version_no` | INTEGER | 从 1 递增 |
-| `ciphertext` | BYTEA | 应用层密文 |
-| `nonce` | BYTEA | 加密参数 |
-| `key_version` | INTEGER | credential master key version |
+| `ciphertext` | BYTEA | AES-GCM ciphertext与authentication tag |
+| `nonce` | BYTEA | 随机96-bit nonce |
+| `algorithm` | TEXT | V1固定`aes_256_gcm` |
+| `key_version` | INTEGER | credential master key key ID/version |
+| `aad_schema_version` | SMALLINT | AAD绑定deployment/profile/credential/version |
 | `secret_fingerprint` | BYTEA | keyed fingerprint，只用于判断是否变化 |
 | `status` | TEXT | `active/retired/destroyed` |
 | `created_at` | TIMESTAMPTZ | DB default |
@@ -2016,7 +2018,7 @@ expires_at
 completed_at?
 ```
 
-不保存 API key 或可能是 key 的拒绝输入。key-only Web App 的短期服务端 session 可以使用独立表，记录 admin、role、nonce hash、expires 和 used_at，不保存提交明文。
+不保存API key或可能是key的拒绝输入。Key-only Web App短期session使用独立row，至少记录admin、Bot/chat、role、action set、256-bit launch token hash、created/expires/used、initData auth timestamp和CAS version，不保存initData、token或提交明文。Launch token和`initData`默认5分钟过期且一次性。
 
 ### 11.7 Canonical generation 与 protocol options
 
@@ -2365,22 +2367,25 @@ policy_version
 updated_at
 ```
 
-具体天数在 Operations 文档确定。V1 语义基线：
+Operations固定V1 privacy-balanced profile：
 
 | 数据 | 默认语义 |
 |---|---|
 | canonical message/revision | 不自动过期，直到 Telegram delete/contact purge/account wipe |
 | active memory/summary | 不按年龄简单删除，由 Memory 生命周期或显式 forget 管理 |
-| validated media | 有界 retention，由 Operations 设置；过期后不得继续作为模型输入 |
-| read/typing/service transient event | 短期 retention |
-| debug raw capture | 强制短期 TTL，默认功能关闭 |
-| model/outbound attempts | terminal 后有限 retention，保留错误码和 usage，不保留 raw body |
-| proactive occurrence/candidate/decision/reservation | active时保留完整typed provenance；terminal后topic/brief等自由文本有限retention，长期只留ID/hash/code/version/预算和发送结果摘要 |
-| COPILOT draft/revision/edit session | active 时可操作；ready 30 分钟过期，terminal 正文有限 retention |
-| control command/action token | command metadata 有界 retention；token/session 强制短期 TTL |
-| context preview request/token/delivery | token 默认 5 分钟；request/delivery 只保留 IDs、hash、状态和删除结果，正文永不落表；已知 Bot 消息默认 10 分钟后尽力删除 |
-| audit | 有界长期 retention，不能复制 sensitive content |
-| credential retired version | 受控轮换后销毁 ciphertext，保留非秘密版本审计 |
+| validated media | original 30天、provider copy 24小时；过期后不得继续作为模型输入 |
+| read/typing/service transient event | 7天 |
+| debug raw capture | 默认关闭；显式启用最多1小时 |
+| model/outbound attempts | terminal后30天，只保留错误码/usage/metadata，不保留raw body |
+| memory candidate | active最多30天；expire后redact候选正文 |
+| proactive occurrence/candidate/decision/reservation | typed provenance按audit需要保留；terminal topic/brief 30天后redact，只留ID/hash/code/version/预算/结果 |
+| COPILOT draft/revision/edit session | active最多30分钟；terminal正文30分钟内redact |
+| control command/action token | terminal session 30分钟；unused token按自身更短TTL |
+| context preview request/token/delivery | DB metadata 30天，正文永不落表；token默认5分钟；已知Bot消息默认10分钟后尽力删除 |
+| service/model status aggregate | 30天 |
+| audit | 无正文metadata 365天 |
+| encrypted export artifact | 24小时 |
+| credential retired version | 无in-flight引用后最多7天销毁ciphertext，保留非秘密版本审计 |
 
 支持 TTL 的表显式保存 `retention_class` 与 `expires_at`。`expires_at` 是具体 policy snapshot，后续修改 policy 不应无审计地改写既有记录。
 
@@ -2492,15 +2497,19 @@ last_error_code?
 - 已 redacted/forgotten/purged 的正文；
 - 模型完整 raw request/response。
 
-导出产物必须加密、短期保存并由一次性授权下载；具体交付流程由 Operations 定义。
+V1导出产物使用维护者age public recipient加密到root-only`export-staging`，只通过既有受限SSH/SFTP由host operator按request ID/hash取回，24小时内删除；不扩展Web App、Caddy或Telegram Bot下载路径。
 
 ### 13.6 Backup 与 restore 边界
 
 - PostgreSQL backup 必须整体加密，密钥与 backup 分开。
+- PostgreSQL使用pgBackRest continuous WAL、每日differential、每周full和4个full set retention；目标RPO 15分钟。
+- Telethon Session每日及升级前由app停止后的one-shot helper校验并使用独立restic repository加密备份，保留7天。
+- `media-data`、Redis AOF、cache和Caddy private key默认不进入DR backup。
 - 因敏感正文在数据库中为明文，未加密 SQL dump 不得落入普通磁盘、日志或 CI artifact。
 - credential master key、diagnostic key、Telethon Session 和数据库 backup 分别管理；任一单独备份不能自动恢复全部权限。
 - restore 后所有 model credential 解密、account ownership、schema revision、outbound unknown intent 和 erasure ledger 检查通过前，自动发送 fail closed。
-- backup retention 不得成为绕过 contact purge/account wipe 的长期影子存储；Operations 必须定义过期和 restore 后重放 erasure 的流程。
+- 每个completed erasure通过outbox导出无正文HMAC ledger到独立加密off-host snapshot；恢复旧点必须叠加最新ledger。
+- backup retention不得成为绕过contact purge/account wipe的长期影子存储；到期和restore erasure replay按Operations执行并留存无正文证据。
 
 ## 14. 外键与删除策略
 
@@ -2907,7 +2916,7 @@ Context Contract 的 manifest item layer、token/image budget、adapter mapping�
 
 Proactive Pipeline 的occurrence、candidate membership、policy/settings version、budget bucket/reservation和decision契约以`docs/architecture/07-proactive-pipeline.md`为准；发送必须落到`proactive_decisions -> outbound_delivery_groups -> outbound_intents`，并由`app`执行最终门禁。
 
-Operations 负责确定 retention 数值、磁盘/备份加密、media 配额、数据库参数、backup/restore runbook 和 credential key rotation。
+Operations以`docs/architecture/08-operations.md`固定retention数值、AES-256-GCM keyring、media 20 MiB/40 MP/16384/30秒/10 GiB、pgBackRest/restic、2/4/40资源门禁、migration/restore和credential rotation；Data Model修改必须保持这些row snapshot与erasure语义。
 
 Test Strategy 负责把本文的约束、race、migration 和 erasure 恢复声明实现为自动化测试。
 

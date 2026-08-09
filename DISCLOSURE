@@ -25,8 +25,11 @@ The planned system will:
 - present COPILOT response or proactive drafts to an allowlisted administrator through the Control Bot for explicit send, edit, or ignore decisions;
 - present active-memory summaries, memory candidates, minimal evidence excerpts, and forget confirmations to an allowlisted administrator through the Control Bot;
 - show an allowlisted administrator metadata about the exact context assembled for a model run and, only after a separate short-lived confirmation, copy that context's canonical text into the administrator's Control Bot chat;
-- store model endpoint credentials and use them for outbound model API requests; and
-- maintain persistent account, database, cache, queue, and model configuration state.
+- store model endpoint credentials and use them for outbound model API requests;
+- maintain persistent account, database, cache, queue, and model configuration state;
+- expose only a Caddy-managed HTTPS TCP 443 route for the key-only Web App, with no public HTTP fallback, database, Redis, health, metrics, or general management route;
+- create encrypted off-host PostgreSQL/WAL and Telethon Session backups, plus an independent content-free erasure-ledger snapshot; and
+- make outbound connections to an S3-compatible backup target, an ACME certificate service, and an explicitly configured external alert target in addition to Telegram and model providers.
 
 These capabilities can support a legitimate personal digital twin, but misuse or credential compromise could enable impersonation, privacy intrusion, unwanted messaging, or unauthorized account control.
 
@@ -48,9 +51,10 @@ The design currently specifies:
 
 - PostgreSQL storage for canonical messages and editable history, versioned memories and summaries, configuration versions, decisions, embeddings, jobs, and audit state;
 - Redis for queues, cache, short-lived locks, notifications, and service heartbeat state;
-- a persistent Telethon Session file mounted only by the Telegram `app` process;
+- a persistent Telethon Session file mounted only by the Telegram `app` during runtime, with a read-only one-shot backup/restore exception while `app` is stopped;
 - a private media volume for validated incoming images, with no general public media route;
-- outbound connections to Telegram and administrator-configured model endpoints;
+- a 2 vCPU, 4 GiB RAM, 40 GiB SSD resource profile with a 10 GiB media quota and disk-pressure gates that stop media/background work and eventually block automated sending;
+- outbound connections to Telegram, administrator-configured model endpoints, S3-compatible backup storage, ACME, and an explicitly configured alert target;
 - Control Bot messages that may contain a minimum contact label and COPILOT draft text in the administrator's Telegram chat;
 - Memory Agent requests that may contain selected private-message text, captions, validated images, related active memories, and summaries, plus Embedding requests that contain eligible derived or canonical text chunks;
 - text-only Proactive Agent requests that contain only deterministic candidate reasons, typed evidence, time/relationship/activity and budget summaries, and bounded accepted active memory; selected candidates may then cause text-only Main AI requests containing the chosen topic, relationship/time context, bounded active memory, and recent committed message text;
@@ -61,9 +65,17 @@ The design currently specifies:
 - a public HTTPS route limited to the key-only Telegram Web App and its dedicated credential API; and
 - no general public database, Redis, health, or management endpoint.
 
+Encrypted data exports are not served by the Web App, Caddy, or Telegram Bot. The design writes them to root-only host staging using a maintainer-provided public encryption recipient; a host operator retrieves them through an existing restricted SSH/SFTP management channel, and the server deletes the artifact within 24 hours.
+
+The key-only Web App design uses Telegram-signed `initData`, an allowlisted administrator, a role/action-bound one-time launch token, and five-minute default freshness. API keys are encrypted with AES-256-GCM and a versioned host-mounted keyring. The page must not store keys in browser storage or load third-party analytics, but JavaScript, keyboards, browsers, operating systems, and Telegram clients may still retain transient copies outside the server's control.
+
 Canonical message and memory content is designed to remain queryable in PostgreSQL, protected by host-disk encryption, encrypted backups, network isolation, and database permissions. Full raw Telegram updates and provider request or response payloads are disabled by default; temporary raw diagnostic capture, when explicitly enabled, must be separately encrypted and have a mandatory expiration.
 
-Canonical messages and active memories do not automatically expire by default. Low-confidence, ambiguous, or image-only memory proposals remain non-active candidates and are not included in Main AI context until accepted; the later Operations design must set their terminal retention. Message edits retain version history, while a Telegram delete removes content from every stored revision and removes associated media, then isolates and rebuilds or redacts derived memories, summaries, embeddings, candidates, and COPILOT drafts before leaving only non-content tombstone and audit metadata. COPILOT draft actions expire after 30 minutes; the later Operations design must set the shorter or equal storage retention for terminal draft content, memory review content, and Bot-side notifications. Memory forget, contact-level purge, and account-wide wipe are separate durable operations. Backup restoration must replay an erasure ledger before model access or automatic sending resumes. Exact time limits for media, other operational history, and diagnostic data remain to be set by the Operations design. The current documentation itself performs no collection, network request, telemetry, persistence, or code execution.
+Canonical messages and active memories do not automatically expire by default. Validated image originals expire after 30 days and metadata-free provider copies after 24 hours; media is not included in remote backup. Active memory candidates expire after 30 days. Terminal COPILOT/review text is redacted within 30 minutes, proactive topic text after 30 days, model/outbound attempt metadata after 30 days, non-content audit metadata after 365 days, and export artifacts after 24 hours. Raw diagnostic capture is disabled by default and, if explicitly enabled, is separately encrypted and limited to one hour. Message edits retain version history, while a Telegram delete removes content from every stored revision and associated media, then isolates or redacts derived data before leaving non-content tombstone and audit metadata.
+
+PostgreSQL backup is designed to use continuous WAL archiving, daily differential backups, weekly full backups, and approximately four weeks of encrypted off-host retention. The Telethon Session is designed to be backed up daily and before upgrades into a separate encrypted repository with seven-day retention. The credential master key, database backup credentials, Session backup credentials, diagnostic key, and erasure-ledger key are separated. Restoration must overlay the latest independent erasure ledger and remain in bootstrap maintenance until schema, credentials, Session authorization, and unknown Telegram sends are reconciled. The 15-minute database RPO and two-hour whole-host RTO are unverified targets until restore drills provide evidence.
+
+The current documentation itself performs no collection, network request, telemetry, persistence, backup, or code execution. The V1 design sends no product analytics or vendor telemetry; operational metrics remain private, while configured alert destinations receive only content-free status metadata.
 
 ## Planned safeguards and controls
 
@@ -71,6 +83,7 @@ The architecture requires:
 
 - a single owner process for each Telethon Session;
 - administrator allowlisting and Telegram Web App authentication;
+- five-minute signed Web App authorization, one-time role/action-bound launch tokens, rate limits, no API-key read endpoint, and no third-party Web App analytics;
 - account-default and contact-override AUTO, HUMAN, and COPILOT controls, with PAUSED, maintenance, and temporary HUMAN overlays;
 - account-control, conversation-mode, content, turn, draft-revision, and approval checks that prevent stale AI results from being sent;
 - no automatic backlog reply after pause, takeover, or dependency recovery unless the administrator explicitly invokes the pending-reply command;
@@ -89,17 +102,21 @@ The architecture requires:
 - automatic proactive sending in AUTO mode only after all gates, proactive draft approval in COPILOT mode, and no proactive model run or backlog in HUMAN, PAUSED, maintenance, or blocked states;
 - API key input through HTTPS rather than Telegram messages;
 - application-layer credential encryption with the database ciphertext separated from the master key;
+- AES-256-GCM credential encryption with deployment/role/version-bound authenticated data, versioned key rotation, and separately stored offline recovery material;
 - independent credentials and immutable configuration payload versions for each logical model role;
 - API key read responses, logs, errors, and audit records that never reveal the complete key;
 - normalized message events that do not copy message bodies, one-way content redaction, and explicit data-erasure jobs;
-- no Docker Socket access by the Control Bot; and
+- Caddy-only public TCP 443 exposure, private health/metrics, host firewalling, encrypted disks, non-root/read-only application containers, dropped capabilities, and no Docker Socket mount;
+- exact model-endpoint URL canonicalization, redirect/proxy denial, DNS/IP revalidation, TLS verification, and a root-managed private-endpoint allowlist;
+- encrypted off-host PostgreSQL/WAL and Session backups, independent erasure-ledger replay, manual restore approval, and no automatic database downgrade;
+- fixed image byte/pixel/time limits, media and disk quotas, bounded retention, and fail-closed disk-pressure states; and
 - private PostgreSQL and Redis network exposure.
 
 These are design requirements, not claims about an implementation that does not yet exist. Future releases must test and accurately disclose which controls are actually implemented and enabled by default.
 
 ## Privileges and persistence
 
-A future deployment will hold credentials capable of controlling a Telegram account and accessing configured model APIs. It will require persistent storage for the Telethon Session and application data, and outbound network access to Telegram and model providers. The design does not require arbitrary host command execution, container-management access, privilege escalation, or public database access.
+A future deployment will hold credentials capable of controlling a Telegram account and accessing configured model APIs and backup repositories. It will require persistent storage for the Telethon Session and application data, encrypted off-host backup storage, and outbound network access to Telegram, model providers, S3-compatible storage, ACME, and a configured alert target. The design does not require arbitrary host command execution, container-management access, privilege escalation, or public database access.
 
 ## Residual risks
 
@@ -107,13 +124,17 @@ Even with the planned controls:
 
 - compromise of the host, Telethon Session, Control Bot token, administrator Telegram account, master key, or model credential may expose sensitive data or account control;
 - configured generation and embedding providers may receive highly sensitive private-message content and derived relationship or memory data, subject to those providers' own retention, logging, and jurisdictional behavior;
+- encrypted off-host database and Session backups create additional high-value copies; compromise of the backup target or recovery material may expose account control or long-term private data;
 - an incorrect mode, prompt, memory, timezone, event/intention projection, relationship inference, or proactive decision may send an unwanted, inaccurate, or inappropriately timed message;
 - administrator changes to proactive limits or quiet-hour policy may increase unwanted-message risk even though the absolute no-send window, candidate allowlist, idempotency, evidence, activity, and final-gate requirements remain mandatory in the design;
 - an incorrect extraction, summary, conflict decision, candidate approval, or embedding retrieval may preserve or surface inaccurate or overly sensitive information;
 - an explicitly confirmed context preview copies highly sensitive material into Telegram; notifications, client caches, forwards, screenshots, and Telegram-controlled copies may persist after best-effort deletion;
 - a Control Bot send that becomes `send_unknown` may have created a preview message without yielding a recoverable message ID, preventing reliable automatic deletion, and deletion requests for known messages may also fail;
 - contacts may not distinguish AI-generated and human-generated messages under the shared identity;
-- long-term storage increases privacy and breach impact; and
+- long-term storage increases privacy and breach impact;
+- a browser, keyboard, Telegram client, notification system, JavaScript runtime, DNS resolver, reverse proxy, backup service, or alert destination may retain metadata or transient sensitive material outside the application's deletion guarantees;
+- media expiration and the no-media-backup policy can make old images unavailable even when their message metadata remains;
+- backup, erasure, disk, resource, and recovery controls are currently unimplemented architecture requirements, and stated RPO/RTO values are not verified; and
 - Telegram or model-provider policy changes may make a previously valid deployment non-compliant.
 
 Operators are responsible for securing the host, obtaining appropriate authorization, setting conservative defaults, reviewing logs and proactive behavior, and stopping the service when account or credential compromise is suspected.

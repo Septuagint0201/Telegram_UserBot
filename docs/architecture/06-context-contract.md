@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的模型上下文装配、预算、检索、来源与信任边界、provider adapter、模型能力验证、配置版本和响应归一化契约。
 
-总体设计见 `docs/Design.md`；运行组件所有权见 `docs/architecture/01-runtime-topology.md`；消息、turn、model run 和发送状态机见 `docs/architecture/02-message-lifecycle.md`；持久化实体见 `docs/architecture/03-data-model.md`；会话控制门禁见 `docs/architecture/04-conversation-orchestrator.md`；记忆、summary、embedding 和 freshness 见 `docs/architecture/05-memory-pipeline.md`。
+总体设计见`docs/Design.md`；运行组件见`docs/architecture/01-runtime-topology.md`；消息/发送见`docs/architecture/02-message-lifecycle.md`；持久化见`docs/architecture/03-data-model.md`；会话门禁见`docs/architecture/04-conversation-orchestrator.md`；Memory见`docs/architecture/05-memory-pipeline.md`；provider timeout/retry、media、diagnostic、cache和runbook见`docs/architecture/08-operations.md`。
 
 当前状态：V1 架构基线。本文中的默认数值都属于版本化服务器策略，可以由管理员通过受控 Control Bot 命令修改；消息正文和不可信模型输出不能修改它们。
 
@@ -995,6 +995,8 @@ Canonical `timeout_seconds` 是从 provider attempt 实际开始到完整响应�
 - partial bytes/tokens 不作为成功结果；
 - Message Lifecycle 决定 retry、supersede 或 terminal failure。
 
+Operations默认deadline为Main AI 90秒、Memory 180秒、Proactive/Embedding 60秒，允许管理员在5–300秒范围通过role config修改。每logical run最多3 attempts；只有DNS/connection reset、429和明确retryable 5xx重试，默认full-jitter 1秒/5秒，`Retry-After`单次最多30秒且不能越过业务deadline。
+
 ### 20.2 Streaming
 
 Stream 仅用于降低延迟、计量和更快响应 cancel。所有事件先在内存中按有界 buffer 聚合并验证：
@@ -1542,15 +1544,7 @@ delivery_group_partial_total by reason
 
 Proactive Pipeline负责确定主动候选、Time Context、预算和最终send gate，规范见`docs/architecture/07-proactive-pipeline.md`；它必须复用本文canonical request、trust、version、manifest和adapter契约。
 
-Operations 负责确定：
-
-- 各 role 的实际 `max_input_tokens`、token/image reserve和 delivery chunk上限；
-- endpoint connect/read phase timeout；
-- provider/model capability catalog更新流程；
-- media/request byte limit；
-- diagnostic capture TTL和加密；
-- cache容量、TTL和 invalidation channel；
-- capability drift、partial delivery和 over-budget runbook。
+Operations契约见`docs/architecture/08-operations.md`：role deadline/attempt、20 MiB/40 MP/16384 px图片、1小时diagnostic TTL、Redis 192 MiB no-eviction目标、SSRF/TLS、capability drift和partial delivery runbook均已固定。各role实际`max_input_tokens`、token/image reserve和delivery chunk上限仍由经过fixture验证的provider capability与versioned context/model policy保存，不能设置一个跨模型虚构常数。
 
 Test Strategy 负责实现本文全部 fake/fixture/race/crash/contract测试，并以实际 tokenizer/provider fixture校准 estimator。静态文档检查不能代替真实 adapter contract和 PostgreSQL transaction测试。
 

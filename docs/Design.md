@@ -648,24 +648,25 @@ Web App 浏览器直接通过 HTTPS 连接服务器上的 `control` 凭据 API�
 每次 Web App 会话必须：
 
 - 校验 Telegram Web App `initData` 签名。
-- 校验认证数据的新鲜度，拒绝过期重放。
+- 校验认证数据的新鲜度，默认5分钟，未来时钟偏差最多30秒，拒绝过期重放。
 - 再次检查 Telegram User ID 是否位于管理员白名单。
-- 使用短生命周期的服务端管理会话。
+- 使用绑定管理员、Bot/chat、logical role和action set的256-bit一次性launch token，默认5分钟过期。
 - 对凭据写入执行审计和速率限制，审计中只记录 role、动作、结果和 credential version，不记录 key。
+- 不使用第三方analytics/CDN、cookie或browser storage保存key；request body最大16 KiB。
 
 API key 采用只写不读语义：
 
 - 管理员在 Web App 中输入一次后，通过 HTTPS 发送给 `control`。
-- 服务端使用独立主密钥进行应用层加密后保存密文。
-- 主密钥通过 Docker Secret 或仅宿主机可读的密钥文件挂载，不与数据库密文存放在一起。
+- 服务端使用AES-256-GCM、随机96-bit nonce、绑定deployment/role/version的AAD和版本化master key keyring加密。
+- 主密钥以root控制、仅`app/control/worker` reader GID可读的host file作为Compose secret挂载，不与数据库密文或backup credential存放在一起；必须验证非root容器实际可读且其他服务未挂载。
 - 后续页面只显示“已配置”和必要的非敏感标识，不返回、回显或记录完整 key。
 - 更换 key 必须重新输入；日志、审计记录、异常和 Telegram 消息中不得出现 key。
 
 V1 将 `control`、`app` 和 `worker` 视为受信任计算边界，并向这三个服务只读挂载同一主密钥。只有 `control` 可以接受和写入模型配置；`app` 与 `worker` 只能按 credential reference 读取密文，并在发起模型请求时于进程内存中短暂解密。`https-gateway`、PostgreSQL 和 Redis 不挂载主密钥，也不能获得明文 API key。
 
-模型端点默认只允许 HTTPS。需要访问 Docker 内部或本机私有模型服务时，HTTP 地址必须先由服务器侧配置显式加入允许列表；Control Bot 配置流程不能绕过内网、链路本地地址或云元数据地址限制，避免形成 SSRF 通道。
+模型端点默认只允许解析到公网unicast的HTTPS。私有HTTP(S)必须由root-only policy精确允许scheme/host/port/CIDR；Control Bot不能修改allowlist。请求禁用redirect和environment proxy，每次解析/连接重验全部A/AAAA，拒绝loopback、private、link-local、CGNAT、IPv6 ULA、云metadata和DNS rebinding；TLS验证不能由Bot关闭。
 
-模型配置采用草稿、连通性验证、激活三步流程。新配置验证失败时继续保留旧的活动配置。配置激活后只影响新创建的模型请求；已在运行的请求继续使用启动时记录的配置版本。
+模型配置采用草稿、连通性验证、激活三步流程。新配置验证失败时继续保留旧active配置；激活只影响新run。完整Caddy/Web App/key rotation/SSRF契约见`docs/architecture/08-operations.md`。
 
 ---
 
@@ -1624,11 +1625,11 @@ proposal candidate、旧/invalidated/forgotten/redacted version 和 raw image pi
 
 # 34. 数据库设计
 
-使用 PostgreSQL + pgvector。详细逻辑模型、字段、约束、索引、事务和 migration 基线见 `docs/architecture/03-data-model.md`，该文档是物理 schema 设计的权威来源。
+使用PostgreSQL + pgvector。逻辑模型、约束和migration见`docs/architecture/03-data-model.md`；部署、retention、pgBackRest/WAL、restore和资源参数见`docs/architecture/08-operations.md`。
 
 身份采用全局 `telegram_peers` 与账号级 `account_peers` 分离，所有主要业务表显式保存 `account_id` 并使用 composite foreign key 防止跨账号关联。核心业务实体使用 UUIDv7，高吞吐 append-only event/attempt/audit 使用 BIGINT identity。
 
-消息、记忆和 summary 正文在 PostgreSQL 中使用可查询明文列，部署必须使用宿主机磁盘加密和加密备份。Telegram/provider raw payload 默认不保存，只允许显式启用、独立加密且带强制 TTL 的 debug capture。
+消息、记忆和summary正文在PostgreSQL中使用可查询明文列，部署必须使用加密磁盘和加密off-host backup。PgBackRest持续WAL、每日differential、每周full，目标DB RPO 15分钟；恢复后最新erasure ledger覆盖旧快照，全部校验前保持bootstrap maintenance。Telegram/provider raw payload默认不保存；diagnostic默认关闭，显式启用最多1小时。
 
 消息 current projection 与 `message_revisions` 分离：edit 保留历史 revision；Telegram delete 时清除所有 revision 中的正文和媒体，并隔离、重建或擦除依赖该证据的记忆、summary 与向量，只保留 tombstone 与必要审计元数据。memory forget、contact purge 和 account wipe 是三个不同的 durable operation。
 
@@ -2054,10 +2055,11 @@ USER
 
 # 46. 调度
 
-主要部署基线为单台 Ubuntu Server 上的：
+Operations规范见`docs/architecture/08-operations.md`。生产基线固定为Ubuntu Server 24.04 amd64上的：
 
 ```text
 Docker Compose
+2 vCPU / 4 GiB RAM / 40 GiB SSD
 ```
 
 初期运行拓扑：
@@ -2070,21 +2072,25 @@ worker
 postgres
 redis
 migrate（一次性任务）
+session-backup（ops profile 一次性任务）
+data-export（ops profile 一次性任务）
 ```
 
 其中：
 
-- `https-gateway` 只把 key-only Telegram Web App 页面和凭据 API 通过 HTTPS 暴露给外部。
+- `https-gateway`使用Caddy，只把key-only Web App和credential API通过公网443暴露；不开放80、health、metrics或管理API。
 - `app` 固定一个副本，独占挂载的 Telethon `.session` 文件。
 - `control` 独立运行 Control Bot、Web App 和状态查询；不挂载 Telethon Session。
-- `worker` 初期使用一个服务承载多个逻辑任务队列，后续可以增加副本。
+- `worker`初期concurrency 2，使用arq/Redis dispatch；durable job/outbox/watermark始终在PostgreSQL。
 - Scheduler 位于 `worker` 中，通过专用 PostgreSQL 连接持有 advisory lock，保证同一调度任务只有一个发布者。
 - `postgres` 和 `redis` 只加入 Compose 内部网络，不映射公网端口。
-- `migrate` 在业务服务启动或升级前执行数据库迁移，成功后退出。
+- `migrate`在业务服务启动或升级前执行Alembic，成功后退出。
+- PostgreSQL通过pgBackRest持续WAL/每日differential/每周full备份；Session每日和升级前用独立restic repository加密备份。
+- Data export使用维护者age public key加密到root-only staging，只通过既有SSH/SFTP取回，24小时内删除；不扩展key-only Web App。
 
 Ubuntu 原生运行只作为开发和故障排查手段，不作为与 Docker Compose 对等维护的一等部署方式。
 
-Telethon `.session` 文件保存在 `app` 专用持久化 volume 中，不写入镜像，不与其他服务共享。Session 备份需要单独加密。
+Telethon`.session`保存在`app`专用volume。只有app停止并释放account lock时，one-shot backup/restore helper可只读挂载；常驻服务不得共享。
 
 ---
 
@@ -2099,6 +2105,8 @@ Redis 可以承担：
 短期状态
 rate limit
 ```
+
+V1使用arq。Redis配置AOF everysec、192 MiB数据目标和`noeviction`；queue payload只传durable IDs/version，不传正文或secret。Redis丢失后从PostgreSQL transactional outbox、jobs和watermarks恢复，AOF不是DR事实备份。
 
 例如：
 
@@ -2259,16 +2267,19 @@ Telethon Session 等价于账号登录权限。
 - 文件权限严格限制
 - Session 加密备份
 - 服务器使用 SSH Key
-- 除 key-only Telegram Web App 专用 HTTPS 入口外，禁止暴露管理和健康检查端口
+- Ubuntu数据盘加密，普通swap禁用或使用zram；安全更新自动安装但不自动reboot
+- 只有Caddy公网443，禁止暴露80、管理、health、metrics、PostgreSQL和Redis端口
 - Control Bot 设置 User ID 白名单
 - 数据库禁止公网直连
 - Redis 禁止公网直连
 - Web App 必须校验 Telegram `initData` 签名、时效和管理员身份
 - API key 只能通过 HTTPS Web App 提交，禁止通过 Bot 消息提交
 - API key 必须应用层加密保存，数据库密文与主密钥分离
+- API key使用AES-256-GCM和版本化keyring；master/backup/erasure/diagnostic keys用途分离
 - API key 不得出现在日志、异常、审计记录或配置读取响应中
 - 模型端点必须经过协议、地址和 SSRF 安全校验
-- incoming 图片必须经过内容与资源限制校验后写入私有 `media-data`，不得由 gateway 公开；其他媒体不得越过 metadata-only 边界下载
+- incoming图片限制为20 MiB、40 MP、16384 px、30秒、单并发，写入私有10 GiB`media-data`；original 30天、provider copy 24小时且默认不备份
+- 容器固定digest、非root、只读rootfs、drop capabilities、no-new-privileges，不挂载Docker Socket
 
 ---
 
@@ -2294,11 +2305,10 @@ Userbot 属于用户账号自动化。
 
 # 54. 日志与审计
 
-建议保存：
+日志只保存可重建的metadata和状态，不保存AI request/response正文：
 
 ```text
-AI request
-AI response
+AI request/response IDs, versions, usage and result codes
 memory changes
 proactive decision
 mode changes
@@ -2331,6 +2341,8 @@ last model endpoint check
 ```
 
 `/server_status` 只返回运维所需的摘要，不返回环境变量、路径、凭据、Prompt 正文或联系人隐私数据。
+
+服务输出JSON stdout并由Docker轮换；metrics只在内网，以低基数聚合暴露。2/4/40基线不常驻完整Prometheus/Grafana/Loki，生产还需一个独立于Control Bot/Telegram的外部健康告警通道。Raw diagnostic默认关闭，显式启用最多1小时。
 
 ---
 
@@ -2399,6 +2411,19 @@ schema/tool/length/malformed 失败不使用部分输出
 candidate 过窗即 expire，不发送固定替代文本
 reservation 或 final gate 不确定时 fail closed 并进入恢复/对账
 ```
+
+基础设施恢复遵守以下硬边界：
+
+```text
+Redis 丢失 -> 从 PostgreSQL outbox/jobs/watermarks 重建
+PostgreSQL restore -> bootstrap maintenance + 最新 erasure ledger
+Session backup -> app 停止后的一致性加密快照
+disk 90% -> 停止 media/proactive/低优先后台工作
+disk 95% -> operational BLOCKED 并安全断开 Telethon
+upgrade -> signed revision + exact digest + DB/Session backup + one-shot migration
+```
+
+数据库目标RPO为15分钟、整机目标RTO为2小时；在实际restore drill返回证据前只能称为目标，不能声明已达成。
 
 主动系统的原则应该是：
 

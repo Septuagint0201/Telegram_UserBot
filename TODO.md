@@ -188,21 +188,22 @@
 
 目标文档：`docs/architecture/08-operations.md`
 
-- [ ] 定义 Dockerfile、Compose 服务、volume、network 和 healthcheck。
-- [ ] 定义 Ubuntu 原生运行方式与 Docker 运行方式的支持边界。
-- [ ] 定义配置分层、环境变量、密钥注入和启动校验。
-- [ ] 定义 Telethon session、Bot token、模型密钥和数据库凭据的保护方式。
-- [ ] 定义 key-only Telegram Web App HTTPS 发布、`initData` 验证和管理员授权。
-- [ ] 定义 API key 只写不读、加密保存、轮换和主密钥恢复流程。
-- [ ] 定义模型端点 URL 验证、私有 HTTP 允许列表和 SSRF 防护。
-- [ ] 定义数据库和 pgvector migration 的部署流程。
-- [ ] 定义 PostgreSQL、Telethon session 和必要配置的备份恢复流程。
-- [ ] 定义 `media-data` 的字节/像素限制、下载超时、磁盘配额、保留、清理和备份策略。
-- [ ] 定义结构化日志、敏感信息脱敏、metrics 和告警。
-- [ ] 定义 liveness、readiness 和依赖服务状态检查。
-- [ ] 定义 SIGTERM、队列任务收尾和 Telethon session 关闭流程。
-- [ ] 定义资源限制、磁盘增长、队列积压和模型 API 故障的处理方式。
-- [ ] 定义升级、回滚和灾难恢复演练流程。
+- [x] 定义 Caddy、Compose services、edge/backend/backup networks、volumes、healthcheck 和 digest pinning。
+- [x] 定义 Ubuntu 24.04 amd64 + Docker Compose 生产基线，以及原生运行仅用于开发/排障。
+- [x] 定义配置分层、deployment manifest、非密钥环境变量、Compose secrets 和启动校验。
+- [x] 定义 Telethon Session、Bot token、AES-256-GCM 模型凭据、数据库/Redis/backup secret 的最小挂载矩阵。
+- [x] 定义 key-only Telegram Web App HTTPS、5 分钟 `initData`/launch token、管理员/role 绑定、rate limit 和无回显。
+- [x] 定义 API key set/replace/delete、版本化 master key keyring、在线轮换和离线恢复流程。
+- [x] 定义 public HTTPS/private allowlist endpoint、DNS/redirect/TLS/proxy 和 SSRF fail-closed 防护。
+- [x] 定义 Alembic one-shot migration、pgvector compatibility、expand/migrate/contract 和 rollback 边界。
+- [x] 定义 pgBackRest full/differential/WAL、Session/restic、独立 erasure ledger、RPO/RTO 和全机恢复流程。
+- [x] 定义 20 MiB、40 MP、16384 px、30 秒、10 GiB、original 30 天/provider copy 24 小时和不备份 media。
+- [x] 定义 JSON stdout、Docker rotation、internal Prometheus metrics、独立告警和 2/4/40 下不常驻完整监控栈。
+- [x] 定义 data export 只写 age 加密 root-only staging、仅经既有 SSH/SFTP 取回、24 小时清理，不扩展 Web App。
+- [x] 定义 liveness/readiness、10/3/3 healthcheck、10/30 秒 heartbeat 和 `/server_status` 运维字段。
+- [x] 定义 app/worker 90 秒、control/gateway 30 秒、Redis 60 秒、PostgreSQL 120 秒的 SIGTERM 流程。
+- [x] 定义 2 vCPU/4 GiB/40 GiB limits、worker concurrency 2、图片并发 1、disk 70/80/90/95% 门禁和 provider retry。
+- [x] 定义人工 digest-pinned upgrade、pre-upgrade backup、migration、兼容 rollback、Ubuntu security patch 和 DR 演练。
 
 完成标准：全新 Ubuntu 主机可按文档完成部署，服务异常重启不会破坏 session、重复发送消息或丢失已接收的 canonical message。
 
@@ -246,7 +247,15 @@
 - [ ] 测试 account/contact/bypass 日预算、关系级最小间隔、并发 reservation 和 send-unknown 保守计费。
 - [ ] 测试 30 分钟 activity、AUTO/COPILOT/HUMAN/PAUSED/BLOCKED、冲突草稿和真人接管抑制。
 - [ ] 测试 `send_now/defer_once/none`、新 activity/mode/evidence 导致 stale，以及最终 conversation-lock 安全闸门。
-- [ ] 测试 migration、备份恢复和 Docker Compose 集成运行。
+- [ ] 测试 Caddy 仅 443、Compose 网络/secret/只读文件系统、无 Docker Socket 和非公开 health/metrics。
+- [ ] 测试 key-only Web App `initData`/launch replay、role/admin binding、rate limit、API key 不回显/不入日志和 master key 轮换恢复。
+- [ ] 测试 endpoint loopback/private/metadata/IPv6/DNS rebinding/redirect/proxy/CA 的 SSRF 和 TLS 门禁。
+- [ ] 测试 arq/Redis 丢失后从 PostgreSQL outbox/job/watermark 恢复，以及 retry/dead-letter/FloodWait 上限。
+- [ ] 测试 media 字节/像素/边长/timeout/炸弹、10 GiB quota、TTL 清理和 90/95% disk 降级。
+- [ ] 测试 data export age recipient、受限 DB role、artifact hash、SSH/SFTP-only 边界和 24 小时清理。
+- [ ] 测试 pgBackRest full/differential/WAL、Session/restic、旧库+最新 erasure ledger、RPO/RTO 和 restore maintenance gate。
+- [ ] 测试 Alembic 从空库、上一支持版本、中断 backfill、兼容 app rollback 和不兼容 rollback BLOCKED。
+- [ ] 在 2 vCPU/4 GiB/40 GiB Ubuntu 24.04 amd64 上执行 Compose 集成、SIGTERM/SIGKILL、升级和 24 小时资源 soak。
 - [ ] 建立关键行为验收矩阵和回归测试数据集。
 
 完成标准：所有消息副作用、跨进程竞态和崩溃恢复声明都有自动化测试或明确标记的人工验证步骤。

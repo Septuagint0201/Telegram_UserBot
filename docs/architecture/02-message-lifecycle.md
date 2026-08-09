@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的消息范围、事件归一化、状态机、并发门禁、媒体边界、投递语义和崩溃恢复规则。
 
-总体产品目标见`docs/Design.md`，运行组件和所有权见`docs/architecture/01-runtime-topology.md`，主动候选与预算见`docs/architecture/07-proactive-pipeline.md`。数据库物理字段、具体队列库、媒体保留天数和部署参数由Data Model、Operations和Test Strategy文档细化。
+总体产品目标见`docs/Design.md`，运行组件和所有权见`docs/architecture/01-runtime-topology.md`，主动候选与预算见`docs/architecture/07-proactive-pipeline.md`，媒体/retry/FloodWait/恢复参数见`docs/architecture/08-operations.md`。数据库物理字段和测试证据由Data Model与Test Strategy细化。
 
 当前状态：V1 架构基线。
 
@@ -216,11 +216,11 @@ media_status = ready
 - 文件名使用不可预测内部 ID，不使用联系人提供的路径或原文件名。
 - 临时文件和最终文件都位于非公开 `media-data` volume，权限只授予 `app` 写入和授权 worker 只读。
 - 数据库保存相对 object key、内容 SHA-256、验证后的 MIME、尺寸、字节数和状态，不保存宿主机绝对路径。
-- provider copy 必须剥离 EXIF 和其他非必要 metadata；原图是否短期保留由 Operations 的保留策略决定。
+- provider copy必须剥离EXIF和其他非必要metadata；original保留30天，provider copy保留24小时，delete/purge/wipe优先。
 - `https-gateway` 和 `control` 不得提供通用媒体读取 URL。
 - 删除消息后媒体立即从模型可见集合移除，并创建幂等清理任务。
 
-具体字节、像素、下载 timeout 和保留期在 Data Model/Operations 中确定，但必须是服务器配置的有限值，不能由 Telegram 消息或模型请求提高。
+Operations固定V1上限：下载20 MiB、完整解码40 MP、任一边16384 px、connect 10秒/total 30秒、并发1、`media-data` 10 GiB；original保留30天、metadata-free provider copy 24小时、默认不备份。它们是服务器hard limit，Telegram消息、Bot普通配置和模型请求都不能提高。
 
 ### 6.4 模型图片契约
 
@@ -499,7 +499,7 @@ content_revision incremented
 cleanup and memory reconciliation queued
 ```
 
-逻辑删除必须在同一事务提交后立即对 Context 查询生效。物理正文清理、事件证据最小化和媒体删除按幂等 job 完成；引用被删 revision 的 memory、summary 和 embedding 同时退出 active Context，重建后对旧派生正文与向量执行单向 redaction。具体保留要求由 Data Model/Operations 定义，但任何 retained audit 都不得继续被模型检索。
+逻辑删除必须在同一事务提交后立即对Context查询生效。物理正文清理、事件证据最小化和媒体删除按幂等job完成；引用被删revision的memory、summary和embedding同时退出active Context，重建后对旧派生正文与向量执行单向redaction。具体TTL按Data Model/Operations执行；任何retained audit都不得继续被模型检索。
 
 发送前 delete 与 edit 一样使 turn 失效。发送后不自动追发，也不自动删除 AI 已发送消息。
 
@@ -589,11 +589,13 @@ Decision完成后、首项Telegram副作用前出现新的meaningful incoming/ou
 - schema 错误、内容策略错误和确定性 4xx 默认为 terminal，不自动发送错误文本。
 - provider 不支持幂等键时，重复模型调用仍不会直接造成 Telegram 副作用，因为只有 active generation 可以创建唯一 delivery group和有序 intents。
 
-具体 attempt 上限在 Operations 中配置。达到上限后 turn 进入 `failed` 或 `dead_letter`，联系人侧保持不发送。
+Operations默认每logical run最多3个attempt；role deadline默认Main 90秒、Memory 180秒、Proactive/Embedding 60秒，合法范围5–300秒。Retry只覆盖DNS/connection reset、429和明确retryable 5xx，默认full-jitter等待1秒/5秒，单次`Retry-After`最多30秒。达到上限后turn进入`failed/dead_letter`，联系人侧保持不发送。
 
 ### 15.2 Telegram FloodWait
 
 FloodWait 不进行忙循环。记录 Telegram 指示的等待时间，将 intent 转为 `retry_wait`、group保持 `pending/partial`，并在到期后重新检查门禁。
+
+自动FloodWait等待上限15分钟；超过后进入dead letter/operational alert，不创建replacement、不更换random ID。
 
 - 未执行 RPC 的 intent 可以在门禁仍有效时重试。
 - 已可能执行的 RPC 必须先 reconciliation，并复用相同 `random_id`。
