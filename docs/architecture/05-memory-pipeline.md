@@ -1621,7 +1621,7 @@ last successful compensation scan
 
 Context Contract 定义各 context layer 的精确 token/image 配额、structured/vector/recent 排序、freshness 降级截断、prompt trust boundary 和三种 generation protocol 的 wire mapping；必须消费本文的 manifest/source/freshness 契约。
 
-Proactive Pipeline 只读取 accepted active memory、event/intention 和 freshness；不得消费 candidate、stale quarantined summary 或用 proactive 输出反向自证新事实。
+Proactive Pipeline只读取accepted active memory、event/intention、relationship projection和freshness。Memory可以从已验证event/intention投影暴露typed、bounded proactive window metadata（source version、expected/start/end、timezone、importance、status），但不能输出任意自由文本“建议联系”来绕过Proactive reason allowlist。它不得消费memory candidate、stale/quarantined summary，不能把AI/proactive output反向自证为联系人事实，也不能让Proactive Agent发明候选。
 
 Operations 确定 proposal/review/job/audit/old embedding space 的 retention 数值、provider timeout/retry、磁盘/备份加密、queue 配额、时钟和 alert threshold。
 

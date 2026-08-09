@@ -564,16 +564,22 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 预览并二次确认后忘记特定 stable memory。forget 清除 memory payload、派生正文和 embedding，但默认不删除 canonical chat；contact purge/account wipe 由独立高影响流程处理。
 
 ```text
-/proactive off
+/proactive off <contact>
+/proactive on <contact>
 ```
 
-关闭某联系人主动消息。
+关闭或启用某联系人主动消息；`off`立即使首项副作用前的主动run、draft和reservation失效。
 
 ```text
-/proactive on
+/proactive status [contact]
+/proactive limits [contact]
+/proactive limits_set <contact>
+/proactive quiet [contact]
+/proactive quiet_set <contact>
+/proactive decisions [contact]
 ```
 
-启用。
+查看/修改account或联系人预算、间隔和quiet policy，以及查看不含私聊正文的decision摘要。修改使用短期多步输入、字段校验、范围预览和最终确认，不接受任意JSON规则。
 
 ```text
 /models
@@ -1196,98 +1202,27 @@ usage_count
 
 # 24. Time / Proactive Agent
 
-时间感知模型：
+Proactive Pipeline 的规范见 `docs/architecture/07-proactive-pipeline.md`。其目标是在明确规则候选、有限频率和最终发送门禁内判断“现在是否值得主动联系”，而不是让模型自由浏览所有联系人或决定Telegram副作用。
 
-**DeepSeek v4 Flash**
-
-这是系统的主动性核心。
-
-职责：
-
-> 判断当前时间点有没有值得主动做的事情。
-
-它不负责最终自然语言表达。
+`worker`运行Scheduler、候选规则、Time Context Builder、Proactive Agent和Main AI生成任务；`app`在conversation lock内执行最终门禁并独占Telethon发送。Proactive Agent不负责最终自然语言表达，也不能发明联系人、事件或候选原因。
 
 ---
 
 # 25. Proactive Agent 的时间维度
 
-需要同时理解：
-
-## Absolute Time
+规则层同时使用absolute、relationship、event、promise、conversation和social time，但只物化以下V1 reason：
 
 ```text
-现在几点
-日期
-星期几
+promise_due
+event_upcoming
+event_followup
+relationship_reconnect
+explicit_followup
 ```
 
----
+来源必须是accepted active memory投影、explicit event/intention或已提交relationship state；模型不能把模糊聊天自动升级为发送理由。联系人timezone按contact override、account timezone、deployment timezone依次解析，保存IANA zone和UTC窗口；DST gap/fold使用确定且fail-closed的转换规则。
 
-## Relationship Time
-
-```text
-多久没联系
-最后一次是谁先发消息
-上一次 AI 主动联系是什么时候
-```
-
----
-
-## Event Time
-
-```text
-生日
-面试
-旅行
-截止日期
-项目节点
-```
-
----
-
-## Promise Time
-
-例如：
-
-```text
-我晚上看看。
-```
-
-系统需要形成：
-
-```text
-Promise:
-晚上检查某件事情
-```
-
----
-
-## Conversation Time
-
-例如：
-
-```text
-昨天聊过
-刚刚聊完
-五分钟之前用户还在说话
-```
-
-避免不自然地主动插话。
-
----
-
-## Social Time
-
-例如：
-
-```text
-凌晨三点
-工作日上午
-周末晚上
-```
-
-影响是否适合主动联系。
+最近30分钟存在incoming、已对账outgoing、active turn/draft/delivery或真人接管时抑制主动行为。reaction、service metadata和无正文技术重试不刷新这一activity窗口。
 
 ---
 
@@ -1297,60 +1232,15 @@ Promise:
 
 **Time Context Builder**
 
-它负责从数据库构造压缩输入。
+它只为已经通过确定性筛选的candidate构造text-only压缩输入，包括时间、关系快照、typed reason/evidence、预算状态、最近主动结果、最多8条structured memory和4条semantic memory。它不读取全量历史、图片、未确认outgoing、candidate/quarantined memory、被删除正文或任意数据库自由查询结果。
 
-例如：
-
-```json
-{
-  "now": "2026-08-08T21:30:00+09:00",
-
-  "relationship": {
-    "last_contact_hours": 72,
-    "relationship_level": "close_friend",
-    "last_initiator": "user"
-  },
-
-  "pending": [
-    {
-      "content": "Bob 明天参加面试",
-      "importance": 0.9
-    }
-  ],
-
-  "events": [],
-
-  "relevant_memory": [
-    "Bob 最近对面试比较紧张"
-  ],
-
-  "agent_state": {
-    "proactive_messages_today": 0
-  }
-}
-```
-
-这样一次轮询可以覆盖多个维度。
+每次输入保存可重建manifest：canonical ID、revision/version、source actor、trust、选择理由、token estimate、policy/config/prompt版本和fingerprint。正文和隐私数据不进入普通日志。
 
 ---
 
 # 27. Proactive Tick
 
-建议 Scheduler 周期运行。
-
-例如：
-
-```text
-每 30 分钟
-```
-
-或者：
-
-```text
-每 1 小时
-```
-
-一次 Proactive Tick 先由确定性 SQL 和规则层筛选候选。只有存在未完成承诺、临近事件、关系时间达到阈值或其他明确候选原因的联系人，才调用 Proactive Agent：
+Scheduler使用两个OR入口：精确的durable due job和默认每15分钟的补偿扫描。两者只物化仍在有效window内的stable occurrence；服务恢复不会补发已错过窗口的主动消息。只有明确reason、有效evidence和所有前置规则通过时才调用Proactive Agent：
 
 ```text
 Scheduler
@@ -1366,16 +1256,18 @@ DeepSeek v4 Flash
 Decision
 ```
 
-不能对所有联系人在每个 Tick 中无条件调用模型。候选记录使用稳定幂等键，例如 `contact + reason + event + time_window`，避免 Scheduler 重复触发或 worker 重试时重复生成主动消息。
+不能对所有联系人无条件调用模型。Occurrence、candidate membership、decision、one-time defer、reservation、draft和delivery group分别使用版本化HMAC幂等键及数据库唯一约束，避免Scheduler、worker重试、租约重领或并发触发重复生成/发送。
 
 输出：
 
 ```json
 {
-  "action": "send",
+  "action": "send_now",
   "priority": 0.81,
-  "reason": "follow_up",
-  "topic": "job_interview"
+  "selected_occurrence_ids": ["..."],
+  "decision_code": "event_followup",
+  "topic": "job_interview",
+  "defer_until": null
 }
 ```
 
@@ -1383,9 +1275,16 @@ Decision
 
 ```json
 {
-  "action": "none"
+  "action": "none",
+  "selected_occurrence_ids": [],
+  "decision_code": "not_natural_now",
+  "topic": null,
+  "priority": 0,
+  "defer_until": null
 }
 ```
+
+第三种合法动作是`defer_once`：只能在同一candidate window内延期一次，到期后不再次调用Proactive Agent，只重跑确定性/授权门禁。
 
 ---
 
@@ -1394,10 +1293,9 @@ Decision
 Proactive Agent 只决定：
 
 ```text
-是否说
-什么时候说
-为什么说
-说什么主题
+在已有candidate中是否说
+在已有window中现在说或只延期一次
+选择哪个typed reason和topic
 ```
 
 Main AI 负责：
@@ -1406,23 +1304,9 @@ Main AI 负责：
 具体怎么说
 ```
 
-例如时间模型：
+Main AI使用独立`purpose=proactive_final`的text-only最小上下文生成非空纯文本；不使用current reactive turn、图片、tool或reply target。最终delivery group引用Main AI run，decision单独引用Proactive Agent run，以保持人格生成与时间判断的来源可审计。
 
-```json
-{
-  "action": "send",
-  "reason": "Bob 明天面试且最近比较紧张",
-  "topic": "interview"
-}
-```
-
-Main AI 最终生成：
-
-```text
-明天是不是面试了？准备得怎么样了
-```
-
-这样语言仍然保持人格一致。
+Main AI完成不等于获准发送。`app`在conversation lock内重新检查account control、mode、contact policy、activity、timezone/quiet、evidence、window、budget reservation和所有version snapshot。任一变化在首项副作用前都skip并释放reservation，不自动重新生成。
 
 ---
 
@@ -1430,53 +1314,56 @@ Main AI 最终生成：
 
 必须避免 AI 变成骚扰系统。
 
-每个联系人建议维护：
+默认策略维护：
 
 ```text
 proactive_enabled
 daily_limit
 minimum_interval
 relationship_level
-quiet_hours
+quiet_hours=22:00-08:00
+absolute_no_send=00:00-07:00
+account_daily_limit=10
 ```
 
 例如：
 
 ```text
-close_friend:
-一天最多 2 次
-
-normal_friend:
-一天最多 1 次
-
-acquaintance:
-默认很少主动
+close: daily 2, minimum interval 6h, reconnect 3d
+friend: daily 1, minimum interval 12h, reconnect 7d
+acquaintance: daily 1, minimum interval 24h, reconnect disabled
 ```
 
-还需要：
+预算在Main AI调用前以数据库事务原子reservation，分别锁定account当地日、contact当地日和可选bypass bucket；第一项Telegram副作用commit一次，明确的副作用前失败释放，send-unknown或partial保守计一次。
 
-```text
-last_proactive_at
-```
-
-防止连续主动联系。
+Quiet例外仅允许`importance >= 0.90`的显式`event_upcoming`或`promise_due`，且最晚有用时间早于08:00；只可在`22:00-24:00`或`07:00-08:00`使用，每联系人当地日最多一次。`00:00-07:00`绝对禁发；relationship reconnect和一般follow-up永不绕过。
 
 ---
 
 # 30. 主动消息状态
 
-主动消息发送后：
+模式行为固定为：
+
+```text
+AUTO -> 全部门禁后自动发送
+COPILOT -> 只创建一个待管理员审批的proactive draft
+HUMAN / temporary HUMAN / PAUSED / maintenance / BLOCKED -> 不运行模型、不补跑
+```
+
+主动消息实际发送后：
 
 ```text
 role=assistant
 source=proactive_ai
 ```
 
-之后它和正常聊天一样成为历史的一部分。
+之后它和正常聊天一样成为历史的一部分，但`proactive_ai`只能证明系统确实发送过该内容/承诺，不能单独证明联系人事实或真人风格。COPILOT批准消息保留`copilot_approved`及proactive provenance。
 
 因此下一次 AI 会知道：
 
 > “我之前主动问过他这个问题。”
+
+Decision审计保存reason/evidence IDs与versions、membership hash、policy/timezone/mode/content/activity snapshots、两次model run/config/prompt versions、quiet/budget/final-gate结果、draft/group和terminal outcome；不保存chain-of-thought、API key或普通日志中的完整私密正文。
 
 ---
 
@@ -2449,20 +2336,27 @@ last model endpoint check
 
 # 55. Proactive Log
 
-例如：
+Proactive审计以ID、受控code、hash和version为主，不在普通日志复制联系人名称、evidence正文或最终消息：
 
 ```json
 {
-  "contact": "Bob",
-  "timestamp": "...",
-  "decision": "send",
-  "reason": "interview tomorrow",
+  "decision_id": "...",
+  "contact_id": "...",
+  "candidate_membership_hash": "...",
+  "action": "send_now",
+  "reason_codes": ["event_upcoming"],
+  "evidence_version_ids": ["..."],
   "priority": 0.82,
-  "generated_message": "明天是不是面试了？"
+  "quiet_result": "normal_window",
+  "budget_reservation_id": "...",
+  "proactive_model_run_id": "...",
+  "main_model_run_id": "...",
+  "outbound_group_id": "...",
+  "terminal_result": "reconciled"
 }
 ```
 
-这样可以调整主动性策略。
+自由文本topic/brief和生成正文是敏感derived data，只在受控业务表有限保留；API key、provider header/raw body和chain-of-thought永不记录。这样仍可重建决策和调整策略，而不把私聊内容扩散到日志系统。
 
 ---
 
@@ -2500,7 +2394,10 @@ Memory freshness 为 stale 时不读取 candidate、quarantined summary 或失�
 如果 Proactive Agent 失败：
 
 ```text
-本轮跳过
+同 logical run 只对明确 retryable provider failure 有限重试
+schema/tool/length/malformed 失败不使用部分输出
+candidate 过窗即 expire，不发送固定替代文本
+reservation 或 final gate 不确定时 fail closed 并进入恢复/对账
 ```
 
 主动系统的原则应该是：
@@ -2516,24 +2413,27 @@ Memory freshness 为 stale 时不读取 candidate、quarantined summary 或失�
 即使 Proactive Agent 输出：
 
 ```text
-send=true
+action=send_now
 ```
 
 也要经过规则层检查：
 
 ```text
 proactive enabled?
-quiet hours?
-daily limit?
-minimum interval?
+reason/evidence/window still current?
+quiet hours and absolute 00:00-07:00 no-send?
+exact high-importance bypass eligibility?
+account/contact/bypass reservation valid?
+daily limit and minimum interval?
 chat currently active?
 human mode?
 blocked contact?
 account/global/contact pause or maintenance?
-account_control_version and mode_version still match?
+account_control/mode/content/activity/policy/timezone versions still match?
+no active turn/draft/delivery or human takeover?
 ```
 
-AUTO 满足后才进入 Main AI 并可能自动发送；COPILOT 下 proactive candidate 只能生成待管理员审批的草稿；HUMAN、temporary HUMAN 和 PAUSED 不生成或发送。Main AI 生成完成后，还需要在 conversation lock 内再次检查规则、幂等键、account control、mode/content version，通过后才能创建相应 draft，或原子创建 outbound delivery group 与全部 ordered intents。
+AUTO满足preliminary gate并取得原子budget reservation后才进入Main AI；COPILOT只生成待管理员审批的草稿；HUMAN、temporary HUMAN、PAUSED、maintenance和BLOCKED不运行两个模型。Main AI或草稿审批完成后，`app`仍要在conversation lock内重跑最终门禁，才可原子创建outbound delivery group与全部ordered intents。任何首项副作用前的失效都skip且不自动重生成。
 
 ---
 
@@ -2590,24 +2490,32 @@ Refresh Pending Memory Job --------> Async Memory Pipeline
 ```text
 Scheduler
    |
-SQL / Rules Candidate Filter
+Durable Due Job OR 15-minute Compensation Scan
+   |
+SQL / Rules Occurrence Filter
+   |
+No Candidate ----------------------> Stop, zero model calls
+   |
+Aggregate Stable Candidate
    |
 Time Context Builder
    |
 Proactive Agent
    |
-Decision
+send_now / defer_once / none
    |
-Rules
+Preliminary Gate + Atomic Budget Reservation
    |
-Main AI
+Main AI text-only proactive_final
    |
 Resolve mode: AUTO sends, COPILOT creates approval draft,
-HUMAN/PAUSED skips
+HUMAN/PAUSED/maintenance/BLOCKED skips
       |
-Final Rules + account/mode/content versions in Conversation Lock
+App Final Gate + account/mode/content/activity/evidence versions
+in Conversation Lock
    |
-   +-- AUTO --> Create Outbound Intent source=proactive_ai
+   +-- AUTO --> Atomically Create Delivery Group + Ordered Intents
+   |            source=proactive_ai
    |                |
    |            Telegram Send
    |                |
@@ -2619,7 +2527,7 @@ Final Rules + account/mode/content versions in Conversation Lock
    |                   |
    |              Approved -> source=copilot_approved
    |
-   +-- HUMAN/PAUSED --> Skip
+   +-- HUMAN/PAUSED/maintenance/BLOCKED --> Skip, no backlog
    |
 Refresh Pending Memory Job --------> Async Memory Pipeline
 ```

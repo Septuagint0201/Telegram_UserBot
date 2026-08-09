@@ -170,7 +170,7 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 - Evidence reconciliation、summary source rebuild 和 erasure propagation。
 - Embedding 生成、shadow-space 重建和原子切换准备。
 - 按 validated media reference 只读访问 Memory/summary 任务允许使用的图片。
-- Proactive 候选处理和模型判断。
+- Proactive durable due job、默认15分钟补偿扫描、occurrence/candidate聚合、预算reservation、模型判断和Main AI主动正文生成。
 - 未处理 message watermark、partial delivery group、未知 outbound intent 等补偿扫描。
 - Scheduler tick 发布。
 
@@ -178,7 +178,7 @@ worker 可以增加副本。任务交付语义为 at-least-once，因此每种�
 
 所有 worker 实例都可以消费普通任务，但只有通过专用 PostgreSQL 长连接取得 Scheduler session-level advisory lock 的实例可以发布周期任务。非 leader worker 保持正常消费能力。leader 退出或该专用连接断开后锁自动释放，由其他实例重新竞争。
 
-worker 产生主动发送决策后，只能保存 decision 并提交发送请求。最终规则检查、conversation lock、outbound delivery group/intents 和 Telethon 发送仍由 `app` 执行。
+worker产生主动发送决策后，只能保存decision/reservation并提交带完整version references的发送或草稿请求。Scheduler leader只负责发布tick；due job、occurrence、candidate和reservation均持久化且幂等，Redis/leader lease不是事实源。最终规则检查、conversation lock、outbound delivery group/intents和Telethon发送仍由`app`执行。
 
 ### 8.4 migrate
 

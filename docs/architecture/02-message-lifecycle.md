@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的消息范围、事件归一化、状态机、并发门禁、媒体边界、投递语义和崩溃恢复规则。
 
-总体产品目标见 `docs/Design.md`，运行组件和所有权见 `docs/architecture/01-runtime-topology.md`。数据库物理字段、具体队列库、媒体保留天数和部署参数由后续 Data Model、Operations 和 Test Strategy 文档细化。
+总体产品目标见`docs/Design.md`，运行组件和所有权见`docs/architecture/01-runtime-topology.md`，主动候选与预算见`docs/architecture/07-proactive-pipeline.md`。数据库物理字段、具体队列库、媒体保留天数和部署参数由Data Model、Operations和Test Strategy文档细化。
 
 当前状态：V1 架构基线。
 
@@ -572,6 +572,12 @@ lease owner token still valid
 任一检查失败时不得创建 group/intent，输出转为 discarded/cancelled，并按原因决定是否创建 replacement turn。
 
 Group/intents 创建后到首个 Telegram RPC 前再执行一次完整轻量门禁。首段之后每个 chunk发送前至少检查 group状态、ordinal、account/mode/maintenance强门禁、selected source revision仍current且未edit/delete/redact，以及没有真人接管。前序同group outgoing和新incoming引起的通用`content_revision`变化是允许的，因此首段产生副作用后不能继续要求它等于初始snapshot；这些incoming进入下一turn。已经进入结果不确定状态的 RPC 不能假定未发送，必须进入 reconciliation。
+
+### 14.3 Proactive delivery
+
+主动正文使用普通outbound delivery group/intents状态机和每段stable`telegram_random_id`，但没有reactive`turn_id`或Telegram reply target；group通过唯一`proactive_decision_id`绑定decision，并引用生成正文的Main AI run。
+
+Decision完成后、首项Telegram副作用前出现新的meaningful incoming/outgoing、mode/content/activity/evidence/timezone/policy变化时，主动authorization立即stale：best-effort cancel，丢弃late output，释放可安全释放的budget reservation，不创建replacement proactive generation。首项副作用之后的新incoming进入下一reactive turn；只能阻止尚未发送的剩余ordinal并按`partial_cancelled/send_unknown`对账，不能重发或撤销已确认段。
 
 ## 15. Retry、FloodWait 与失败恢复
 

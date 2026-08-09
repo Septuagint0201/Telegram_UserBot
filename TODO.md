@@ -171,16 +171,16 @@
 
 目标文档：`docs/architecture/07-proactive-pipeline.md`
 
-- [ ] 定义 SQL/规则层的候选联系人和候选事件筛选方式。
-- [ ] 定义 Proactive Agent 的输入、输出和拒绝条件。
-- [ ] 定义 event、intention、relationship time 和 conversation time 的读取规则。
-- [ ] 定义联系人时区、DST、quiet hours 和适合联系的时间窗口。
-- [ ] 定义每日预算、最小间隔、关系等级和全局限额。
-- [ ] 定义 proactive decision 和发送行为的幂等键。
-- [ ] 定义 Main AI 生成主动消息时使用的上下文。
-- [ ] 定义发送前在 conversation lock 内执行的最终安全闸门。
-- [ ] 定义 HUMAN、COPILOT、PAUSED、活跃会话和真人接管时的抑制规则。
-- [ ] 定义主动消息决策、原因、证据、模型和最终结果的审计记录。
+- [x] 定义 SQL/规则层的候选联系人和候选事件筛选方式；stable due job 与 15 分钟补偿扫描为 OR 触发。
+- [x] 定义 Proactive Agent 的 strict 输入、`send_now/defer_once/none` 输出和拒绝条件。
+- [x] 定义 `promise_due/event_upcoming/event_followup/relationship_reconnect/explicit_followup` 的 event、intention、relationship time 和 conversation time 读取规则。
+- [x] 定义联系人时区、DST、默认 `22:00-08:00` quiet hours、`00:00-07:00` 绝对禁发和受限高重要性例外。
+- [x] 定义关系级每日预算、最小间隔、account 全局日限额和原子 reservation。
+- [x] 定义 occurrence、candidate、decision、defer、draft、delivery group 和发送行为的幂等键。
+- [x] 定义 Main AI 生成主动消息时使用的 text-only 最小上下文和 manifest。
+- [x] 定义发送前在 conversation lock 内执行的最终安全闸门和原子 delivery group/intents。
+- [x] 定义 HUMAN、COPILOT、PAUSED、活跃会话、冲突草稿和真人接管时的抑制规则；activity 窗口默认 30 分钟。
+- [x] 定义主动消息决策、原因、证据、模型、预算、静默例外和最终结果的审计记录。
 
 完成标准：worker 重试、scheduler 重复触发或并发执行时不会产生重复主动消息，任何主动发送都有完整决策依据。
 
@@ -241,7 +241,11 @@
 - [ ] 测试 prompt injection、恶意 forward/reply label、历史 AI 指令和图片文字始终保持数据权限。
 - [ ] 测试长文本 deterministic splitter、grapheme 边界、delivery group 原子创建、逐段 random ID 对账和部分失败恢复。
 - [ ] 测试 `/context` 无正文、preview token 过期/重放/越权/source redaction、Bot send unknown、定时删除失败和所有日志/队列不含 preview 正文。
-- [ ] 测试 Proactive Pipeline 的时区、预算、幂等和最终安全闸门。
+- [ ] 测试 Proactive Pipeline 无 candidate 时零模型调用，due/补偿扫描与 worker 重试幂等。
+- [ ] 测试联系人/account 时区、DST gap/fold、默认 quiet hours、绝对禁发和每日一次受限 bypass。
+- [ ] 测试 account/contact/bypass 日预算、关系级最小间隔、并发 reservation 和 send-unknown 保守计费。
+- [ ] 测试 30 分钟 activity、AUTO/COPILOT/HUMAN/PAUSED/BLOCKED、冲突草稿和真人接管抑制。
+- [ ] 测试 `send_now/defer_once/none`、新 activity/mode/evidence 导致 stale，以及最终 conversation-lock 安全闸门。
 - [ ] 测试 migration、备份恢复和 Docker Compose 集成运行。
 - [ ] 建立关键行为验收矩阵和回归测试数据集。
 

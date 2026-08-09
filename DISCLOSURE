@@ -20,6 +20,7 @@ The planned system will:
 - retain canonical conversation revisions and derived long-term memories;
 - send selected private-message revisions, captions, validated images, active memories, and summaries to administrator-configured Memory Agent endpoints for extraction or consolidation;
 - send eligible memory, summary, and canonical text chunks to an administrator-configured Embedding endpoint;
+- send rule-filtered private relationship, activity, event, intention, and accepted active-memory data to an administrator-configured Proactive Agent endpoint, then send the selected topic and bounded private text context to the Main AI endpoint for final proactive-message generation;
 - allow an administrator to change conversation modes and non-secret model configuration through a Control Bot, while the Telegram Web App remains key-only;
 - present COPILOT response or proactive drafts to an allowlisted administrator through the Control Bot for explicit send, edit, or ignore decisions;
 - present active-memory summaries, memory candidates, minimal evidence excerpts, and forget confirmations to an allowlisted administrator through the Control Bot;
@@ -52,6 +53,7 @@ The design currently specifies:
 - outbound connections to Telegram and administrator-configured model endpoints;
 - Control Bot messages that may contain a minimum contact label and COPILOT draft text in the administrator's Telegram chat;
 - Memory Agent requests that may contain selected private-message text, captions, validated images, related active memories, and summaries, plus Embedding requests that contain eligible derived or canonical text chunks;
+- text-only Proactive Agent requests that contain only deterministic candidate reasons, typed evidence, time/relationship/activity and budget summaries, and bounded accepted active memory; selected candidates may then cause text-only Main AI requests containing the chosen topic, relationship/time context, bounded active memory, and recent committed message text;
 - Control Bot memory-review messages that may contain a minimum contact label, memory/candidate summary, confidence/source category, and minimal evidence excerpt in the administrator's Telegram chat;
 - metadata-only `/context` responses that contain manifest identifiers, budgets, counts, reasons, freshness, and versions but no private-message, memory, summary, or trusted-prompt text;
 - explicitly confirmed `/context_preview` messages that may copy private-message text, memories, summaries, and trusted prompt text into the administrator's Control Bot chat; images are represented only by media reference, hash, MIME type, dimensions, and detail metadata, not by retransmitted binary data;
@@ -81,7 +83,10 @@ The architecture requires:
 - in-memory-only context-preview reconstruction, no preview body in request, token, delivery, queue, log, or audit records, no image-binary access by the Control Bot, and tracked best-effort deletion of known Bot message IDs;
 - immutable summary source membership and isolated embedding spaces so deleted evidence or vectors from different model spaces cannot remain silently active;
 - outbound intent records, idempotency, and Telegram message reconciliation;
-- proactive-message budgets, quiet hours, intervals, and final send gates;
+- deterministic proactive reason filtering with no model-discovered contacts or candidates, no proactive image input, and no missed-window backlog after downtime;
+- default proactive account/contact daily budgets, relationship intervals, a 30-minute activity suppression window, atomic budget reservation, and final send gates in the Telethon-owning process;
+- default `22:00-08:00` proactive quiet hours and an absolute `00:00-07:00` no-send window; only explicit `event_upcoming` or `promise_due` evidence with importance at least 0.90 and a latest useful time before 08:00 may use the `22:00-24:00` or `07:00-08:00` shoulder windows, at most once per contact local day;
+- automatic proactive sending in AUTO mode only after all gates, proactive draft approval in COPILOT mode, and no proactive model run or backlog in HUMAN, PAUSED, maintenance, or blocked states;
 - API key input through HTTPS rather than Telegram messages;
 - application-layer credential encryption with the database ciphertext separated from the master key;
 - independent credentials and immutable configuration payload versions for each logical model role;
@@ -102,7 +107,8 @@ Even with the planned controls:
 
 - compromise of the host, Telethon Session, Control Bot token, administrator Telegram account, master key, or model credential may expose sensitive data or account control;
 - configured generation and embedding providers may receive highly sensitive private-message content and derived relationship or memory data, subject to those providers' own retention, logging, and jurisdictional behavior;
-- an incorrect mode, prompt, memory, or proactive decision may send an inappropriate message;
+- an incorrect mode, prompt, memory, timezone, event/intention projection, relationship inference, or proactive decision may send an unwanted, inaccurate, or inappropriately timed message;
+- administrator changes to proactive limits or quiet-hour policy may increase unwanted-message risk even though the absolute no-send window, candidate allowlist, idempotency, evidence, activity, and final-gate requirements remain mandatory in the design;
 - an incorrect extraction, summary, conflict decision, candidate approval, or embedding retrieval may preserve or surface inaccurate or overly sensitive information;
 - an explicitly confirmed context preview copies highly sensitive material into Telegram; notifications, client caches, forwards, screenshots, and Telegram-controlled copies may persist after best-effort deletion;
 - a Control Bot send that becomes `send_unknown` may have created a preview message without yielding a recoverable message ID, preventing reliable automatic deletion, and deletion requests for known messages may also fail;

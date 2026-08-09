@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 PostgreSQL 逻辑数据模型、实体身份、版本化方式、业务唯一键、外键、检查约束、索引、事务边界、保留与删除语义，以及 Alembic migration 规则。
 
-总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`，模式与控制状态机见 `docs/architecture/04-conversation-orchestrator.md`，记忆运行语义见 `docs/architecture/05-memory-pipeline.md`，上下文、adapter和长输出契约见 `docs/architecture/06-context-contract.md`。后续 Proactive Pipeline 可以增加字段和受约束的扩展类型，但不得绕过本文定义的账号边界、版本快照、证据链、删除语义和发送幂等约束。
+总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`，模式与控制状态机见 `docs/architecture/04-conversation-orchestrator.md`，记忆运行语义见 `docs/architecture/05-memory-pipeline.md`，上下文、adapter和长输出契约见 `docs/architecture/06-context-contract.md`，主动候选、静默窗口、预算和最终门禁见 `docs/architecture/07-proactive-pipeline.md`。后续实现不得绕过本文定义的账号边界、版本快照、证据链、删除语义、预算事务和发送幂等约束。
 
 当前状态：V1 架构基线。
 
@@ -1526,7 +1526,69 @@ token 绑定 allowlisted admin、Bot chat、action、target 和 expected version
 
 ## 10. Proactive 与关系投影
 
-### 10.1 `life_events`
+### 10.1 Policy 与联系人设置
+
+`proactive_policy_versions`保存deployment/account默认策略的不可变版本，active binding只指向其中一版：
+
+| 字段 | 类型 | 约束与语义 |
+|---|---|---|
+| `id` | UUIDv7 | PK |
+| `account_id` | UUIDv7 | nullable；NULL为deployment default |
+| `version_no` | BIGINT | scope内递增 |
+| `enabled` | BOOLEAN | account global开关 |
+| `scheduler_scan_seconds` | INTEGER | 默认900，正数 |
+| `activity_suppression_seconds` | INTEGER | 默认1800，正数 |
+| `quiet_start_local` / `quiet_end_local` | TIME | 默认22:00/08:00 |
+| `absolute_no_send_start_local` / `absolute_no_send_end_local` | TIME | 固定00:00/07:00；V1不可放宽 |
+| `bypass_importance_threshold` | NUMERIC(4,3) | 默认0.900，范围0..1 |
+| `contact_bypass_daily_limit` | SMALLINT | 默认1，V1为0或1 |
+| `account_daily_limit` | SMALLINT | 默认10，非负 |
+| `close_daily_limit` / `friend_daily_limit` / `acquaintance_daily_limit` | SMALLINT | 默认2/1/1 |
+| `close_min_interval_seconds` / `friend_min_interval_seconds` / `acquaintance_min_interval_seconds` | INTEGER | 默认21600/43200/86400 |
+| `close_reconnect_seconds` / `friend_reconnect_seconds` | INTEGER | 默认259200/604800 |
+| `reason_policy_schema_version` | SMALLINT | NOT NULL |
+| `reason_policy` | JSONB | 只允许受schema校验的reason窗口扩展，不放任意表达式 |
+| `context_contract_version` | TEXT | 主动输入选择契约 |
+| `created_by_admin_id` | UUIDv7 | FK administrator |
+| `created_at` | TIMESTAMPTZ | DB default |
+
+```text
+UNIQUE (account_id, version_no) NULLS NOT DISTINCT
+CHECK (scheduler_scan_seconds > 0 AND activity_suppression_seconds > 0)
+CHECK (bypass_importance_threshold BETWEEN 0 AND 1)
+CHECK (contact_bypass_daily_limit BETWEEN 0 AND 1)
+CHECK (所有 daily limit >= 0 AND 所有 interval > 0)
+```
+
+`proactive_policy_bindings(scope_type, account_id, active_version_id, version, updated_at)`保存`deployment/account`的current pointer；deployment scope要求`account_id IS NULL`，account scope要求非空，scope内唯一。Active version使用包含scope/account的deferrable composite FK，不能以“最大version_no”推断当前策略。
+
+`contact_proactive_setting_versions`保存contact override历史：
+
+```text
+id UUIDv7 PK
+account_id
+contact_id
+version_no
+enabled
+daily_limit_override?
+minimum_interval_seconds_override?
+reconnect_seconds_override?
+quiet_start_local_override?
+quiet_end_local_override?
+relationship_level_override?
+created_by_admin_id
+created_at
+UNIQUE (contact_id, version_no)
+UNIQUE (id, account_id, contact_id)
+```
+
+`contact_proactive_settings(contact_id PK, account_id, active_version_id, version, updated_at)`保存current pointer，并以`(active_version_id, account_id, contact_id)` composite FK指向version row。设置激活递增`version`，使旧candidate/authorization可通过snapshot失效。
+
+Contact override可以关闭、收紧或经管理员确认调整普通限制；数据库/业务校验不允许其放宽`00:00-07:00`绝对禁发、bypass reason集合或每日一次上限。`contacts.proactive_enabled`保留为快速硬开关；active setting binding/version用于完整策略。
+
+`relationship_level=unknown`在预算与间隔上使用`acquaintance_*`列，在reconnect规则中保持禁用；不能因缺少关系分类取得更宽松限制。
+
+### 10.2 `life_events`
 
 避免与 `message_events` 混淆，业务生活事件使用 `life_events`：
 
@@ -1546,7 +1608,7 @@ created_at
 updated_at
 ```
 
-### 10.2 `intentions`
+### 10.3 `intentions`
 
 ```text
 id UUIDv7 PK
@@ -1565,7 +1627,7 @@ updated_at
 
 `life_events` 和 `intentions` 是由已验证 memory 派生的可查询投影；修改投影不能反向静默改写 memory evidence。
 
-### 10.3 Relationship state
+### 10.4 Relationship state
 
 `relationship_states` 保存每个 contact 当前投影：
 
@@ -1587,7 +1649,128 @@ updated_at
 
 `relationship_state_versions` 保存不可变历史和 source watermark，唯一键 `(contact_id, version)`。payload 只放低频扩展信号，主要 proactive SQL 筛选字段必须提升为普通列。
 
-### 10.4 `proactive_decisions`
+### 10.5 `proactive_rule_occurrences`
+
+每个可调度规则实例为immutable generation；源对象或policy变化创建新row并使旧rowinvalidated：
+
+| 字段 | 类型 | 约束与语义 |
+|---|---|---|
+| `id` | UUIDv7 | PK |
+| `account_id` / `contact_id` / `conversation_id` | UUIDv7 | widest composite FK |
+| `occurrence_key` | BYTEA | 32-byte versioned HMAC |
+| `generation` | INTEGER | 同key递增 |
+| `reason_code` | TEXT | V1 allowlist五类 |
+| `state` | TEXT | `scheduled/eligible/grouped/evaluated/suppressed/invalidated/expired` |
+| `window_start_at` / `window_end_at` | TIMESTAMPTZ | 非空且start < end |
+| `hard_deadline_at` | TIMESTAMPTZ | 不晚于window end |
+| `timezone_name_snapshot` | TEXT | IANA zone |
+| `local_date_snapshot` | DATE | 联系人当地日 |
+| `importance` | NUMERIC(4,3) | 0..1 |
+| `quiet_bypass_possible` | BOOLEAN | 只表示规则资格，不是授权 |
+| `source_object_type` | TEXT | `life_event/intention/relationship/explicit_followup` |
+| `source_object_id` / `source_version` | UUIDv7 / BIGINT | typed source identity |
+| `policy_version_id` | UUIDv7 | FK immutable policy |
+| `contact_setting_version_id` | UUIDv7 | nullable FK |
+| `relationship_state_version` | BIGINT | snapshot |
+| `created_at` / `terminal_at` | TIMESTAMPTZ | audit |
+
+```text
+UNIQUE (account_id, occurrence_key, generation)
+UNIQUE (id, account_id, contact_id, conversation_id)
+CHECK (window_start_at < window_end_at AND hard_deadline_at <= window_end_at)
+CHECK (importance BETWEEN 0 AND 1)
+CHECK (quiet_bypass_possible = false OR
+       (reason_code IN ('event_upcoming', 'promise_due') AND importance >= 0.900))
+```
+
+`proactive_occurrence_evidence`使用与memory evidence相同的typed-FK模式，恰好引用一个memory version、life event、intention、message revision或受控rule code。证据失效通过join可找到尚未发送的occurrence/decision并排队reconcile。
+
+### 10.6 Candidate 与 membership
+
+`proactive_candidates`是同一联系人同一兼容窗口内的稳定聚合：
+
+```text
+id UUIDv7 PK
+account_id
+contact_id
+conversation_id
+candidate_key BYTEA
+generation INTEGER
+membership_hash BYTEA
+state open|evaluating|send_selected|deferred_once|evaluated_none|failed_model|superseded|expired
+window_start_at
+window_end_at
+policy_version_id
+timezone_name_snapshot
+mode_version_snapshot
+content_revision_snapshot
+activity_revision_snapshot
+lease_owner_id?
+lease_expires_at?
+created_at
+terminal_at?
+UNIQUE (account_id, candidate_key, generation)
+UNIQUE (id, account_id, conversation_id)
+```
+
+`proactive_candidate_occurrences(candidate_id, occurrence_id, ordinal)`保存有序成员，PK `(candidate_id, occurrence_id)`并unique `(candidate_id, ordinal)`；candidate、occurrence的widest composite FK保证同一account/contact/conversation。新增eligible occurrence产生新membership hash/generation，不修改已sealed candidate。
+
+### 10.7 Budget bucket 与 reservation
+
+`proactive_budget_buckets`：
+
+| 字段 | 类型 | 约束与语义 |
+|---|---|---|
+| `id` | UUIDv7 | PK |
+| `account_id` | UUIDv7 | FK |
+| `contact_id` | UUIDv7 | contact/bypass scope非空 |
+| `scope` | TEXT | `account_daily/contact_daily/contact_bypass` |
+| `local_date` | DATE | scope当地日 |
+| `timezone_name_snapshot` | TEXT | IANA zone |
+| `starts_at` / `ends_at` | TIMESTAMPTZ | 精确UTC边界 |
+| `limit_count` | SMALLINT | snapshot，非负 |
+| `held_count` / `committed_count` | SMALLINT | 非负且总和不超过limit |
+| `version` | BIGINT | CAS |
+
+```text
+UNIQUE (account_id, scope, contact_id, local_date) NULLS NOT DISTINCT
+CHECK ((scope = 'account_daily' AND contact_id IS NULL) OR
+       (scope IN ('contact_daily','contact_bypass') AND contact_id IS NOT NULL))
+CHECK (starts_at < ends_at)
+CHECK (held_count >= 0 AND committed_count >= 0 AND
+       held_count + committed_count <= limit_count)
+```
+
+Account bucket按账号timezone；contact/bypass bucket按联系人timezone。已创建bucket保存边界，timezone变化不重切历史日。
+
+`proactive_budget_reservations`：
+
+```text
+id UUIDv7 PK
+account_id
+contact_id
+conversation_id
+decision_id
+reservation_key BYTEA
+state held|committed|released|expired|send_unknown
+account_bucket_id
+contact_bucket_id
+bypass_bucket_id?
+policy_version_id
+authorization_generation
+expires_at
+held_at
+terminal_at?
+outbound_group_id?
+copilot_draft_id?
+reason_code?
+UNIQUE (account_id, reservation_key)
+UNIQUE (decision_id) WHERE state IN ('held','committed','send_unknown')
+```
+
+三类bucket按account/contact/bypass固定顺序加行锁，在一个事务中检查capacity、增加held并创建reservation。`committed/send_unknown`使held转committed；明确副作用前失败才release。RPC未知或partial按一次committed保守处理。
+
+### 10.8 `proactive_decisions`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -1595,30 +1778,50 @@ updated_at
 | `account_id` | UUIDv7 | FK accounts |
 | `contact_id` | UUIDv7 | composite FK contacts |
 | `conversation_id` | UUIDv7 | composite FK conversations |
-| `idempotency_key` | BYTEA | 32-byte，候选/预算窗口稳定键 |
-| `state` | TEXT | `candidate/rejected/approved/generating/send_ready/draft_ready/sent/skipped/failed` |
+| `candidate_id` | UUIDv7 | unique composite FK sealed candidate generation |
+| `idempotency_key` | BYTEA | 32-byte，candidate/config/prompt稳定键 |
+| `state` | TEXT | `evaluating/send_selected/deferred_once/evaluated_none/authorizing/reserved/generating/send_ready/draft_ready/sending/sent/send_unknown/partial/skipped/failed` |
+| `action` | TEXT | `send_now/defer_once/none`；模型成功时非空 |
 | `decision_code` | TEXT | 受控原因，不存完整 chain-of-thought |
+| `priority` | NUMERIC(4,3) | 0..1，只排序/审计，不授予权限 |
+| `topic_brief` | TEXT | nullable，长度受限敏感derived data |
+| `topic_hash` | BYTEA | canonical brief HMAC/hash |
+| `defer_count` | SMALLINT | 0或1 |
+| `defer_until` | TIMESTAMPTZ | 只在`defer_once`设置且位于window内 |
 | `rule_snapshot_schema_version` | SMALLINT | NOT NULL |
 | `rule_snapshot` | JSONB | 不含证据 ID 的规则数值与结果 |
+| `policy_version_id` | UUIDv7 | immutable policy snapshot |
+| `contact_setting_version_id` | UUIDv7 | nullable setting snapshot |
+| `timezone_name_snapshot` | TEXT | IANA zone |
 | `relationship_state_version` | BIGINT | snapshot |
 | `account_control_version_snapshot` | BIGINT | global gate snapshot |
 | `mode_version_snapshot` | BIGINT | snapshot |
 | `content_revision_snapshot` | BIGINT | conversation content snapshot |
-| `budget_version` | BIGINT | snapshot |
+| `activity_revision_snapshot` | BIGINT | meaningful activity snapshot |
+| `candidate_membership_hash` | BYTEA | sealed membership fingerprint |
 | `model_run_id` | UUIDv7 | nullable composite FK |
 | `model_role` | TEXT | run 存在时固定为 `proactive_agent` |
-| `scheduled_for` | TIMESTAMPTZ | nullable |
+| `scheduled_for` | TIMESTAMPTZ | initial/deferred attempt time |
+| `quiet_result_code` | TEXT | normal/bypass/suppressed code |
+| `final_gate_result_code` | TEXT | nullable terminal gate code |
 | `created_at` | TIMESTAMPTZ | DB default |
 | `decided_at` | TIMESTAMPTZ | nullable |
+| `terminal_at` | TIMESTAMPTZ | nullable |
 
 ```text
 UNIQUE (account_id, idempotency_key)
+UNIQUE (candidate_id)
 UNIQUE (id, account_id, conversation_id)
+CHECK (priority IS NULL OR priority BETWEEN 0 AND 1)
+CHECK (defer_count BETWEEN 0 AND 1)
+CHECK ((action = 'defer_once' AND defer_count = 1 AND defer_until IS NOT NULL) OR
+       (action IN ('send_now','none') AND defer_until IS NULL) OR
+       action IS NULL)
 CHECK ((model_run_id IS NULL AND model_role IS NULL) OR
        (model_run_id IS NOT NULL AND model_role = 'proactive_agent'))
 ```
 
-decision 的 `(model_run_id, account_id, model_role)` 使用 composite FK 指向 model run。最终发送仍通过带唯一 `proactive_decision_id` 的 outbound delivery group及其 intents，不允许 Proactive worker 直接产生 Telegram 副作用。只在 outbound 一侧保存关系，避免双向 nullable FK 产生不一致指针。
+Decision的candidate/model/policy/settings均使用包含account/conversation的widest composite FK；`(model_run_id, account_id, model_role)`指向Proactive Agent run。最终发送仍通过带唯一`proactive_decision_id`的outbound delivery group及其intents，不允许Proactive worker直接产生Telegram副作用。Group引用生成正文的Main AI run；reservation、draft和group从业务侧引用decision，避免双向nullable FK产生不一致指针。
 
 `proactive_decision_evidence` 保存可约束来源：
 
@@ -1626,6 +1829,7 @@ decision 的 `(model_run_id, account_id, model_role)` 使用 composite FK 指向
 decision_id
 account_id
 ordinal
+occurrence_id
 evidence_type
 memory_version_id?
 life_event_id?
@@ -1633,10 +1837,12 @@ intention_id?
 message_revision_id?
 rule_code?
 PRIMARY KEY (decision_id, ordinal)
+UNIQUE (decision_id, occurrence_id, evidence_type, ordinal)
+CHECK occurrence_id 必须属于该 candidate membership
 CHECK typed evidence FK 恰好一个非空，或 evidence_type = rule 且只有 rule_code
 ```
 
-证据 ID 不放入 `rule_snapshot`，contact purge 可以通过 join index 找到并清理所有派生 decision。
+`proactive_decision_occurrences(decision_id, occurrence_id, ordinal)`保存模型选择的candidate成员，不能引用candidate之外的occurrence。证据ID不放入`rule_snapshot`，contact purge可以通过join index找到并清理所有派生candidate/decision。
 
 ## 11. 模型 endpoint、profile 与 credential
 
@@ -2169,6 +2375,7 @@ updated_at
 | read/typing/service transient event | 短期 retention |
 | debug raw capture | 强制短期 TTL，默认功能关闭 |
 | model/outbound attempts | terminal 后有限 retention，保留错误码和 usage，不保留 raw body |
+| proactive occurrence/candidate/decision/reservation | active时保留完整typed provenance；terminal后topic/brief等自由文本有限retention，长期只留ID/hash/code/version/预算和发送结果摘要 |
 | COPILOT draft/revision/edit session | active 时可操作；ready 30 分钟过期，terminal 正文有限 retention |
 | control command/action token | command metadata 有界 retention；token/session 强制短期 TTL |
 | context preview request/token/delivery | token 默认 5 分钟；request/delivery 只保留 IDs、hash、状态和删除结果，正文永不落表；已知 Bot 消息默认 10 分钟后尽力删除 |
@@ -2197,8 +2404,8 @@ updated_at
 针对 `account_id + contact_id`：
 
 1. 创建 durable erasure request，contact/conversation 标记 `deleting`，关闭自动发送。
-2. 在同一逻辑边界让 messages、media、memories、summaries、embeddings、proactive candidates 不再可见。
-3. 擦除所有 message revisions、COPILOT draft revisions/edit sessions、outbound payload、memory/summary versions、debug capture 和关系派生正文。
+2. 在同一逻辑边界让 messages、media、memories、summaries、embeddings、proactive occurrence/candidate/decision 和未提交 reservation 不再可见或可执行。
+3. 擦除所有 message revisions、COPILOT draft revisions/edit sessions、outbound payload、memory/summary versions、debug capture、proactive topic/brief和关系派生正文；释放可证明未产生副作用的held reservation，unknown/partial只保留无正文保守计费审计。
 4. 取消仍待确认/发送的 context preview request，消费或失效未使用 token；对已知 Bot message ID 创建不含正文的立即删除任务并记录结果。
 5. 删除 `media-data` 物理对象并确认结果。
 6. 删除或匿名化可删除的 operational rows；保留最小 tombstone、erasure ledger 和不含正文的法定/安全 audit。
@@ -2434,7 +2641,28 @@ summary_watermarks(conversation_id, summary_kind) PRIMARY KEY
 memory_review_actions(expires_at) WHERE used_at IS NULL
 life_events(contact_id, status, start_at)
 intentions(contact_id, status, expected_at)
+proactive_policy_bindings(scope_type, account_id) UNIQUE NULLS NOT DISTINCT
+contact_proactive_settings(contact_id) PRIMARY KEY
+proactive_rule_occurrences(account_id, occurrence_key, generation) UNIQUE
+proactive_rule_occurrences(contact_id, state, window_start_at, window_end_at)
+  WHERE state IN ('scheduled','eligible','grouped')
+proactive_occurrence_evidence(memory_version_id)
+proactive_occurrence_evidence(life_event_id)
+proactive_occurrence_evidence(intention_id)
+proactive_candidates(account_id, candidate_key, generation) UNIQUE
+proactive_candidates(contact_id, state, window_end_at)
+  WHERE state IN ('open','evaluating','send_selected','deferred_once')
+proactive_candidate_occurrences(occurrence_id)
 proactive_decisions(account_id, idempotency_key) UNIQUE
+proactive_decisions(candidate_id) UNIQUE
+proactive_decision_occurrences(occurrence_id)
+proactive_budget_buckets(account_id, scope, contact_id, local_date)
+  UNIQUE NULLS NOT DISTINCT
+proactive_budget_reservations(account_id, reservation_key) UNIQUE
+proactive_budget_reservations(decision_id)
+  UNIQUE WHERE state IN ('held','committed','send_unknown')
+proactive_budget_reservations(state, expires_at)
+  WHERE state = 'held'
 ```
 
 ### 15.5 JSONB、全文和向量
@@ -2591,7 +2819,17 @@ Control Bot draft在事务外完成schema、权重和fixture validation。激活
 
 worker 用短事务 `SELECT ... FOR UPDATE SKIP LOCKED LIMIT n` 领取 job，设置随机 owner 和 expiry 后 commit。执行任务不持有行锁；完成时使用 `(job_id, lease_owner, state, version)` CAS。
 
-### 16.15 Account 与 conversation control
+### 16.15 Proactive materialization、reservation 与 final gate
+
+Occurrence materialization用`(account_id, occurrence_key, generation)`插入冲突对账；candidate seal在一个事务中写candidate、有序membership和membership hash，sealed row不再改成员。Proactive Agent输出提交时锁candidate并校验lease、window、membership、policy和evidence后写唯一decision/selected occurrences。
+
+Preliminary authorization按account bucket、contact bucket、optional bypass bucket、decision的固定顺序加行锁，在同一事务中重新检查capacity、把每个bucket `held_count + 1`、创建唯一reservation和outbox。任何失败整体回滚，不能调用Main AI。
+
+AUTO final gate按account control、conversation、decision/reservation、delivery group顺序加锁。首项副作用前，事务重新验证所有version/evidence/window/activity，原子关联reservation并创建唯一delivery group及ordered intents。Reservation在RPC期间保持held；已确认发送、RPC unknown或partial时把held转committed并按一次计费。明确证明首项副作用前失败时才将所有bucket`held_count - 1`并release。
+
+COPILOT创建draft时reservation保持held；Send/Edit批准再次运行final gate，Ignore/expiry在确认无副作用后release。Reservation reaper必须排除active draft/send lease/send-unknown，不得仅凭TTL释放可能已使用的额度。
+
+### 16.16 Account 与 conversation control
 
 account default/global pause/maintenance 只锁 `account_orchestrator_states`，递增 `control_version`、追加 history/outbox，不批量锁 conversations。旧 run/delivery group/intent 通过 snapshot gate 失效。
 
@@ -2649,9 +2887,9 @@ app/control/worker schema readiness mismatch fails closed
 | Role | 权限 |
 |---|---|
 | `migrator` | schema DDL，仅 migrate 任务持有 |
-| `app_runtime` | message/turn/run/intent/media metadata 所需 DML |
+| `app_runtime` | message/turn/run/intent/media metadata，以及受限 proactive final-gate/reservation commit DML |
 | `control_runtime` | mode、model draft/version、credential ciphertext、context preview metadata DML、受限 exact-manifest reconstruction function、audit INSERT |
-| `worker_runtime` | job/memory/summary/embedding/proactive 所需 DML |
+| `worker_runtime` | job/memory/summary/embedding/proactive occurrence/candidate/decision/reservation hold 所需 DML；无 outbound side effect 权限 |
 | `backup` | 受限一致性备份权限 |
 | `maintenance` | erasure/retention，强审计，不供常驻服务使用 |
 
@@ -2667,7 +2905,7 @@ Memory Pipeline 的 trigger、input manifest、proposal validation、evidence tr
 
 Context Contract 的 manifest item layer、token/image budget、adapter mapping、capability snapshot和delivery group增量以 `docs/architecture/06-context-contract.md` 为准；不能把未记录来源的正文注入模型。
 
-Proactive Pipeline 可以扩展 candidate/budget/quiet-hour tables，但发送必须落到 `proactive_decisions -> outbound_delivery_groups -> outbound_intents`。
+Proactive Pipeline 的occurrence、candidate membership、policy/settings version、budget bucket/reservation和decision契约以`docs/architecture/07-proactive-pipeline.md`为准；发送必须落到`proactive_decisions -> outbound_delivery_groups -> outbound_intents`，并由`app`执行最终门禁。
 
 Operations 负责确定 retention 数值、磁盘/备份加密、media 配额、数据库参数、backup/restore runbook 和 credential key rotation。
 
@@ -2682,7 +2920,7 @@ Test Strategy 负责把本文的约束、race、migration 和 erasure 恢复声�
 - [x] Memory identity/version/proposal/target/evidence/relation、input manifest 和 contiguous watermark 已定义。
 - [x] Summary version/source membership/watermark 与 embedding shadow-space activation 已定义。
 - [x] Memory candidate review extension、action token 和 acceptance transaction 已定义。
-- [x] life event、intention、relationship state、proactive decision、agent/service state 和 audit 已定义。
+- [x] life event、intention、relationship state、proactive policy/setting version、occurrence、candidate membership、budget bucket/reservation、decision、agent/service state 和 audit 已定义。
 - [x] 四个独立模型 role、endpoint、draft、config version 和独立 credential version 已定义。
 - [x] canonical generation 字段与 protocol-options discriminated JSONB 边界已定义。
 - [x] prompt、Context budget和retrieval policy的immutable version与active binding已定义。

@@ -773,6 +773,14 @@ Adapter 可以把 `BoundaryPart` 渲染成固定文本 label 或 provider metada
 
 “tool schema strategy”只是一种让 provider 返回结构化对象的协议机制，不能执行任意 tool side effect。
 
+### 16.4 Proactive purpose contexts
+
+`proactive_candidate_decision`只在确定性规则已经形成sealed candidate后构造text-only输入：typed occurrences/evidence、contact/relationship/time、quiet/budget摘要、accepted active structured memory最多8条、semantic memory最多4条和最近主动结果。它不包含图片、全量聊天、memory candidate/quarantined summary、被删除正文或任意数据库查询能力；manifest绑定candidate generation与membership hash。
+
+`proactive_final`由Main AI消费selected occurrences/topic，加入identity/personality、关系/时间、accepted active memory、最多12条committed recent text和上次已对账主动结果。V1默认`max_input_tokens=8000`，不包含current reactive turn、图片、tool或reply target。输出是单条非空文本；最终group引用该Main AI run，不能引用前序Proactive Agent decision run代替正文来源。
+
+这些数量是版本化policy默认值，不是provider wire常量。任何删减都写manifest reason；required selected evidence单独超限时fail closed，不能静默换成无证据主动消息。
+
 ## 17. Capability snapshot
 
 ### 17.1 必需字段
@@ -1532,7 +1540,7 @@ delivery_group_partial_total by reason
 
 ## 29. 后续文档边界
 
-Proactive Pipeline 负责确定主动候选、Time Context、预算和最终 send gate；它必须复用本文 canonical request、trust、version 和 adapter契约。
+Proactive Pipeline负责确定主动候选、Time Context、预算和最终send gate，规范见`docs/architecture/07-proactive-pipeline.md`；它必须复用本文canonical request、trust、version、manifest和adapter契约。
 
 Operations 负责确定：
 

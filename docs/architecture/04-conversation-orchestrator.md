@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 Conversation Orchestrator：基础模式、覆盖门禁、运行阻塞、Control Bot 命令、turn 创建、真人接管、COPILOT 草稿、恢复语义、版本门禁、并发边界、故障恢复与审计契约。
 
-总体设计见 `docs/Design.md`；消息事件、发送和 3 秒 supersede 状态机见 `docs/architecture/02-message-lifecycle.md`；持久化约束见 `docs/architecture/03-data-model.md`；Memory extraction 与来源信任见 `docs/architecture/05-memory-pipeline.md`。本文不重新定义 Telegram update 幂等、模型 adapter、Memory extraction 或 Proactive 候选算法。
+总体设计见 `docs/Design.md`；消息事件、发送和3秒supersede状态机见`docs/architecture/02-message-lifecycle.md`；持久化约束见`docs/architecture/03-data-model.md`；Memory extraction与来源信任见`docs/architecture/05-memory-pipeline.md`；主动候选、quiet/bypass、预算和最终门禁见`docs/architecture/07-proactive-pipeline.md`。本文不重新定义Telegram update幂等、模型adapter、Memory extraction或Proactive候选算法。
 
 当前状态：V1 架构基线。
 
@@ -682,9 +682,9 @@ Group/intents commit 后复用 Message Lifecycle 的 RPC 前门禁、每段 stab
 
 ### 15.1 AUTO
 
-AUTO 中 Proactive candidate 依次通过候选规则、预算、quiet hours、contact policy、conversation activity 和最终 Orchestrator gate。Proactive Agent 决定是否/主题，Main AI 生成文本，最后创建 `source=proactive_ai` delivery group 及其 intents。
+AUTO中Proactive candidate依次通过候选规则、默认30分钟activity、quiet/bypass、contact/account预算reservation和preliminary gate。Proactive Agent只返回`send_now/defer_once/none`与候选内topic，Main AI用text-only主动上下文生成文本；`app`最终gate通过后才创建`source=proactive_ai` delivery group及其intents。
 
-run/decision/group/intents 同时快照 account control、mode、content、budget 和 policy version。任一变化都没有 3 秒宽限。
+run/decision/reservation/group/intents同时快照account control、mode、content、activity、evidence、timezone、budget和policy version。任一变化都没有3秒宽限；首项副作用前直接stale/skip，不自动重新生成。
 
 ### 15.2 COPILOT
 
@@ -693,12 +693,13 @@ run/decision/group/intents 同时快照 account control、mode、content、budge
 proactive draft：
 
 - 保存 `proactive_decision_id`；
+- budget reservation在草稿active期间保持held，批准时重跑final gate；Ignore/expiry在确认无副作用后释放；
 - 使用与响应式 draft 相同的 30 分钟和 version gates；
 - card 明确标记“主动消息建议”和候选原因 code；
 - 不展示 chain-of-thought；
 - 批准发送后 source 仍为 `copilot_approved`，同时保留 proactive provenance。
 
-若 conversation 已有 active draft，新的 proactive candidate 标记 `deferred_active_draft` 或 `skipped`，不能替换响应式草稿，也不能形成多草稿队列。
+若conversation已有active draft，新的proactive candidate标记`skipped_conflicting_draft`，不能替换响应式草稿，也不能形成多草稿队列或在草稿结束后补跑。
 
 ### 15.3 HUMAN、PAUSED 与 BLOCKED
 
