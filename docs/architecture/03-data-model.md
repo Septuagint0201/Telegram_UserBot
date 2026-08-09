@@ -2676,7 +2676,7 @@ proactive_budget_reservations(state, expires_at)
 
 ### 15.5 JSONB、全文和向量
 
-- 不默认对所有 JSONB 建 GIN index；只有后续文档证明存在稳定查询才添加表达式或受限 GIN index。
+- 不默认对所有 JSONB 建 GIN index；只有实现期稳定query、EXPLAIN和代表性规模证据证明需要时，才添加表达式或受限 GIN index。
 - V1 不以数据库全文检索作为 Context 主契约；若增加，索引只覆盖 non-redacted current content。
 - 每个 active embedding space/dimension 建独立 pgvector ANN index，切换 space 后并行构建并原子切换查询 binding。
 - deleted/invalidated embedding 使用 partial index predicate 或在切换前物理清理，不进入检索结果。
@@ -2906,7 +2906,7 @@ runtime role 不拥有 schema，不可修改 audit 历史，不可读取其他�
 
 `control_runtime`不能对canonical content表做任意scan；只有Control Bot应用先完成allowlist、exact request/token和manifest绑定校验后，才能调用只接受manifest ID的重建函数。`/context`使用的聚合view只返回计数、预算、reason、freshness和版本。重建函数不返回image二进制，且数据库权限不能替代应用层二次确认与审计。
 
-## 19. 后续文档边界
+## 19. 跨文档与实现边界
 
 Conversation Orchestrator 的 account control、mode overlay、reply floor、temporary takeover 和 COPILOT draft 契约以 `docs/architecture/04-conversation-orchestrator.md` 为准；后续修改必须同时更新本文的字段、约束与 migration。
 
@@ -2918,7 +2918,7 @@ Proactive Pipeline 的occurrence、candidate membership、policy/settings versio
 
 Operations以`docs/architecture/08-operations.md`固定retention数值、AES-256-GCM keyring、media 20 MiB/40 MP/16384/30秒/10 GiB、pgBackRest/restic、2/4/40资源门禁、migration/restore和credential rotation；Data Model修改必须保持这些row snapshot与erasure语义。
 
-Test Strategy 负责把本文的约束、race、migration 和 erasure 恢复声明实现为自动化测试。
+`docs/architecture/09-test-strategy.md`要求使用真实PostgreSQL/pgvector验证本文的约束、角色、race、migration和erasure恢复；SQLite或mock结果不能替代对应证据。
 
 ## 20. 验收条件
 
@@ -2940,3 +2940,4 @@ Test Strategy 负责把本文的约束、race、migration 和 erasure 恢复声�
 - [x] ingest、control、turn、send、edit/delete、human outgoing、COPILOT approval、context preview、memory、config 和 job 事务边界已定义。
 - [x] memory forget、contact purge、account wipe、export、backup 和 erasure ledger 已定义。
 - [x] Alembic expand/migrate/contract 与 migration 验证规则已定义。
+- [x] Data Model约束、migration、role与restore erasure均已映射到Test Strategy证据层级。

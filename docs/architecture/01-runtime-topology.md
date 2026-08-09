@@ -604,9 +604,9 @@ config_version（模型调用适用时）
 
 跨进程 correlation ID 必须随队列任务、proactive decision 和 outbound request 传播，便于从 Telegram update 追踪到模型调用、后台任务和最终发送。
 
-## 20. 明确延后到后续文档的选择
+## 20. 实现阶段参数与测试证据
 
-Operations已固定Caddy、arq、2/4/40 profile、TLS、pgBackRest/restic、retry/dead-letter/lease和backup参数。实现阶段仍需在不改变本文边界的情况下固定内部port拼写、image version/digest、CPython/PostgreSQL/pgvector compatibility set和实际外部告警目标，并由Test Strategy返回运行证据。
+Operations已固定Caddy、arq、2/4/40 profile、TLS、pgBackRest/restic、retry/dead-letter/lease和backup参数。实现阶段仍需在不改变本文边界的情况下固定内部port拼写、image version/digest、CPython/PostgreSQL/pgvector compatibility set和实际外部告警目标；期限与证据见`docs/architecture/09-test-strategy.md`第41节。
 
 ## 21. 验收条件
 
@@ -623,3 +623,4 @@ Operations已固定Caddy、arq、2/4/40 profile、TLS、pgBackRest/restic、retr
 - [x] 服务启动和停止不依赖理想容器顺序。
 - [x] 每个主要故障都有 fail-open 或 fail-closed 的明确选择。
 - [x] Runtime Topology 与 Operations 的 Caddy、arq、backup、resource 和 one-shot Session mount 例外一致。
+- [x] Runtime ownership、Compose、signal与Session单owner均已映射到Test Strategy证据层级。

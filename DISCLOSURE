@@ -77,6 +77,8 @@ PostgreSQL backup is designed to use continuous WAL archiving, daily differentia
 
 The current documentation itself performs no collection, network request, telemetry, persistence, backup, or code execution. The V1 design sends no product analytics or vendor telemetry; operational metrics remain private, while configured alert destinations receive only content-free status metadata.
 
+The planned automated test suite uses deterministic synthetic fixtures, fake Telegram/provider services, disposable PostgreSQL/Redis containers, and content-free evidence by default. Production databases, real private conversations, personal Telegram accounts, and production Sessions are prohibited as test inputs. Real Telegram and Web App smoke tests are limited to an authorized dedicated staging account, Bot, and allowlisted test peers on an isolated host. Real provider smoke tests use fixed non-private text and test images with small limits. Ordinary and fork CI jobs receive no Telegram, provider, backup, or publication credentials; protected container, recovery, and soak work uses dedicated Ubuntu runners, while the real Telegram Session remains outside general CI. Routine sanitized test evidence is designed for 30-day retention and release, live, restore, and soak evidence for 365 days.
+
 ## Planned safeguards and controls
 
 The architecture requires:
@@ -109,14 +111,15 @@ The architecture requires:
 - Caddy-only public TCP 443 exposure, private health/metrics, host firewalling, encrypted disks, non-root/read-only application containers, dropped capabilities, and no Docker Socket mount;
 - exact model-endpoint URL canonicalization, redirect/proxy denial, DNS/IP revalidation, TLS verification, and a root-managed private-endpoint allowlist;
 - encrypted off-host PostgreSQL/WAL and Session backups, independent erasure-ledger replay, manual restore approval, and no automatic database downgrade;
-- fixed image byte/pixel/time limits, media and disk quotas, bounded retention, and fail-closed disk-pressure states; and
+- fixed image byte/pixel/time limits, media and disk quotas, bounded retention, and fail-closed disk-pressure states;
+- synthetic-only test fixtures, fake-by-default external services, protected runners, no rerun-to-PASS policy, secret/artifact scanning, and explicit `PASS`/`FAIL`/`NOT RUN`/`BLOCKED` evidence; and
 - private PostgreSQL and Redis network exposure.
 
 These are design requirements, not claims about an implementation that does not yet exist. Future releases must test and accurately disclose which controls are actually implemented and enabled by default.
 
 ## Privileges and persistence
 
-A future deployment will hold credentials capable of controlling a Telegram account and accessing configured model APIs and backup repositories. It will require persistent storage for the Telethon Session and application data, encrypted off-host backup storage, and outbound network access to Telegram, model providers, S3-compatible storage, ACME, and a configured alert target. The design does not require arbitrary host command execution, container-management access, privilege escalation, or public database access.
+A future deployment will hold credentials capable of controlling a Telegram account and accessing configured model APIs and backup repositories. It will require persistent storage for the Telethon Session and application data, encrypted off-host backup storage, and outbound network access to Telegram, model providers, S3-compatible storage, ACME, and a configured alert target. Protected integration and recovery runners will require tightly scoped Docker access to disposable test containers; the dedicated live Telegram test host will hold a separate staging Session. Neither capability is exposed to the application, ordinary CI, forks, or public artifacts. The production design does not require arbitrary host command execution, container-management access, privilege escalation, or public database access.
 
 ## Residual risks
 
@@ -134,6 +137,7 @@ Even with the planned controls:
 - long-term storage increases privacy and breach impact;
 - a browser, keyboard, Telegram client, notification system, JavaScript runtime, DNS resolver, reverse proxy, backup service, or alert destination may retain metadata or transient sensitive material outside the application's deletion guarantees;
 - media expiration and the no-media-backup policy can make old images unavailable even when their message metadata remains;
+- compromise or misconfiguration of a protected runner, staging Telegram account, live-provider job, synthetic-fixture review, or evidence upload could expose test credentials, contact external systems, or retain unintended sensitive data;
 - backup, erasure, disk, resource, and recovery controls are currently unimplemented architecture requirements, and stated RPO/RTO values are not verified; and
 - Telegram or model-provider policy changes may make a previously valid deployment non-compliant.
 

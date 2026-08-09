@@ -1617,7 +1617,7 @@ last successful compensation scan
 - backup restore 先执行 erasure reconciliation，再开放 memory retrieval。
 - Memory provider 故障不阻止 ingest、human outgoing 或已有 committed memory 读取。
 
-## 29. 后续文档边界
+## 29. 跨文档与测试边界
 
 Context Contract 定义各 context layer 的精确 token/image 配额、structured/vector/recent 排序、freshness 降级截断、prompt trust boundary 和三种 generation protocol 的 wire mapping；必须消费本文的 manifest/source/freshness 契约。
 
@@ -1625,7 +1625,7 @@ Proactive Pipeline只读取accepted active memory、event/intention、relationsh
 
 Operations固定memory candidate active最多30天、terminal review正文30分钟、Memory Agent默认180秒/最多3 attempts、arq job最多5 executions、worker concurrency 2/CPU-heavy semaphore 1，以及backup/clock/disk/alert门禁；见`docs/architecture/08-operations.md`。
 
-Test Strategy 将第 28 节实现为 fake Memory/Embedding provider、可重放 revision fixtures、并发事务、虚拟时钟、故障注入和 restore/erasure 测试。
+`docs/architecture/09-test-strategy.md`将第28节实现为fake Memory/Embedding provider、可重放revision fixtures、真实PostgreSQL并发事务、virtual clock、state machine、故障注入和restore/erasure测试。
 
 ## 30. 验收条件
 
@@ -1641,3 +1641,4 @@ Test Strategy 将第 28 节实现为 fake Memory/Embedding provider、可重放 
 - [x] 冲突、淡化、forget、edit/delete reconciliation 和 one-way redaction 已定义。
 - [x] fresh/degraded/stale 和 Main AI 非阻塞降级契约已定义。
 - [x] 数据模型增量、锁、事务、retry、dead-letter、恢复、审计和验收场景已定义。
+- [x] Memory触发、proposal、summary、embedding与erasure均已映射到Test Strategy证据层级。

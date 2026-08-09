@@ -1409,7 +1409,7 @@ Preview消息不是diagnostic capture，也不能用diagnostic retention绕过�
 
 ### 26.4 Disclosure 边界
 
-Provider 可能接收 private message、caption、validated image、relationship、memory 和 summary。管理员显式确认的`/context_preview`还会把完整canonical文本复制到Control Bot chat；项目根`DISCLOSURE`必须在后续公开版本继续准确描述这些数据流、删除限制和残余风险。本架构不能被表述为已经实现或审计通过的 safeguard。
+Provider 可能接收 private message、caption、validated image、relationship、memory 和 summary。管理员显式确认的`/context_preview`还会把完整canonical文本复制到Control Bot chat；项目根`DISCLOSURE`必须在所有公开版本继续准确描述这些数据流、删除限制和残余风险。本架构不能被表述为已经实现或审计通过的 safeguard。
 
 ## 27. 可观测性
 
@@ -1540,13 +1540,13 @@ delivery_group_partial_total by reason
 | Bot删除失败 | 告警且不宣称正文已清除 |
 | preview日志/audit/queue扫描 | 不含canonical正文、system prompt或token明文 |
 
-## 29. 后续文档边界
+## 29. 跨文档与测试边界
 
 Proactive Pipeline负责确定主动候选、Time Context、预算和最终send gate，规范见`docs/architecture/07-proactive-pipeline.md`；它必须复用本文canonical request、trust、version、manifest和adapter契约。
 
 Operations契约见`docs/architecture/08-operations.md`：role deadline/attempt、20 MiB/40 MP/16384 px图片、1小时diagnostic TTL、Redis 192 MiB no-eviction目标、SSRF/TLS、capability drift和partial delivery runbook均已固定。各role实际`max_input_tokens`、token/image reserve和delivery chunk上限仍由经过fixture验证的provider capability与versioned context/model policy保存，不能设置一个跨模型虚构常数。
 
-Test Strategy 负责实现本文全部 fake/fixture/race/crash/contract测试，并以实际 tokenizer/provider fixture校准 estimator。静态文档检查不能代替真实 adapter contract和 PostgreSQL transaction测试。
+`docs/architecture/09-test-strategy.md`负责本文全部fake/wire fixture/property/race/crash/contract测试，并以固定tokenizer fixture与受保护provider smoke校准estimator。静态文档检查不能代替真实adapter contract和PostgreSQL transaction测试。
 
 ## 30. 验收条件
 
@@ -1567,3 +1567,4 @@ Test Strategy 负责实现本文全部 fake/fixture/race/crash/contract测试，
 - [x] 完整输出、finish reason、长文本delivery group和部分失败恢复已定义。
 - [x] metadata-only `/context`、二次确认 `/context_preview`、一次性token和best-effort Bot删除已定义。
 - [x] 同一输入与版本可重建，所有非系统内容均有source和trust。
+- [x] Budget、trust、三协议wire、preview与splitter均已映射到Test Strategy证据层级。

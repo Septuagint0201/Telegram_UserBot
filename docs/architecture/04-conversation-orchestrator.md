@@ -1090,7 +1090,7 @@ automation resume floor
 - DB restore后旧approval、过期takeover和unknown/partial group-intent在自动发送前完成reconcile。
 - global control、conversation change与model result竞态只有一个合法CAS结果。
 
-## 23. 后续文档边界
+## 23. 跨文档与测试边界
 
 Memory Pipeline 可以读取所有模式下的 committed conversation history，但不得把 Memory 任务成功当成回复授权。其来源信任必须保留 `human`、已编辑/未编辑 `copilot_approved`、`ai` 和 `proactive_ai` 的差异，完整契约见 `docs/architecture/05-memory-pipeline.md`。
 
@@ -1100,7 +1100,7 @@ Proactive Pipeline 定义候选、预算、quiet hours和decision状态；必须
 
 Operations固定terminal draft/review正文30分钟、control session 30分钟、10/30秒heartbeat、Session/upgrade maintenance、disk 70/80/90/95%门禁和block probe/runbook，见`docs/architecture/08-operations.md`。
 
-Test Strategy 将第22节实现为fake Telegram/provider、并发事务、时钟和崩溃恢复测试。
+`docs/architecture/09-test-strategy.md`将第22节实现为fake Telegram/provider、virtual clock、state machine、真实PostgreSQL并发事务、命名crash point和Compose恢复证据。
 
 ## 24. 验收条件
 
@@ -1115,4 +1115,5 @@ Test Strategy 将第22节实现为fake Telegram/provider、并发事务、时钟
 - [x] proactive在AUTO/COPILOT/HUMAN/PAUSED下的行为已定义。
 - [x] pause、maintenance、operational block和故障恢复已定义。
 - [x] 新增数据模型、事务、幂等、审计、隐私和指标要求已定义。
-- [x] 自动化验收场景与后续文档边界已定义。
+- [x] 自动化验收场景与跨文档边界已定义。
+- [x] 模式、takeover、COPILOT、final gate与恢复race已映射到Test Strategy证据层级。

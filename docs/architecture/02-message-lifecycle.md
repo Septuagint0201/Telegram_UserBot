@@ -719,27 +719,11 @@ correlation 至少可以从 event -> message -> turn -> model run -> outbound de
 
 测试需要使用可重放 Telegram update fixture、可控时钟、LLM fake、Telegram send fake 和崩溃注入点。仅通过单元测试不能证明发送恢复语义；必须包含容器内 PostgreSQL/Redis 集成测试。
 
-## 20. 后续文档必须细化
+## 20. 跨文档边界与测试证据
 
-Data Model：
+Data Model已在`docs/architecture/03-data-model.md`固定event/revision/media/turn/run/intent/watermark的表、约束、索引、tombstone和evidence关系。Context Contract已在`docs/architecture/06-context-contract.md`固定文本、caption、forward、reply、album、图片、预算、三协议wire、capability和长输出。Operations已在`docs/architecture/08-operations.md`固定media、retry、FloodWait、dead-letter和reconciliation运维边界。
 
-- event、message、message revision、media object、turn、run、intent 和 watermark 的表、约束与索引。
-- tombstone 正文清理和 evidence 关系。
-- canonical Telegram peer ID 与 update fingerprint 的具体编码。
-
-Context Contract 已在 `docs/architecture/06-context-contract.md` 定义文本、caption、forward、reply、album、图片、token/image预算、三协议wire mapping、capability校验，以及长文本delivery group/splitter。后续修改这些契约时必须同步更新本文状态机和发送门禁。
-
-Operations：
-
-- media 字节/像素限制、download timeout、磁盘配额、保留期、清理和备份策略。
-- retry/FloodWait/dead-letter 数值与 operator runbook。
-- 启动 reconciliation 的扫描窗口和速率限制。
-
-Test Strategy：
-
-- 本文第 19 节的 fixture、race、crash 和端到端验收实现。
-- Telegram random ID 映射与 Telethon gateway 的契约测试。
-- 图片恶意样本、解码炸弹和媒体权限测试。
+`docs/architecture/09-test-strategy.md`把第19节转换为replay fixture、virtual clock、Telegram/provider fake、PostgreSQL/Redis integration、命名crash point与Compose E2E；真实Telegram只在隔离测试账号和人工受保护流程验证。
 
 ## 21. 完成检查
 
@@ -757,3 +741,4 @@ Test Strategy：
 - [x] retry、FloodWait、dead letter、reconciliation 和崩溃恢复已定义。
 - [x] Memory refresh/reconciliation 触发点已定义。
 - [x] 安全、隐私、可观测性和自动化验收矩阵已定义。
+- [x] Message replay、race、send unknown和crash recovery已映射到Test Strategy证据层级。

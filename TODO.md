@@ -2,11 +2,13 @@
 
 本文档用于跟踪 Telegram Personal AI Digital Twin 的详细架构设计工作。
 
+状态：V1架构文档已于2026-08-10完成统一审查与收尾。本文的`[x]`表示设计契约已经写明并完成文档审查，不表示对应runtime、integration、restore或soak测试已经执行；实际证据状态以Test Strategy的四态结果为准。
+
 总体产品目标和概念架构以 `docs/Design.md` 为准；以下任务负责把概念设计细化为可以实现、测试和部署的工程契约。
 
 ## 已确认的基础决策
 
-- [x] 使用 Python 实现，目标运行环境为 Docker Compose 或 Ubuntu Server。
+- [x] 使用Python实现；生产目标为Ubuntu Server上的Docker Compose，Ubuntu原生进程仅用于开发或排障。
 - [x] 初期采用模块化单体，业务进程拆分为 `app`、独立 `control` 和 `worker`。
 - [x] 同一个 Telethon session 只允许一个运行进程持有。
 - [x] V1 只运行一个 Telegram 真人账号，但数据模型和接口为未来多账号保留边界。
@@ -211,73 +213,75 @@
 
 目标文档：`docs/architecture/09-test-strategy.md`
 
-- [ ] 定义单元测试、契约测试、集成测试和端到端测试边界。
-- [ ] 建立 Telegram gateway fake 和可重放 update fixtures。
-- [ ] 建立 LLM、embedding 和时间服务 fake。
-- [ ] 测试 key-only Telegram Web App 认证、过期重放、非管理员访问、越权字段拒绝和密钥不回显。
-- [ ] 测试模型配置验证失败、原子激活、版本切换和进行中请求行为。
-- [ ] 为 Responses、Chat Completions 和 Messages adapter 建立固定 wire contract fixtures。
-- [ ] 测试三个生成 ModelProfile 独立修改和激活时互不影响。
-- [ ] 测试 incoming/outgoing 来源识别、重复 update、edit/delete 和 album。
-- [ ] 测试 Telegram random ID 映射、system pending source 和启动后 outgoing reconciliation。
-- [ ] 测试图片格式校验、伪造 MIME、解码炸弹、模型能力门禁和 `detail=auto` 映射。
-- [ ] 测试 Data Model 的 composite foreign key、partial unique、CHECK、CAS 和 one-way redaction 约束。
-- [ ] 测试 memory forget、contact purge、account wipe、backup restore 后 erasure ledger 重放和数据不复现。
-- [ ] 测试 Alembic 从空库、上一支持 revision、中断 backfill 到 head 的迁移路径。
-- [ ] 测试 account default/override、pause overlay、maintenance、BLOCKED 和 control/mode version 优先级。
-- [ ] 测试 HUMAN/COPILOT/PAUSED/temporary HUMAN/BLOCKED 恢复后不自动回复 backlog，及 `/reply_pending` 幂等范围。
-- [ ] 测试 COPILOT manual `/draft`、30 分钟 expiry、edit revision、action token、approval 和 `copilot_approved` 对账。
-- [ ] 测试 temporary HUMAN start/renew/expiry、停机补偿和 human outgoing 与 AI/COPILOT 发送竞态。
-- [ ] 测试 debounce、顺序保证、会话锁和多 worker 竞争。
-- [ ] 测试真人发送、模式切换和模型返回同时发生的竞态。
-- [ ] 测试发送前、发送中、发送后各崩溃点的恢复行为。
-- [ ] 测试 Memory Pipeline 重放、冲突、watermark 和 embedding 重建。
-- [ ] 测试 Memory OR 触发、45 秒 quiet window、三类硬阈值、running range seal 和 5 分钟补偿扫描。
-- [ ] 测试 human/AI/proactive/COPILOT 来源信任、candidate 门槛、image-only 审核和 evidence root 断链拒绝。
-- [ ] 测试 rolling/daily/weekly summary source membership、迟到事件、时区快照、edit/delete 隔离与递归重建。
-- [ ] 测试 Memory candidate 接受/拒绝、一次性 action token、旧 version/evidence 失效和 `/forget` 二次确认。
-- [ ] 测试 Memory `fresh/degraded/stale` 积压降级，确保 Main AI 不等待且不读取 candidate/quarantined summary。
-- [ ] 测试 Context Builder 总预算、软配额借用、current turn 超限、manifest hash 重建和 source/trust 完整性。
-- [ ] 测试 structured/vector/recent 排序、ANN 精确重排、跨层去重、稳定 tie-break 和 memory lag canonical 扩展。
-- [ ] 测试 prompt injection、恶意 forward/reply label、历史 AI 指令和图片文字始终保持数据权限。
-- [ ] 测试长文本 deterministic splitter、grapheme 边界、delivery group 原子创建、逐段 random ID 对账和部分失败恢复。
-- [ ] 测试 `/context` 无正文、preview token 过期/重放/越权/source redaction、Bot send unknown、定时删除失败和所有日志/队列不含 preview 正文。
-- [ ] 测试 Proactive Pipeline 无 candidate 时零模型调用，due/补偿扫描与 worker 重试幂等。
-- [ ] 测试联系人/account 时区、DST gap/fold、默认 quiet hours、绝对禁发和每日一次受限 bypass。
-- [ ] 测试 account/contact/bypass 日预算、关系级最小间隔、并发 reservation 和 send-unknown 保守计费。
-- [ ] 测试 30 分钟 activity、AUTO/COPILOT/HUMAN/PAUSED/BLOCKED、冲突草稿和真人接管抑制。
-- [ ] 测试 `send_now/defer_once/none`、新 activity/mode/evidence 导致 stale，以及最终 conversation-lock 安全闸门。
-- [ ] 测试 Caddy 仅 443、Compose 网络/secret/只读文件系统、无 Docker Socket 和非公开 health/metrics。
-- [ ] 测试 key-only Web App `initData`/launch replay、role/admin binding、rate limit、API key 不回显/不入日志和 master key 轮换恢复。
-- [ ] 测试 endpoint loopback/private/metadata/IPv6/DNS rebinding/redirect/proxy/CA 的 SSRF 和 TLS 门禁。
-- [ ] 测试 arq/Redis 丢失后从 PostgreSQL outbox/job/watermark 恢复，以及 retry/dead-letter/FloodWait 上限。
-- [ ] 测试 media 字节/像素/边长/timeout/炸弹、10 GiB quota、TTL 清理和 90/95% disk 降级。
-- [ ] 测试 data export age recipient、受限 DB role、artifact hash、SSH/SFTP-only 边界和 24 小时清理。
-- [ ] 测试 pgBackRest full/differential/WAL、Session/restic、旧库+最新 erasure ledger、RPO/RTO 和 restore maintenance gate。
-- [ ] 测试 Alembic 从空库、上一支持版本、中断 backfill、兼容 app rollback 和不兼容 rollback BLOCKED。
-- [ ] 在 2 vCPU/4 GiB/40 GiB Ubuntu 24.04 amd64 上执行 Compose 集成、SIGTERM/SIGKILL、升级和 24 小时资源 soak。
-- [ ] 建立关键行为验收矩阵和回归测试数据集。
+本节的完成项表示测试范围、fixture、环境、门禁与证据已经定义；当前仓库没有测试实现，执行状态仍为`NOT RUN`。
 
-完成标准：所有消息副作用、跨进程竞态和崩溃恢复声明都有自动化测试或明确标记的人工验证步骤。
+- [x] 定义单元测试、契约测试、集成测试和端到端测试边界。
+- [x] 建立 Telegram gateway fake 和可重放 update fixtures。
+- [x] 建立 LLM、embedding 和时间服务 fake。
+- [x] 测试 key-only Telegram Web App 认证、过期重放、非管理员访问、越权字段拒绝和密钥不回显。
+- [x] 测试模型配置验证失败、原子激活、版本切换和进行中请求行为。
+- [x] 为 Responses、Chat Completions 和 Messages adapter 建立固定 wire contract fixtures。
+- [x] 测试三个生成 ModelProfile 独立修改和激活时互不影响。
+- [x] 测试 incoming/outgoing 来源识别、重复 update、edit/delete 和 album。
+- [x] 测试 Telegram random ID 映射、system pending source 和启动后 outgoing reconciliation。
+- [x] 测试图片格式校验、伪造 MIME、解码炸弹、模型能力门禁和 `detail=auto` 映射。
+- [x] 测试 Data Model 的 composite foreign key、partial unique、CHECK、CAS 和 one-way redaction 约束。
+- [x] 测试 memory forget、contact purge、account wipe、backup restore 后 erasure ledger 重放和数据不复现。
+- [x] 测试 Alembic 从空库、上一支持 revision、中断 backfill 到 head 的迁移路径。
+- [x] 测试 account default/override、pause overlay、maintenance、BLOCKED 和 control/mode version 优先级。
+- [x] 测试 HUMAN/COPILOT/PAUSED/temporary HUMAN/BLOCKED 恢复后不自动回复 backlog，及 `/reply_pending` 幂等范围。
+- [x] 测试 COPILOT manual `/draft`、30 分钟 expiry、edit revision、action token、approval 和 `copilot_approved` 对账。
+- [x] 测试 temporary HUMAN start/renew/expiry、停机补偿和 human outgoing 与 AI/COPILOT 发送竞态。
+- [x] 测试 debounce、顺序保证、会话锁和多 worker 竞争。
+- [x] 测试真人发送、模式切换和模型返回同时发生的竞态。
+- [x] 测试发送前、发送中、发送后各崩溃点的恢复行为。
+- [x] 测试 Memory Pipeline 重放、冲突、watermark 和 embedding 重建。
+- [x] 测试 Memory OR 触发、45 秒 quiet window、三类硬阈值、running range seal 和 5 分钟补偿扫描。
+- [x] 测试 human/AI/proactive/COPILOT 来源信任、candidate 门槛、image-only 审核和 evidence root 断链拒绝。
+- [x] 测试 rolling/daily/weekly summary source membership、迟到事件、时区快照、edit/delete 隔离与递归重建。
+- [x] 测试 Memory candidate 接受/拒绝、一次性 action token、旧 version/evidence 失效和 `/forget` 二次确认。
+- [x] 测试 Memory `fresh/degraded/stale` 积压降级，确保 Main AI 不等待且不读取 candidate/quarantined summary。
+- [x] 测试 Context Builder 总预算、软配额借用、current turn 超限、manifest hash 重建和 source/trust 完整性。
+- [x] 测试 structured/vector/recent 排序、ANN 精确重排、跨层去重、稳定 tie-break 和 memory lag canonical 扩展。
+- [x] 测试 prompt injection、恶意 forward/reply label、历史 AI 指令和图片文字始终保持数据权限。
+- [x] 测试长文本 deterministic splitter、grapheme 边界、delivery group 原子创建、逐段 random ID 对账和部分失败恢复。
+- [x] 测试 `/context` 无正文、preview token 过期/重放/越权/source redaction、Bot send unknown、定时删除失败和所有日志/队列不含 preview 正文。
+- [x] 测试 Proactive Pipeline 无 candidate 时零模型调用，due/补偿扫描与 worker 重试幂等。
+- [x] 测试联系人/account 时区、DST gap/fold、默认 quiet hours、绝对禁发和每日一次受限 bypass。
+- [x] 测试 account/contact/bypass 日预算、关系级最小间隔、并发 reservation 和 send-unknown 保守计费。
+- [x] 测试 30 分钟 activity、AUTO/COPILOT/HUMAN/PAUSED/BLOCKED、冲突草稿和真人接管抑制。
+- [x] 测试 `send_now/defer_once/none`、新 activity/mode/evidence 导致 stale，以及最终 conversation-lock 安全闸门。
+- [x] 测试 Caddy 仅 443、Compose 网络/secret/只读文件系统、无 Docker Socket 和非公开 health/metrics。
+- [x] 测试 key-only Web App `initData`/launch replay、role/admin binding、rate limit、API key 不回显/不入日志和 master key 轮换恢复。
+- [x] 测试 endpoint loopback/private/metadata/IPv6/DNS rebinding/redirect/proxy/CA 的 SSRF 和 TLS 门禁。
+- [x] 测试 arq/Redis 丢失后从 PostgreSQL outbox/job/watermark 恢复，以及 retry/dead-letter/FloodWait 上限。
+- [x] 测试 media 字节/像素/边长/timeout/炸弹、10 GiB quota、TTL 清理和 90/95% disk 降级。
+- [x] 测试 data export age recipient、受限 DB role、artifact hash、SSH/SFTP-only 边界和 24 小时清理。
+- [x] 测试 pgBackRest full/differential/WAL、Session/restic、旧库+最新 erasure ledger、RPO/RTO 和 restore maintenance gate。
+- [x] 测试 Alembic 从空库、上一支持版本、中断 backfill、兼容 app rollback 和不兼容 rollback BLOCKED。
+- [x] 在 2 vCPU/4 GiB/40 GiB Ubuntu 24.04 amd64 上定义 Compose 集成、SIGTERM/SIGKILL、升级和24小时资源soak证据；实现前状态为`NOT RUN`。
+- [x] 建立关键行为验收矩阵、acceptance ID和回归测试数据集规则。
+
+完成标准：所有消息副作用、跨进程竞态和崩溃恢复声明都已映射到自动化测试设计或明确标记的人工验证procedure；实现前执行状态保持`NOT RUN`。
 
 ## 文档统一完成标准
 
 每份详细架构文档完成前都需要包含：
 
-- [ ] 目标、范围和非目标。
-- [ ] 组件职责和依赖关系。
-- [ ] 输入、输出和持久化契约。
-- [ ] 正常流程、异常流程和恢复流程。
-- [ ] 并发、幂等、重试和事务要求。
-- [ ] 安全、隐私、审计和可观测性要求。
-- [ ] 可测试的验收条件。
-- [ ] 尚未决定的问题及其决策期限。
-- [ ] 与 `docs/Design.md` 的术语和行为保持一致。
+- [x] 目标、范围和非目标。
+- [x] 组件职责和依赖关系。
+- [x] 输入、输出和持久化契约。
+- [x] 正常流程、异常流程和恢复流程。
+- [x] 并发、幂等、重试和事务要求。
+- [x] 安全、隐私、审计和可观测性要求。
+- [x] 可测试的验收条件。
+- [x] 尚未决定的问题及其决策期限。
+- [x] 与 `docs/Design.md` 的术语和行为保持一致。
 
 ## 收尾任务
 
-- [ ] 对全部详细架构文档进行交叉一致性审查。
-- [ ] 根据详细设计修正 `docs/Design.md` 中过时或过于概念化的流程。
-- [ ] 补充 README，包括项目状态、文档索引、开发环境和运行入口。
-- [ ] 建立 Architecture Decision Records，记录关键取舍及后续变更。
-- [ ] 从架构文档生成首个实现里程碑和代码任务列表。
+- [x] 对全部详细架构文档进行交叉一致性审查。
+- [x] 根据详细设计修正 `docs/Design.md` 中过时或过于概念化的流程。
+- [x] 补充 README，包括项目状态、文档索引、开发环境和运行入口。
+- [x] 建立 Architecture Decision Records，记录关键取舍及后续变更。
+- [x] 从架构文档生成首个实现里程碑和代码任务列表。

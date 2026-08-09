@@ -1090,10 +1090,10 @@ contact、conversation、消息正文、topic和memory ID不作为metrics label�
 
 模型fixture必须验证strict schema和完整canonical request；PostgreSQL integration test必须验证unique、partial unique、row lock、CAS、outbox、reservation和崩溃恢复，不能只用mock代替。
 
-## 31. 后续文档边界
+## 31. 跨文档与实现边界
 
 - Operations固定worker concurrency 2、job lease 60秒/20秒renew、最多5 executions、Proactive Agent 60秒/3 attempts、terminal topic/brief 30天、disk/backup/restore/metrics/alerts，见`docs/architecture/08-operations.md`。
-- Test Strategy实现第30节的时钟、provider、Telegram、并发和数据库测试。
+- `docs/architecture/09-test-strategy.md`实现第30节的virtual clock/DST、provider/Telegram fake、state machine、并发reservation和真实PostgreSQL测试。
 - 实现阶段可以调优阈值，但必须通过新policy version和回归数据，不得静默改变本文语义。
 
 ## 32. 完成检查表
@@ -1107,3 +1107,4 @@ contact、conversation、消息正文、topic和memory ID不作为metrics label�
 - [x] occurrence/candidate/decision/draft/group幂等与at-least-once恢复已定义。
 - [x] preliminary authorization与`app`最终send gate已定义。
 - [x] 审计、隐私、Control Bot、metrics和自动化验收矩阵已定义。
+- [x] Candidate、quiet/budget、reservation、final gate与downtime均已映射到Test Strategy证据层级。

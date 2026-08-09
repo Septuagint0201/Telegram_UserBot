@@ -1113,7 +1113,7 @@ Runtime、restore和soak未实际运行前标记`NOT RUN`，文档静态检查�
 
 ## 31. Test Strategy与实现边界
 
-`docs/architecture/09-test-strategy.md`负责把第30节转换为unit/contract/integration/E2E/restore/soak测试，确定staging账号、fake Telegram/provider、Ubuntu runner和证据格式。
+`docs/architecture/09-test-strategy.md`已把第30节转换为unit/property/contract/Testcontainers/Compose/live/restore/soak层级，并固定synthetic-only数据、隔离Telegram账号、受保护Ubuntu runner、85/80 coverage和四态证据格式。
 
 实现阶段必须补充：
 
@@ -1145,3 +1145,4 @@ Runtime、restore和soak未实际运行前标记`NOT RUN`，文档静态检查�
 - [x] 2 vCPU/4 GiB/40 GiB resource/disk thresholds和degraded modes已定义。
 - [x] SIGTERM、upgrade、rollback、security update和DR runbook已定义。
 - [x] 可自动化/人工验证的Operations acceptance matrix已定义。
+- [x] Compose、security、backup/restore、live smoke与2/4/40 soak均已映射到Test Strategy证据层级。

@@ -92,6 +92,7 @@ worker
 13. Human Override 系统
 14. 模型配置与密钥管理
 15. 服务状态监控
+16. 测试、恢复与发布证据
 
 ---
 
@@ -2559,7 +2560,32 @@ Refresh Pending Memory Job --------> Async Memory Pipeline
 
 ---
 
-# 59. 最终哲学
+# 59. 测试与证据策略
+
+详细契约见`docs/architecture/09-test-strategy.md`。测试按风险分为unit/property、contract、PostgreSQL/Redis integration、Compose E2E、migration/recovery、live smoke、backup/restore和2/4/40 resource soak。
+
+自动门禁使用synthetic-only数据、virtual clock、确定性random/ID、Telegram/provider fake、可重放update fixture、显式barrier和命名crash point。PostgreSQL约束、事务、锁、CAS、outbox、pgvector和erasure必须在真实PostgreSQL/pgvector上验证，不能用SQLite或mock替代。
+
+真实Telegram只在隔离主机、专用授权测试账号和allowlisted测试peer上人工执行；真实provider smoke只发送固定无私人数据文本和测试图片。Session、API key、Bot token、生产对话和生产数据库不能进入公开仓库、普通runner或artifact。
+
+CI分为：
+
+```text
+commit/MR preflight -> static + unit/property + contract
+protected pre-merge/main -> PostgreSQL/Redis integration + migration smoke
+nightly/manual -> Compose + race/crash + migration/recovery + security lab
+release/operations-sensitive -> live smoke + backup/restore + 2/4/40 24h soak
+```
+
+全局line coverage门槛为85%，branch为80%；send/auth/credential/SSRF/erasure/proactive final gate等安全关键不变量必须有正例、反例、边界和race/crash case。失败不能通过自动重跑改为PASS。
+
+每个验收项使用稳定requirement/test ID，并输出JUnit、coverage和content-free acceptance manifest。结果只能是`PASS`、`FAIL`、`NOT RUN`或`BLOCKED`；普通证据保留30天，release/restore/soak证据保留365天。
+
+当前仓库只有架构文档，没有可运行实现。因此所有runtime、integration、live、restore与soak结果仍为`NOT RUN`，不能把本次文档检查描述为系统已通过测试。
+
+---
+
+# 60. 最终哲学
 
 系统中的人格并不存在于某一个单独模型中。
 
