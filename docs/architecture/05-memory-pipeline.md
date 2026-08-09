@@ -132,7 +132,7 @@ control command
   -> worker validation/transaction
 ```
 
-Memory Pipeline 不能反向调用 Conversation Orchestrator 获得发送权限，也不能直接创建 outbound intent。
+Memory Pipeline 不能反向调用 Conversation Orchestrator 获得发送权限，也不能直接创建 outbound delivery group 或 intent。
 
 ## 5. 术语与 source of truth
 

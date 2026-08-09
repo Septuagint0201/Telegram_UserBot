@@ -5,7 +5,7 @@
 - Project: Telegram Personal AI Digital Twin
 - Public source target: `https://gitlab.com/Septuagintks/telegram_userbot`
 - Maintainer: GitLab user `Septuagintks`
-- Review date: 2026-08-09 (Asia/Shanghai)
+- Review date: 2026-08-10 (Asia/Shanghai)
 - Current artifact status: architecture and design documentation only
 
 The repository currently contains no runnable implementation, container image, package, binary, deployment, or release artifact. The capabilities below describe the system being designed and must not be interpreted as completed or independently audited safeguards.
@@ -23,6 +23,7 @@ The planned system will:
 - allow an administrator to change conversation modes and non-secret model configuration through a Control Bot, while the Telegram Web App remains key-only;
 - present COPILOT response or proactive drafts to an allowlisted administrator through the Control Bot for explicit send, edit, or ignore decisions;
 - present active-memory summaries, memory candidates, minimal evidence excerpts, and forget confirmations to an allowlisted administrator through the Control Bot;
+- show an allowlisted administrator metadata about the exact context assembled for a model run and, only after a separate short-lived confirmation, copy that context's canonical text into the administrator's Control Bot chat;
 - store model endpoint credentials and use them for outbound model API requests; and
 - maintain persistent account, database, cache, queue, and model configuration state.
 
@@ -52,6 +53,9 @@ The design currently specifies:
 - Control Bot messages that may contain a minimum contact label and COPILOT draft text in the administrator's Telegram chat;
 - Memory Agent requests that may contain selected private-message text, captions, validated images, related active memories, and summaries, plus Embedding requests that contain eligible derived or canonical text chunks;
 - Control Bot memory-review messages that may contain a minimum contact label, memory/candidate summary, confidence/source category, and minimal evidence excerpt in the administrator's Telegram chat;
+- metadata-only `/context` responses that contain manifest identifiers, budgets, counts, reasons, freshness, and versions but no private-message, memory, summary, or trusted-prompt text;
+- explicitly confirmed `/context_preview` messages that may copy private-message text, memories, summaries, and trusted prompt text into the administrator's Control Bot chat; images are represented only by media reference, hash, MIME type, dimensions, and detail metadata, not by retransmitted binary data;
+- context-preview request, token, and delivery records that contain identifiers, hashes, Bot message IDs, deadlines, and deletion results but never the preview body; confirmation tokens expire after five minutes by default, and known Bot messages are scheduled for best-effort deletion after ten minutes by default;
 - a public HTTPS route limited to the key-only Telegram Web App and its dedicated credential API; and
 - no general public database, Redis, health, or management endpoint.
 
@@ -73,6 +77,8 @@ The architecture requires:
 - source-aware memory evidence rules that prevent AI or proactive output from independently proving contact facts or human writing style;
 - application-side schema, scope, evidence, revision, conflict, and idempotency validation before a Memory Agent proposal can become active;
 - default candidate review for low-confidence, ambiguous, or image-only memory proposals, with allowlisted preview and second confirmation for candidate acceptance or memory forget;
+- metadata-only context inspection by default, with full context preview restricted to an allowlisted administrator, bound to an exact manifest and source-revision hash, gated by a single-use five-minute confirmation token, and revalidated against redaction immediately before reconstruction;
+- in-memory-only context-preview reconstruction, no preview body in request, token, delivery, queue, log, or audit records, no image-binary access by the Control Bot, and tracked best-effort deletion of known Bot message IDs;
 - immutable summary source membership and isolated embedding spaces so deleted evidence or vectors from different model spaces cannot remain silently active;
 - outbound intent records, idempotency, and Telegram message reconciliation;
 - proactive-message budgets, quiet hours, intervals, and final send gates;
@@ -98,6 +104,8 @@ Even with the planned controls:
 - configured generation and embedding providers may receive highly sensitive private-message content and derived relationship or memory data, subject to those providers' own retention, logging, and jurisdictional behavior;
 - an incorrect mode, prompt, memory, or proactive decision may send an inappropriate message;
 - an incorrect extraction, summary, conflict decision, candidate approval, or embedding retrieval may preserve or surface inaccurate or overly sensitive information;
+- an explicitly confirmed context preview copies highly sensitive material into Telegram; notifications, client caches, forwards, screenshots, and Telegram-controlled copies may persist after best-effort deletion;
+- a Control Bot send that becomes `send_unknown` may have created a preview message without yielding a recoverable message ID, preventing reliable automatic deletion, and deletion requests for known messages may also fail;
 - contacts may not distinguish AI-generated and human-generated messages under the shared identity;
 - long-term storage increases privacy and breach impact; and
 - Telegram or model-provider policy changes may make a previously valid deployment non-compliant.

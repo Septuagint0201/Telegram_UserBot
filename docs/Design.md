@@ -265,7 +265,7 @@ assistant / source=human:
 
 这保证真人和 AI 共同塑造同一个长期人格。
 
-`outgoing=true` 本身不能证明消息来自真人，因为 `app` 通过 Telethon 发送的 AI 消息同样属于 outgoing。系统发送前必须创建 outbound intent，发送成功后绑定 Telegram message ID。监听器通过该记录识别 `ai`、`proactive_ai` 或 `copilot_approved`；无法匹配任何系统发送记录的 outgoing 消息才归类为 `human`。
+`outgoing=true` 本身不能证明消息来自真人，因为 `app` 通过 Telethon 发送的 AI 消息同样属于 outgoing。系统发送前必须原子创建 outbound delivery group 和全部 ordered intents，发送成功后分别绑定 Telegram message ID。监听器通过 intent/random ID 映射识别 `ai`、`proactive_ai` 或 `copilot_approved`；无法匹配任何系统发送记录的 outgoing 消息才归类为 `human`。
 
 消息表使用 Telegram 账号、会话和 message ID 组成业务唯一键。同一个 update 被重复接收时只允许对账和补全状态，不得重复触发回复或记忆处理。
 
@@ -356,7 +356,7 @@ Conversation Engine 是实时消息系统的中心。
 - 刷新异步记忆处理任务
 - 构造主模型 Context
 - 调用 Main AI
-- 创建 outbound intent
+- 创建 outbound delivery group 和全部 ordered intents
 - 将结果发送到 Telegram
 - 对账并记录最终回复
 
@@ -524,10 +524,18 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 `/memory_candidates` 只列待审 candidate；接受/拒绝绑定精确 proposal、evidence 和 target version，使用短期一次性 action token。`/memory_status` 只显示 freshness、watermark lag、队列和稳定错误码，不显示正文。
 
 ```text
-/context
+/context [contact]
 ```
 
-查看当前会送给主模型的上下文。
+默认只查看最新/当前 Main AI context manifest 的元数据：purpose、构建时间、token/image预算、各层source数量、memory freshness、选择/省略reason和版本，不显示私聊、memory、summary或system prompt正文。
+
+```text
+/context_preview <contact>
+```
+
+完整预览是高敏感操作。命令先展示精确manifest、联系人、内容范围和“正文将复制到管理员Telegram会话”的警告；管理员使用绑定本人、Bot chat、manifest hash和短期deadline的一次性token二次确认后，Control Bot才重建并发送完整canonical文本。图片只显示media reference、hash、尺寸和`detail=auto`，不向Bot重传二进制。
+
+确认token默认5分钟过期且只能使用一次；preview消息默认10分钟后尽力删除，并持久化Bot message ID和删除结果。Telegram消息删除不能保证清除通知、客户端缓存、转发、截图或平台副本，删除失败必须告警，不能宣称已经可靠擦除。Preview不调用模型、不创建Telegram真人账号outbound intent，也不能恢复已经delete/forget/purge/redact的正文。
 
 ```text
 /pause
@@ -679,60 +687,37 @@ Main AI 不承担高频数据库整理工作。
 
 # 11. Main AI Context
 
-每次调用主模型之前，通过 Context Builder 构造：
+详细装配、预算、检索、信任、adapter、版本和长输出契约见 `docs/architecture/06-context-contract.md`。
+
+每次调用主模型之前，Context Builder 先固定 turn、source revision、模型能力、prompt、检索策略和 token policy，再构造 provider-independent canonical context：
 
 ```text
-Identity
-+
-Personality
-+
-Relationship
-+
-Relevant Long-term Memory
-+
+System / Developer Safety Instructions
+Administrator-authored Identity Instructions
+Descriptive Identity + Personality Data
+Current Relationship + Current Time Data
+Relevant Structured Memories
+Relevant Semantic Memories
 Conversation Summary
-+
 Recent Canonical Messages
-+
-Current Time Context
-+
-Current User Message
+Current Turn
 ```
 
-示例：
+稳定的可信 instruction 位于最前，动态 current turn 位于最后。只有 system/developer 和管理员人工配置的 instruction 可以改变模型行为；Memory Agent 提取的 identity、personality、relationship、memory、summary，以及消息、forward、reply quote 和图片中的文字，都属于带来源的数据，不能提升为 system instruction。
+
+Main AI 默认输入上限为 24,000 token，并按下面公式收紧：
 
 ```text
-SYSTEM
-
-你是 Alice 的数字分身。
-
-[IDENTITY]
-...
-
-[PERSONALITY]
-...
-
-[RELATIONSHIP]
-当前联系人 Bob：
-认识 5 年
-关系：好友
-交流风格：随意
-
-[RELEVANT MEMORY]
-Bob 最近换工作。
-Bob 上周提到项目延期。
-
-[RECENT CONTEXT]
-...
-
-[CURRENT TIME]
-Saturday 21:30
-
-[USER]
-最近怎么样？
+safety_reserve = max(1024, ceil(max_context_tokens * 0.05))
+effective_input_budget = min(24000,
+  max_context_tokens - max_output_tokens - safety_reserve)
 ```
 
-这样主模型接收到的是整理后的高价值信息，而不是整个历史数据库。
+内容软配额为 current 20%、recent 30%、identity/personality/relationship/time 15%、structured memory 15%、semantic memory 10%、summary 10%。未使用预算按确定顺序借给 current 和 recent。Current turn 必须完整保留；即使移除所有可选层仍超限时 fail closed，不静默截断或猜测。
+
+Context manifest 保存每个 source/revision、slice、trust、role、估算 token、图片、排序分数、选择/省略理由，以及 config、credential、prompt、builder、retrieval、adapter、capability、token estimator 和 embedding space 版本。相同输入与版本必须能重建同一 ordered manifest hash。
+
+图片只自动选择 current turn 的 validated images，必要时追加直接 reply 的一张；不做历史图片广域召回。Canonical `detail=auto` 由三种协议 adapter 显式映射或通过已验证的 provider-native 等价默认处理。模型能力不足或 current required images 超限时，整个自动 turn 阻止，不静默丢图。
 
 ---
 
@@ -1686,9 +1671,19 @@ supports_streaming
 supports_reasoning_effort
 max_context_tokens
 max_output_tokens_limit
+supported_input_roles
+supports_developer_role
+supports_images
+supported_image_mime_types
+supported_image_detail_modes
+max_images_per_request
+image token estimator / reserve
+Chat token limit fields
 ```
 
-当模型不支持 `temperature` 或其他参数时，配置界面应禁用该字段或保存为 `null`，请求适配器不得强行发送不受支持的参数。
+当模型不支持 `temperature` 或其他参数时，配置界面应禁用该字段或保存为 `null`，请求适配器不得强行发送不受支持的参数。Admission-critical capability 未知时配置验证失败，不能把 unknown 当作支持。
+
+Chat Completions 的 `token_limit_field=auto` 在 draft validation 期间通过 catalog 或无私人数据 probe 固定为 `max_completion_tokens` 或 `max_tokens`，并写入不可变 capability/config snapshot。正式 model run 不允许因为 unsupported parameter 临时换字段重试。
 
 非密钥配置与凭据分开保存。业务代码只能通过 credential reference 获取解密后的短生命周期内存值，不能查询或输出完整 API key。
 
@@ -1707,6 +1702,10 @@ timeout
 ```
 
 审计记录不得包含 API key。
+
+Provider stream 可以在 adapter 内部用于降低延迟和响应 cancel，但只有完整 stream 结束、响应归一化和 purpose-specific schema 校验通过才算成功。Main AI V1 只接受最终文本且不执行 tool/function call；Memory/Proactive 必须得到完整 strict structured output。
+
+Main AI 完整文本超过 Telegram 单条 policy 时，由 versioned deterministic splitter 生成一个 `outbound_delivery_group` 和多个 ordered intents。所有 intent 在发送第一段前原子创建，各自持有稳定 `telegram_random_id`；崩溃或 FloodWait 只恢复未确认段落，不重新调用模型或重新切段。
 
 ---
 
@@ -1756,7 +1755,7 @@ message lifecycle:
   message_events, messages, message_revisions, media_objects,
   message_media, message_reactions, conversation_turns, turn_messages,
   context_manifests, model_runs, copilot_drafts,
-  copilot_draft_revisions, outbound_intents
+  copilot_draft_revisions, outbound_delivery_groups, outbound_intents
 
 conversation control:
   account_orchestrator_states, account_control_history,
@@ -1781,10 +1780,14 @@ proactive and state:
 model control:
   model_endpoints, model_profiles, model_config_drafts,
   model_config_versions, model_credentials,
-  model_credential_versions, control_input_sessions
+  model_credential_versions, control_input_sessions,
+  context_policies, context_policy_versions,
+  retrieval_policies, retrieval_policy_versions, prompt_versions
 
 governance:
-  audit_log, data_erasure_requests, erasure_ledger,
+  context_preview_requests, context_preview_tokens,
+  context_preview_deliveries, audit_log,
+  data_erasure_requests, erasure_ledger,
   data_export_requests, debug_payload_captures
 ```
 
@@ -1843,9 +1846,9 @@ telegram_message_id
 
 消息通过独立 event/revision/media 记录表达 edit、delete tombstone、album membership、媒体验证状态和可重放投影。`message_events` 不复制正文；正文位于可单向 redaction 的 `message_revisions`。V1 的正文与自动回复范围、业务键和稳定排序规则由 `docs/architecture/02-message-lifecycle.md` 固定，物理结构由 `docs/architecture/03-data-model.md` 固定。
 
-## outbound_intents
+## outbound_delivery_groups / outbound_intents
 
-系统发送前创建 outbound intent，核心字段包括：
+一个完整 logical output 创建一个 delivery group；即使短文本也有 group，长文本按 deterministic splitter 生成多个 intents。Group 核心字段包括：
 
 ```text
 id
@@ -1853,7 +1856,6 @@ account_id
 conversation_id
 source
 state
-content_hash
 account_control_version_snapshot
 mode_version_snapshot
 content_revision_snapshot
@@ -1862,6 +1864,21 @@ proactive_decision_id
 copilot_draft_id
 approved_draft_revision_id
 generation_no
+logical_content_hash
+normalizer_version
+splitter_version
+chunk_count
+reconciled_chunk_count
+```
+
+每个 chunk 的 intent 保存：
+
+```text
+id
+delivery_group_id
+chunk_ordinal
+chunk_count_snapshot
+content_hash
 telegram_random_id
 telegram_message_id
 attempt_count
@@ -1871,7 +1888,7 @@ reconciled_at
 last_error
 ```
 
-`source` 在发送前已确定为 `ai`、`proactive_ai` 或 `copilot_approved`。COPILOT intent 必须绑定唯一 draft 和 approved revision。发送前持久化 account/mode/content snapshot 与稳定的 Telegram random ID，发送成功后将其映射到 Telegram message ID；监听器使用该映射与 outgoing update 对账，不能仅凭正文和时间窗口猜测来源。
+`source` 在发送前已确定为 `ai`、`proactive_ai` 或 `copilot_approved`。COPILOT group 必须绑定唯一 draft 和 approved revision。Group 和全部 intents 在首段发送前原子持久化；每个 intent 有独立稳定 random ID，监听器逐段对账。部分失败只恢复未确认 ordinal，不能重新切段或从头发送。
 
 ---
 
@@ -2030,50 +2047,47 @@ pgvector
 
 # 42. Context Builder
 
-这是系统质量非常关键的一层。
+Context Builder 是独立 domain service，不直接发送 HTTP。它读取 purpose、turn、active memory/summary、freshness、模型能力和所有版本快照，选择 source 后先持久化不可变 manifest，再由 provider adapter 映射 wire request。
 
-主模型的上下文不应该简单拼接。
-
-建议顺序：
+固定顺序：
 
 ```text
-System Identity
-Personality
-Current Relationship
-Current Time
-Relevant Structured Memories
-Relevant Semantic Memories
-Conversation Summary
-Recent Canonical Messages
-Current Message
+trusted system/developer instructions
+manual identity instructions
+identity/personality data
+relationship/current time data
+structured memory
+semantic memory
+summary
+recent canonical history
+current turn
 ```
 
-并给不同层设置 token budget。
+Structured memory 使用 current active version、validity、scope、importance、confidence、freshness、source quality 和 topic relevance 确定性排序，默认最多 12 项。Semantic retrieval 只查一个 active embedding space，ANN 取候选后按精确 distance 和固定公式重排，默认最多 8 项。跨层命中同一 source root 时正文只放一次，所有选择理由仍进入 manifest。
+
+Recent selector 从 head 向前选取、最终按时间顺序装配，保持 reply、album 和 revision 边界。Memory `degraded/stale` 时 Main AI 不等待 worker，而是在预算内扩大 watermark 后的 canonical range；删除/隔离原因导致 stale 时先排除受影响 derived item。
 
 ---
 
 # 43. 上下文预算
 
-例如：
+V1 默认：
 
 ```text
-Identity / personality:
-固定预算
+max_input_tokens = 24000
+safety_reserve = max(1024, 5% of model context window)
 
-Relationship:
-小预算
-
-Relevant memory:
-中预算
-
-Summary:
-中预算
-
-Recent canonical messages:
-较大预算
+current turn                         20%
+recent canonical                    30%
+identity/personality/relationship   15%
+structured memory                   15%
+semantic memory                     10%
+summary                             10%
 ```
 
-随着历史增长，也不会无限扩大。
+配额是软限制，借用顺序固定并版本化。Trusted instructions、framing 和 `detail=auto` 图片 reserve 都计入输入预算；`max_output_tokens` 单独从模型窗口中预留。Current turn 不做静默字符截断；单独超预算时不调用 provider。
+
+Token estimator 优先使用匹配模型的 tokenizer，否则使用带 10% margin 的 versioned conservative fallback。Manifest 保存估算分解，run 保存 provider actual usage；估算偏差只能触发校准和告警，不能自动扩大预算。
 
 ---
 
@@ -2081,7 +2095,7 @@ Recent canonical messages:
 
 因为个人 AI 大量 Prompt 内容重复，因此缓存是重要的成本优化手段。
 
-建议至少四层缓存。
+建议至少四层缓存。Redis 和 provider prompt cache 都只负责加速，PostgreSQL 的 source/version/manifest 才是正确性事实源；cache hit 后仍需验证 current pointer、delete/redact、scope 和 policy version。
 
 ## L1 Identity Cache
 
@@ -2141,7 +2155,7 @@ RECENT
 USER
 ```
 
-不要每次随机改变前缀内容。
+不要每次随机改变前缀内容。所有稳定排序和序列化规则都有 `builder_version`，不能为了提高 cache hit 而省略 source boundary、trust label 或删除门禁。
 
 稳定部分尽量放在 Prompt 前方。
 
@@ -2462,12 +2476,13 @@ last model endpoint check
 
 不要发送异常内容，并将模型运行记录为失败。
 
-如果进程在创建 outbound intent 后、发送确认前崩溃：
+如果进程在创建 outbound delivery group/intents 后、发送确认前崩溃：
 
 ```text
-保留 pending / unknown intent
+保留 pending / partial / unknown group 和 intent
 启动后查询或等待 Telegram update 对账
-无法确认前不盲目重复发送
+按 chunk ordinal 与稳定 random ID 恢复
+无法确认当前 chunk 前不发送下一段或盲目重复发送
 ```
 
 如果 Memory Agent 失败：
@@ -2518,7 +2533,7 @@ account/global/contact pause or maintenance?
 account_control_version and mode_version still match?
 ```
 
-AUTO 满足后才进入 Main AI 并可能自动发送；COPILOT 下 proactive candidate 只能生成待管理员审批的草稿；HUMAN、temporary HUMAN 和 PAUSED 不生成或发送。Main AI 生成完成后，还需要在 conversation lock 内再次检查规则、幂等键、account control、mode/content version，通过后才能创建相应 draft 或 outbound intent。
+AUTO 满足后才进入 Main AI 并可能自动发送；COPILOT 下 proactive candidate 只能生成待管理员审批的草稿；HUMAN、temporary HUMAN 和 PAUSED 不生成或发送。Main AI 生成完成后，还需要在 conversation lock 内再次检查规则、幂等键、account control、mode/content version，通过后才能创建相应 draft，或原子创建 outbound delivery group 与全部 ordered intents。
 
 ---
 

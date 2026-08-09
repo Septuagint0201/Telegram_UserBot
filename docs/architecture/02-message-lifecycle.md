@@ -165,7 +165,7 @@ album 使用：
 album_key = account_id + chat_id + grouped_id
 ```
 
-同一 album 的 item 仍各自保留独立 `message_key`。稳定顺序使用 `(telegram_event_time, telegram_message_id)`；两者相同才使用 `observed_at` 和内部 ID 作为最终 tie-breaker。album 在所属 debounce collection seal 时形成快照，迟到 item 按普通新 content 规则更新 revision，不能改写已完成 outbound intent 的历史输入。
+同一 album 的 item 仍各自保留独立 `message_key`。稳定顺序使用 `(telegram_event_time, telegram_message_id)`；两者相同才使用 `observed_at` 和内部 ID 作为最终 tie-breaker。album 在所属 debounce collection seal 时形成快照，迟到 item 按普通新 content 规则更新 revision，不能改写已完成 outbound delivery group/intent 的历史输入。
 
 ## 6. 内容与媒体边界
 
@@ -269,7 +269,8 @@ event ingest: update_fingerprint
 message projection: message_key + content_revision
 turn membership: turn_id + message_id + message_revision
 model run: turn_id + generation_number
-outbound intent: turn_id + generation_number + source
+outbound delivery group: turn_id + generation_number + source
+outbound intent: delivery_group_id + chunk_ordinal + chunk_hash
 memory refresh: conversation_id + completed_turn_watermark
 media cleanup: media_object_id + deletion_generation
 ```
@@ -278,12 +279,14 @@ media cleanup: media_object_id + deletion_generation
 
 ### 8.1 系统发送
 
-`app` 调用 Telegram 前必须持久化 outbound intent，并为该 intent 生成稳定的 Telegram `random_id`。所有重试必须复用同一 intent 和 random ID，不得重新生成文本后当作同一次发送。
+`app` 调用 Telegram 前必须持久化 outbound delivery group 和全部 ordered outbound intents，并为每个 intent 生成稳定的 Telegram `random_id`。短文本也使用一个包含单 intent 的 group。所有重试必须复用同一 intent 和 random ID，不得重新生成文本或重新切段后当作同一次发送。
 
 用于来源与发送幂等的最小标识包括：
 
 ```text
 intent_id
+delivery_group_id
+chunk_ordinal / chunk_count
 account_id
 conversation_id
 turn_id
@@ -295,9 +298,9 @@ telegram_message_id?
 ```
 
 ```text
-outbound intent persisted
+delivery group + all ordered intents persisted atomically
         |
-Telegram send with persisted random_id
+Telegram send each ordinal with its persisted random_id
         |
 UpdateMessageID maps random_id -> telegram_message_id
         |
@@ -307,6 +310,8 @@ intent and message reconciled
 ```
 
 Telegram gateway 必须向上层暴露或自行持久化 `random_id` 映射，不能只依赖消息正文和时间窗口猜测 source。
+
+长模型输出的 canonical normalization、4,096 默认单条 policy、grapheme-safe deterministic splitter 和最大 chunk 数见 `docs/architecture/06-context-contract.md`。不能发送第一段后才创建后续 intent。
 
 ### 8.2 监听器分类
 
@@ -379,8 +384,8 @@ collecting -> ready -> generating -> output_ready -> sending -> completed
 | `ready` | 输入和媒体已 seal，等待获得执行权 |
 | `generating` | 已创建 active model run |
 | `output_ready` | 模型完整输出已验证，尚未创建发送副作用 |
-| `sending` | 已创建 outbound intent，正在发送或对账 |
-| `completed` | outbound intent 已 reconciled，或非自动模式的终态已记录 |
+| `sending` | 已创建 outbound delivery group 和全部 intents，正在按 ordinal 发送或对账 |
+| `completed` | delivery group 全部 intents 已 reconciled，或非自动模式的终态已记录 |
 | `superseded` | 输入被新内容或 edit/delete 取代，结果不得发送 |
 | `cancelled` | 模式、人工接管、全局 pause 或维护动作取消 |
 | `failed` | 可观察的终态失败，不自动发送错误文本 |
@@ -403,7 +408,23 @@ queued -> running -> succeeded
 
 取消是 best effort。`cancel_requested` 后返回的结果必须通过数据库 compare-and-set 检查；run 已 `cancelled`、turn 已 `superseded/cancelled` 或 generation 不再 active 时，结果转为 `discarded`。
 
-### 10.3 Outbound intent
+### 10.3 Outbound delivery group
+
+```text
+pending -> sending -----------------> reconciled
+             |
+             v
+           partial -> sending
+             |
+             +------> partial_cancelled
+
+pending/sending/partial -> failed_terminal -> dead_letter
+pending/sending         -> cancelled
+```
+
+短文本 group 的 `chunk_count=1`。长文本 group 只有全部 intent reconciled 才能进入 `reconciled`。已有至少一个 chunk 产生副作用后，临时失败进入 `partial` 并从首个未确认 ordinal恢复；真人接管、source edit/delete、mode/global/maintenance强门禁阻止剩余 chunk 时进入 `partial_cancelled`，不能删除已发送段落或从头重发。
+
+### 10.4 Outbound intent
 
 ```text
 pending -> sending -> sent_unconfirmed -> reconciled
@@ -416,7 +437,7 @@ pending -> sending -> sent_unconfirmed -> reconciled
 
 `sent_unconfirmed` 表示 Telegram RPC 有成功证据但 message ID/source 投影尚未完整对账。`unknown` 表示进程或网络中断导致结果不确定。两者都禁止新建 replacement intent。
 
-只有 `reconciled` 允许 turn 进入 `completed`。异常情况下可由人工将 dead letter 结案，但必须留下审计原因，不能静默标记为成功。
+单个 intent `reconciled` 只推进 group 的 `reconciled_chunk_count`；只有 group `reconciled` 允许 turn 进入 `completed`。异常情况下可由人工将 dead letter/partial group 结案，但必须留下已发/未发 ordinal 和原因，不能静默标记为完整成功。
 
 ## 11. 生成期间的新 incoming content
 
@@ -428,7 +449,7 @@ grace_deadline = t0 + 3 seconds
 t_done = 完整响应结束且 adapter/schema 验证成功的时间
 ```
 
-只要 model provider 请求已经开始、所属 turn 尚未创建 outbound intent，新的 `message.incoming.created` 到达时就应用本节规则。适用状态包括 `running`，也包括 API 已完成但仍停留在 `succeeded/output_ready` 的短暂窗口；已知 `t_done` 时直接与 deadline 比较。
+只要 model provider 请求已经开始、所属 turn 尚未创建 outbound delivery group，新的 `message.incoming.created` 到达时就应用本节规则。适用状态包括 `running`，也包括 API 已完成但仍停留在 `succeeded/output_ready` 的短暂窗口；已知 `t_done` 时直接与 deadline 比较。
 
 ### 11.2 条件式发送
 
@@ -452,6 +473,8 @@ t_done = 完整响应结束且 adapter/schema 验证成功的时间
 
 API 通用 timeout 由 ModelProfile 配置，通常大于 3 秒；不能把 3 秒实现为强制终止所有正常模型请求。
 
+Delivery group 及全部 intents 已原子创建后，新的 incoming 不再对该 logical output应用 3 秒 supersede，而是进入下一 turn。Group 尚未发送首段时仍执行完整 content/mode/control gate；首段已产生副作用后，新 incoming 本身不打断剩余 chunks，但真人 outgoing、source edit/delete、mode/global pause和维护门禁仍可终止未发送部分。
+
 ## 12. Edit、delete 与 reaction
 
 ### 12.1 Edit
@@ -459,7 +482,8 @@ API 通用 timeout 由 ModelProfile 配置，通常大于 3 秒；不能把 3 �
 edit upsert 同一 `message_key`，递增消息 `content_revision` 和 conversation `content_revision`，并保存 `edited_at`。
 
 - turn 仍在 `collecting`：更新 membership revision 并重新计算 sliding debounce，但 hard cap 不重置。
-- turn 已 seal 且尚未 `reconciled`：旧 turn/run/未发送 intent 失效，尽力取消并创建 replacement turn。
+- turn 已 seal 且 delivery group 尚无 Telegram 副作用：旧 turn/run/group/intents 失效，尽力取消并创建 replacement turn。
+- delivery group 已发送部分 chunks：已发送消息不撤回，未发送 chunks终止，group进入 `partial_cancelled`，并创建 memory reconciliation；不自动追发修正版。
 - outbound 已 `reconciled`：只更新历史并创建 memory reconciliation job，不自动生成补充消息，不编辑或撤回已发送回复。
 - outgoing human edit：保留 `source=human`，刷新上下文和记忆，不触发 AI 回复。
 
@@ -496,7 +520,7 @@ service message 只保存 action kind、涉及的受控 peer reference 和时间
 | COPILOT | 是 | 响应式仅 `/draft`；proactive 可生成待批草稿 | 仅管理员批准后 | 否 | 否 |
 | PAUSED/maintenance | 是，依赖持久化可用 | 否 | 否 | 否 | 否 |
 
-COPILOT draft 默认不创建 Telegram outbound intent。管理员在 Control Bot 对精确 draft revision 执行 Send 后，由 `app` 在完整门禁下创建唯一 intent，最终 Telegram outgoing 按 `source=copilot_approved` 摄取并保留是否经过人工编辑的 provenance。真人在普通 Telegram 客户端独立发送仍是 `source=human`。响应式 COPILOT incoming 不自动生成草稿，具体状态机见 `docs/architecture/04-conversation-orchestrator.md`。
+COPILOT draft 默认不创建 Telegram outbound delivery group/intent。管理员在 Control Bot 对精确 draft revision 执行 Send 后，由 `app` 在完整门禁下创建唯一 group 和全部 ordered intents，最终 Telegram outgoing 按 `source=copilot_approved` 摄取并保留是否经过人工编辑的 provenance。真人在普通 Telegram 客户端独立发送仍是 `source=human`。响应式 COPILOT incoming 不自动生成草稿，具体状态机见 `docs/architecture/04-conversation-orchestrator.md`。
 
 ### 13.2 Read acknowledgement
 
@@ -526,7 +550,7 @@ Redis lease 不是正确性事实源。PostgreSQL 中的 account `control_versio
 
 ### 14.2 发送前检查
 
-从 `output_ready` 创建 outbound intent 必须在 conversation 数据库锁/原子 CAS 内完成，并同时检查：
+从 `output_ready` 创建 outbound delivery group 和全部 ordered intents 必须在 conversation 数据库锁/原子 CAS 内完成，并同时检查：
 
 ```text
 effective mode permits intent source
@@ -540,13 +564,14 @@ conversation content_revision = input revision
   OR valid grace_send_authorization covers every delta
 no confirmed human outgoing after run start
 contact policy still allows automation
-no existing outbound intent for the idempotency key
+no existing outbound delivery group for this turn/generation/source
+all chunks and intent idempotency keys validate
 lease owner token still valid
 ```
 
-任一检查失败时不得创建 intent，输出转为 discarded/cancelled，并按原因决定是否创建 replacement turn。
+任一检查失败时不得创建 group/intent，输出转为 discarded/cancelled，并按原因决定是否创建 replacement turn。
 
-intent 创建后到 Telegram RPC 前再执行一次轻量门禁。发生 mode、人类接管、edit/delete 或 lease 丢失时，尚未发送的 intent 转为 `cancelled`。已经进入结果不确定状态的 RPC 不能假定未发送，必须进入 reconciliation。
+Group/intents 创建后到首个 Telegram RPC 前再执行一次完整轻量门禁。首段之后每个 chunk发送前至少检查 group状态、ordinal、account/mode/maintenance强门禁、selected source revision仍current且未edit/delete/redact，以及没有真人接管。前序同group outgoing和新incoming引起的通用`content_revision`变化是允许的，因此首段产生副作用后不能继续要求它等于初始snapshot；这些incoming进入下一turn。已经进入结果不确定状态的 RPC 不能假定未发送，必须进入 reconciliation。
 
 ## 15. Retry、FloodWait 与失败恢复
 
@@ -556,17 +581,18 @@ intent 创建后到 Telegram RPC 前再执行一次轻量门禁。发生 mode、
 - 每次 attempt 记录 provider request ID、开始/结束时间、错误类别和配置快照，不记录完整 prompt 或凭据。
 - 重试前重新检查 turn、generation、mode 和 revision；旧 run 不再 active 时直接丢弃。
 - schema 错误、内容策略错误和确定性 4xx 默认为 terminal，不自动发送错误文本。
-- provider 不支持幂等键时，重复模型调用仍不会直接造成 Telegram 副作用，因为只有 active generation 可以创建唯一 intent。
+- provider 不支持幂等键时，重复模型调用仍不会直接造成 Telegram 副作用，因为只有 active generation 可以创建唯一 delivery group和有序 intents。
 
 具体 attempt 上限在 Operations 中配置。达到上限后 turn 进入 `failed` 或 `dead_letter`，联系人侧保持不发送。
 
 ### 15.2 Telegram FloodWait
 
-FloodWait 不进行忙循环。记录 Telegram 指示的等待时间，将 intent 转为 `retry_wait` 并在到期后重新检查门禁。
+FloodWait 不进行忙循环。记录 Telegram 指示的等待时间，将 intent 转为 `retry_wait`、group保持 `pending/partial`，并在到期后重新检查门禁。
 
 - 未执行 RPC 的 intent 可以在门禁仍有效时重试。
 - 已可能执行的 RPC 必须先 reconciliation，并复用相同 `random_id`。
-- 等待期间出现 human outgoing、mode 变化、edit/delete 或不被 grace 覆盖的 revision 时，未发送 intent 取消。
+- 首段前等待期间出现 human outgoing、mode变化、edit/delete或不被grace覆盖的revision时，整组未发送 intents取消。
+- 已有 chunk副作用后，新 incoming不撤销group；human outgoing、mode/global/maintenance或source edit/delete使剩余 intents停止，group为 `partial_cancelled`。
 - 超过服务器允许的最大自动等待时进入 dead letter，由 `/server_status` 或后续运维命令显示摘要。
 
 ### 15.3 崩溃点
@@ -577,10 +603,11 @@ FloodWait 不进行忙循环。记录 Telegram 指示的等待时间，将 inten
 | event 提交后、通知前 | watermark 扫描重新发布 pending work |
 | model request 前 | active run lease 过期后重领 |
 | model request 中 | 旧 attempt 超时；恢复者检查状态后决定重试，迟到结果受 generation gate 限制 |
-| intent 提交前 | 没有 Telegram 副作用，可由 active turn 重试状态转换 |
-| intent 提交后、RPC 前 | 门禁通过后使用原 intent/random ID 发送 |
+| group/intents 原子提交前 | 没有 Telegram 副作用，可由 active turn 重试状态转换 |
+| group/intents 提交后、首个 RPC 前 | 门禁通过后按 ordinal 使用原 intent/random ID 发送 |
 | RPC 中或返回后、对账前 | 标记 `unknown/sent_unconfirmed`，先查 mapping/outgoing history，不创建新 intent |
 | Telegram 已发送、listener 未投影 | UpdateMessageID、update replay 或受限 history reconciliation 补齐 message/source |
+| 第 N chunk 已确认、后续未发送 | 从首个未确认 ordinal恢复，不重新切段或重发前序 chunk |
 
 启动恢复顺序：
 
@@ -612,7 +639,7 @@ edit/delete 发生在已有 memory proposal、正式 memory 或 summary 之后�
 
 - 所有联系人正文、caption、图片和 Telegram file reference 都属于敏感用户数据。
 - 日志禁止包含消息正文、caption、图片 bytes、原始文件名、完整 peer 标识、Session、API key 或完整模型 prompt。
-- outbound intent 可以记录 content hash、长度和 schema version，不默认记录生成正文到结构化日志；正文只进入受控业务表。
+- outbound delivery group/intent 可以记录 content hash、长度、ordinal和schema version，不默认记录生成正文到结构化日志；正文只进入受控业务表。
 - 媒体 volume 不暴露给 gateway，不通过静态文件服务器发布，不写入镜像和普通备份日志。
 - 模型 provider 只接收当前 Context manifest 明确选择的内容；metadata-only 媒体不得被 adapter 临时下载。
 - Prompt injection 内容保留 user/forward 来源标记，不能改变 system/developer 指令层。
@@ -633,6 +660,9 @@ model_runs_total by result
 model_superseded_total by reason
 grace_send_authorizations_total
 outbound_intents_total by status/source
+outbound_delivery_groups_total by status/source
+outbound_delivery_group_chunks_total
+outbound_delivery_group_partial_total by reason
 outbound_reconciliation_age_seconds
 telegram_floodwait_total
 media_download_total by status/type
@@ -641,7 +671,7 @@ memory_refresh_lag_seconds
 conversation_lease_contention_total
 ```
 
-correlation 至少可以从 event -> message -> turn -> model run -> outbound intent -> reconciled Telegram message 追踪，但外部日志只使用内部 ID 或不可逆短标识。
+correlation 至少可以从 event -> message -> turn -> model run -> outbound delivery group -> intent -> reconciled Telegram message 追踪，但外部日志只使用内部 ID 或不可逆短标识。
 
 ## 19. 自动化验收矩阵
 
@@ -658,13 +688,17 @@ correlation 至少可以从 event -> message -> turn -> model run -> outbound in
 | 新消息到达，API 超过 run 开始后 3 秒未完成 | 旧结果丢弃，replacement turn 合并重生成 |
 | 新消息在 run 开始 3 秒后才到达 | 立即 supersede，不再等待 |
 | streaming 3 秒内只有首 token | 不视为完成，执行 supersede |
-| API 已在 3 秒内完成、intent 尚未创建时新消息到达 | 根据 `t_done` 授权旧结果，新消息进入下一 turn |
-| API 超过 3 秒完成、intent 尚未创建时新消息到达 | 已完成结果 discarded，合并重生成 |
-| 发送前 edit/delete | 旧 run/intent 失效并重建，不发送旧结果 |
+| API 已在 3 秒内完成、delivery group 尚未创建时新消息到达 | 根据 `t_done` 授权旧结果，新消息进入下一 turn |
+| API 超过 3 秒完成、delivery group 尚未创建时新消息到达 | 已完成结果 discarded，合并重生成 |
+| 首段发送前 edit/delete | 旧 run/group/intents 失效并重建，不发送旧结果 |
 | 发送后 edit/delete | 不自动追发，Context/Memory 进入修正流程 |
 | 真人 outgoing 与模型返回竞态 | `mode_version` 使 AI 结果无法发送 |
 | Control Bot 切 HUMAN 与模型返回竞态 | 非 AUTO 门禁阻止发送 |
-| intent 提交后进程崩溃 | 使用同一 random ID 对账，不重复发送 |
+| group/intents 提交后进程崩溃 | 使用各 intent 的同一 random ID 对账，不重复发送 |
+| 长输出分为多个 chunks | group和所有intents原子创建，按ordinal发送 |
+| 第2段RPC unknown | 先按第2段random ID对账，不发送第3段 |
+| 已发送部分后FloodWait | 从首个未确认ordinal继续，不重发前段 |
+| 已发送部分后真人接管 | 未发送段停止，group记录 `partial_cancelled` |
 | outgoing listener 先于 send caller 返回 | source 最终为 ai/proactive_ai/copilot_approved，不误判 human |
 | photo 与 image document | 验证后以 `detail=auto` 进入支持图片的模型 |
 | 伪造 image MIME 或超限图片 | 拒绝，不传 provider，不回复猜测内容 |
@@ -685,11 +719,7 @@ Data Model：
 - tombstone 正文清理和 evidence 关系。
 - canonical Telegram peer ID 与 update fingerprint 的具体编码。
 
-Context Contract：
-
-- 文本、caption、forward、reply、album 和图片 content part 的选择与 token/image 预算。
-- 三种模型协议对 `detail=auto` 和多模态 content part 的 wire 映射、等价默认值或不支持结果。
-- 不支持图片时的能力校验与可观察错误。
+Context Contract 已在 `docs/architecture/06-context-contract.md` 定义文本、caption、forward、reply、album、图片、token/image预算、三协议wire mapping、capability校验，以及长文本delivery group/splitter。后续修改这些契约时必须同步更新本文状态机和发送门禁。
 
 Operations：
 
@@ -710,7 +740,8 @@ Test Strategy：
 - [x] text/caption 与各类媒体的保存、下载和模型输入边界已定义。
 - [x] 业务唯一键、event 幂等键和稳定顺序已定义。
 - [x] AI、proactive AI、真人和 system pending outgoing 的对账流程已定义。
-- [x] turn、model run 和 outbound intent 状态机已定义。
+- [x] turn、model run、outbound delivery group 和 intent 状态机已定义。
+- [x] outbound delivery group、有序chunk发送和部分失败恢复状态已定义。
 - [x] debounce 与条件式 3 秒 supersede 行为已定义。
 - [x] edit/delete 在发送前后各自的行为已定义。
 - [x] conversation lease、revision、mode version 和发送前门禁已定义。

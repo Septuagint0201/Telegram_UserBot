@@ -144,10 +144,12 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 
 - 通过 Telegram Bot API long polling 运行 Control Bot。
 - 校验 Control Bot 管理员白名单。
-- 提供 `/server_status`、模式控制、`/models`、模型非密钥配置命令和 `/model_key <role>` Web App 入口。
+- 提供 `/server_status`、模式控制、metadata-only `/context`、二次确认的 `/context_preview`、`/models`、模型非密钥配置命令和 `/model_key <role>` Web App 入口。
 - 提供 `/memory`、`/memory_candidates`、`/memory_accept`、`/memory_reject`、`/forget` 和 `/memory_status`；只写 durable review command，不直接修改 active memory。
 - 展示 COPILOT draft card，处理 `/draft`、Send/Edit/Ignore 和短期 edit session；approval 只写 durable command，由 `app` 二次门禁并代发。
 - 通过绑定管理员、logical role 和随机 session ID 的短生命周期 Bot 输入会话管理 endpoint、protocol、model、生成参数、超时和启用状态；API key 输入必须拒绝。
+- `/context` 只读取manifest元数据；`/context_preview` 绑定精确manifest、管理员、Bot chat和一次性短期token，二次确认后通过受限数据库查询重建文本。`control`不挂载`media-data`，图片只显示reference/hash/尺寸/detail，不重传二进制。
+- 持久化preview投递的Bot message IDs和删除deadline，执行best-effort删除并记录失败；不能把Telegram删除描述为可靠擦除。
 - 提供 Telegram Web App 静态资源和只允许设置、替换或删除 API key 的凭据 API。
 - 校验 Telegram Web App `initData`、时效和管理员身份。
 - 创建、验证和激活模型配置版本。
@@ -169,14 +171,14 @@ Telegram Web App 在用户的 Telegram 客户端中运行，通过 `https-gatewa
 - Embedding 生成、shadow-space 重建和原子切换准备。
 - 按 validated media reference 只读访问 Memory/summary 任务允许使用的图片。
 - Proactive 候选处理和模型判断。
-- 未处理 message watermark、未知 outbound intent 等补偿扫描。
+- 未处理 message watermark、partial delivery group、未知 outbound intent 等补偿扫描。
 - Scheduler tick 发布。
 
 worker 可以增加副本。任务交付语义为 at-least-once，因此每种任务都必须拥有稳定幂等键。
 
 所有 worker 实例都可以消费普通任务，但只有通过专用 PostgreSQL 长连接取得 Scheduler session-level advisory lock 的实例可以发布周期任务。非 leader worker 保持正常消费能力。leader 退出或该专用连接断开后锁自动释放，由其他实例重新竞争。
 
-worker 产生主动发送决策后，只能保存 decision 并提交发送请求。最终规则检查、conversation lock、outbound intent 和 Telethon 发送仍由 `app` 执行。
+worker 产生主动发送决策后，只能保存 decision 并提交发送请求。最终规则检查、conversation lock、outbound delivery group/intents 和 Telethon 发送仍由 `app` 执行。
 
 ### 8.4 migrate
 
@@ -261,7 +263,8 @@ domain   -> Python standard library and domain-local types
 |---|---|---|---|
 | Telethon Session | `app` 专用 volume | `app` | `app` |
 | Telegram canonical message/revision | PostgreSQL | `app` | `app`、`worker`、`control` 的受限查询 |
-| Outbound intent 和发送结果 | PostgreSQL | `app` | `app`、`worker`、`control` 状态查询 |
+| Outbound delivery group、intent 和发送结果 | PostgreSQL | `app` | `app`、`worker`、`control` 状态查询 |
+| Context preview request/token/delivery metadata | PostgreSQL | `control` | `control`、审计/清理任务 |
 | Conversation/account control、COPILOT draft/approval | PostgreSQL | `control`、授权的 `app`/worker 流程 | `app`、`control`、受限 `worker` |
 | 长期记忆和 summary | PostgreSQL | `worker` | `app`、`worker`、受限的 `control` 查询 |
 | 模型非密钥配置 | PostgreSQL | `control` | `app`、`control`、`worker` |
@@ -309,7 +312,7 @@ app
   <- COPILOT approval notification
 ```
 
-队列负责及时投递，PostgreSQL 中的消息 sequence、job record、decision、COPILOT approval command 和 watermark 负责恢复。关键任务不能只存在于 Redis 的瞬时消息中。`app` 收到 approval notification 后必须重读 draft、action、account/conversation version 并创建唯一 `copilot_approved` intent；`control` 不能直接调用 Telethon 或未鉴权 send RPC。
+队列负责及时投递，PostgreSQL 中的消息 sequence、job record、decision、COPILOT approval command 和 watermark 负责恢复。关键任务不能只存在于 Redis 的瞬时消息中。`app` 收到 approval notification 后必须重读 draft、action、account/conversation version并创建唯一`copilot_approved` delivery group及全部intents；`control`不能直接调用Telethon或未鉴权send RPC。
 
 ### 11.3 模型配置传播
 
@@ -433,7 +436,7 @@ https-gateway routes key-only Web App traffic
 ### app
 
 1. 将 readiness 设为 false。
-2. 停止创建新的 AI 回复和 outbound intent。
+2. 停止创建新的 AI 回复、outbound delivery group 和 intent。
 3. 对正在执行的模型请求进行 best-effort cancel。
 4. 等待已进入发送阶段的操作完成对账，或保留为可恢复的 unknown 状态。
 5. 停止 Telethon update 消费并断开 Session。
@@ -514,7 +517,7 @@ unknown
 - Scheduler leader 是否存在以及最近 tick 时间。
 - PostgreSQL 和 Redis 直接探测结果。
 - 各逻辑模型配置是否存在、最后验证结果和最近请求状态。
-- pending/unknown outbound intent 数量。
+- pending/partial outbound delivery group 与 pending/unknown intent 数量。
 
 模型端点状态优先使用显式验证结果和真实请求结果。周期状态检查不得为了显示“健康”而反复执行付费生成。
 
@@ -557,7 +560,7 @@ shared control / workers / postgres / redis
 
 | 故障 | 影响 | 必须采取的行为 | 恢复 |
 |---|---|---|---|
-| `app` 崩溃 | AI 不再接收或发送；真人客户端仍可使用账号 | 不由 worker/control 代发 | 重启后取得 account lock，恢复 update 并对账 outbound intent |
+| `app` 崩溃 | AI 不再接收或发送；真人客户端仍可使用账号 | 不由 worker/control 代发 | 重启后取得 account lock，恢复 update 并按 delivery group/intent 对账 |
 | `control` 崩溃 | Control Bot、key-only Web App、状态查询不可用 | `app` 按最后已提交模式和模型配置继续运行 | 重启并恢复 Bot polling；不回滚已提交配置 |
 | worker 崩溃 | 记忆、summary、proactive 延迟 | 实时聊天使用已提交记忆和 recent canonical messages | 队列重试；watermark 补偿扫描 |
 | Scheduler leader 崩溃 | 周期任务短暂不发布 | 普通 worker 继续消费 | advisory lock 释放后重新选 leader |

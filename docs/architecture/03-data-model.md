@@ -4,7 +4,7 @@
 
 本文档定义 Telegram Personal AI Digital Twin V1 的 PostgreSQL 逻辑数据模型、实体身份、版本化方式、业务唯一键、外键、检查约束、索引、事务边界、保留与删除语义，以及 Alembic migration 规则。
 
-总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`，模式与控制状态机见 `docs/architecture/04-conversation-orchestrator.md`，记忆运行语义见 `docs/architecture/05-memory-pipeline.md`。后续 Context Contract 和 Proactive Pipeline 可以增加字段和受约束的扩展类型，但不得绕过本文定义的账号边界、版本快照、证据链、删除语义和发送幂等约束。
+总体设计见 `docs/Design.md`，运行组件所有权见 `docs/architecture/01-runtime-topology.md`，消息状态机见 `docs/architecture/02-message-lifecycle.md`，模式与控制状态机见 `docs/architecture/04-conversation-orchestrator.md`，记忆运行语义见 `docs/architecture/05-memory-pipeline.md`，上下文、adapter和长输出契约见 `docs/architecture/06-context-contract.md`。后续 Proactive Pipeline 可以增加字段和受约束的扩展类型，但不得绕过本文定义的账号边界、版本快照、证据链、删除语义和发送幂等约束。
 
 当前状态：V1 架构基线。
 
@@ -133,9 +133,11 @@ accounts
   |                        +--< conversation_turns --< turn_messages
   |                        |          |
   |                        |          +--< context_manifests --< context_manifest_items
+  |                        |          |                              +--< context_manifest_item_reasons
+  |                        |          |                +--< context_manifest_omissions
   |                        |          +--< model_runs --< model_run_attempts
   |                        |          +--< copilot_drafts --< copilot_draft_revisions
-  |                        |          +--< outbound_intents --< outbound_attempts
+  |                        |          +--< outbound_delivery_groups --< outbound_intents --< outbound_attempts
   |                        |
   |                        +--< memories --< memory_versions --< memory_evidence
   |                        |                    |
@@ -145,6 +147,9 @@ accounts
   |                        +--< memory_proposals --< memory_proposal_targets/evidence
   |                        +--< memory_watermarks
   |                        +--< summaries --< summary_versions --< summary_version_sources
+  |                        +--< context_preview_requests
+  |                                      +--< context_preview_tokens
+  |                                      +--< context_preview_deliveries
   |
   +--< audit_log
   +--< background_jobs
@@ -153,10 +158,13 @@ accounts
 model_endpoints --< model_config_versions >-- model_profiles
                                              |
                                              +-- model_credentials --< model_credential_versions
+context_policies --< context_policy_versions
+retrieval_policies --< retrieval_policy_versions
+prompt_versions -> context_manifests / model_runs
 
 message_events -> message projection / conversation revision
 transactional_outbox -> Redis notification relay
-life_events / intentions / relationship_states -> proactive_decisions -> outbound_intents
+life_events / intentions / relationship_states -> proactive_decisions -> outbound_delivery_groups -> outbound_intents
 ```
 
 模型 profile、endpoint 和 credential 是部署级配置，不属于某个 Telegram account。箭头表示逻辑关系，不代表所有删除都使用 `ON DELETE CASCADE`；显式删除流程和外键策略分别见第 13、14 节。
@@ -606,24 +614,55 @@ turn、message 和 revision 使用包含 account/conversation/message 的最宽 
 
 ### 7.5 `context_manifests`
 
-Context Contract 后续定义装配算法，本表先固定可复现快照的 identity。
+Context Contract 见 `docs/architecture/06-context-contract.md`。本表保存一次 provider-independent context build 的可复现 identity 和预算/version snapshot。
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
 | `id` | UUIDv7 | PK |
 | `account_id` | UUIDv7 | FK accounts |
 | `conversation_id` | UUIDv7 | composite FK conversations |
-| `turn_id` | UUIDv7 | composite FK turns |
+| `owner_kind` | TEXT | `turn/background_job` |
+| `turn_id` | UUIDv7 | nullable composite FK turns |
+| `background_job_id` | UUIDv7 | nullable FK background_jobs；account-scoped job使用widest composite FK |
+| `purpose` | TEXT | 受控业务 purpose |
+| `logical_role` | TEXT | `main_ai/memory_agent/proactive_agent`；与 purpose 一致 |
 | `builder_version` | TEXT | Context Builder 版本 |
 | `prompt_version` | TEXT | system/developer prompt 版本 |
-| `input_token_estimate` | INTEGER | nullable nonnegative |
+| `prompt_bundle_sha256` | BYTEA | ordered active prompt/manual instruction bundle hash |
+| `context_policy_version_id` | UUIDv7 | FK immutable context policy version |
+| `retrieval_policy_version_id` | UUIDv7 | FK immutable retrieval policy version |
+| `retrieval_policy_version` | TEXT | structured/vector/recent 算法与权重 |
+| `token_policy_version` | TEXT | 总预算、软配额和 splitter policy |
+| `token_estimator_version` | TEXT | tokenizer/fallback framing 版本 |
+| `capability_snapshot_sha256` | BYTEA | active config capabilities hash |
+| `embedding_space_id` | UUIDv7 | nullable；当次只允许一个 active space |
+| `memory_freshness` | TEXT | `fresh/degraded/stale` snapshot |
+| `effective_input_budget` | INTEGER | positive |
+| `safety_reserve_tokens` | INTEGER | nonnegative |
+| `estimated_instruction_tokens` | INTEGER | nonnegative |
+| `estimated_text_tokens` | INTEGER | nonnegative |
+| `estimated_image_tokens` | INTEGER | nonnegative |
+| `estimated_structural_tokens` | INTEGER | nonnegative |
+| `input_token_estimate` | INTEGER | 上述输入估算总计，nonnegative |
 | `image_count` | INTEGER | nonnegative |
+| `omission_count` | INTEGER | nonnegative |
+| `source_revision_vector_sha256` | BYTEA | selected/current source version vector hash |
 | `manifest_sha256` | BYTEA | 对 ordered item manifest 的 hash |
 | `created_at` | TIMESTAMPTZ | DB default |
 
 ```text
-UNIQUE (turn_id, builder_version, manifest_sha256)
+UNIQUE (turn_id, logical_role, builder_version, manifest_sha256)
+  WHERE turn_id IS NOT NULL
+UNIQUE (background_job_id, logical_role, builder_version, manifest_sha256)
+  WHERE background_job_id IS NOT NULL
+CHECK ((owner_kind = 'turn' AND turn_id IS NOT NULL AND background_job_id IS NULL) OR
+       (owner_kind = 'background_job' AND turn_id IS NULL AND background_job_id IS NOT NULL))
+CHECK (input_token_estimate = estimated_instruction_tokens
+       + estimated_text_tokens + estimated_image_tokens
+       + estimated_structural_tokens)
 ```
+
+Memory/Proactive 的 purpose-specific manifest 没有 reactive `turn_id` 时，以对应 sealed background job identity 建立唯一键；不能把 nullable `turn_id` 当作幂等约束。Memory Pipeline 的 evidence range仍由专用 `memory_input_manifests` 表达，context manifest只负责实际canonical model request选择。
 
 ### 7.6 `context_manifest_items`
 
@@ -632,23 +671,66 @@ UNIQUE (turn_id, builder_version, manifest_sha256)
 | `id` | BIGINT IDENTITY | PK |
 | `manifest_id` | UUIDv7 | FK context_manifests |
 | `ordinal` | INTEGER | 总装配顺序 |
-| `layer` | TEXT | `identity/personality/relationship/memory/summary/recent/current` |
+| `layer` | TEXT | `instruction/identity/personality/relationship_time/structured_memory/semantic_memory/summary/recent/current` |
+| `canonical_role` | TEXT | `system/developer/user/assistant` |
+| `source_actor` | TEXT | `server/admin/contact/human/ai/proactive_ai/copilot_approved/derived` |
 | `source_type` | TEXT | typed discriminator |
 | `message_revision_id` | UUIDv7 | nullable FK |
-| `memory_version_id` | UUIDv7 | nullable FK，延后添加 |
-| `summary_version_id` | UUIDv7 | nullable FK，延后添加 |
+| `memory_version_id` | UUIDv7 | nullable composite FK current version |
+| `summary_version_id` | UUIDv7 | nullable composite FK current version |
 | `media_object_id` | UUIDv7 | nullable FK validated provider copy |
-| `trust_level` | TEXT | `system/trusted_derived/untrusted_user` |
-| `token_estimate` | INTEGER | nullable nonnegative |
-| `selection_reason_code` | TEXT | 不复制正文 |
-| `content_sha256` | BYTEA | 选中内容或序列化 content part hash |
+| `trust_level` | TEXT | `system/trusted_derived/trusted_history/model_generated_history/untrusted_user/untrusted_external` |
+| `rank_position` | INTEGER | nullable positive；retrieval item 的稳定 rank |
+| `base_score` | NUMERIC | nullable，范围 `[0,1]` |
+| `final_score` | NUMERIC | nullable，范围 `[0,1]` |
+| `score_features_schema_version` | SMALLINT | nullable |
+| `score_features` | JSONB | nullable；只存版本化归一数值，不存正文 |
+| `source_slice_start` | INTEGER | nullable nonnegative Unicode code-point offset |
+| `source_slice_end` | INTEGER | nullable positive、exclusive |
+| `image_detail` | TEXT | nullable；图片固定 `auto` |
+| `token_estimate` | INTEGER | nonnegative文本/framing估算 |
+| `estimated_image_tokens` | INTEGER | nonnegative |
+| `content_sha256` | BYTEA | 完整 source content hash |
+| `rendered_part_sha256` | BYTEA | slice/label/content part canonical serialization hash |
 
 ```text
 UNIQUE (manifest_id, ordinal)
 CHECK typed source foreign key 恰好符合 source_type
+CHECK source_slice_start/source_slice_end 同时为空或同时非空且 start < end
+CHECK score/rank 组合符合 layer
+CHECK image_detail IS NULL OR image_detail = 'auto'
 ```
 
 正文由 version FK 重建，manifest 本身不复制 message/memory text。若 source 后续被 Telegram delete/contact purge 擦除，manifest 仍能解释选择过哪个 ID，但不能恢复已删除正文。
+
+多重命中理由和省略项不能塞进单个 reason 字符串：
+
+```text
+context_manifest_item_reasons(
+  manifest_item_id BIGINT FK,
+  reason_ordinal SMALLINT,
+  reason_code TEXT,
+  related_source_type TEXT?,
+  related_source_id UUIDv7?,
+  PRIMARY KEY (manifest_item_id, reason_ordinal)
+)
+
+context_manifest_omissions(
+  id BIGINT IDENTITY PK,
+  manifest_id UUIDv7 FK,
+  layer TEXT,
+  reason_code TEXT,
+  source_type TEXT?,
+  source_id UUIDv7?,
+  range_start_event_id BIGINT?,
+  range_end_event_id BIGINT?,
+  omitted_count INTEGER?,
+  estimated_tokens INTEGER?,
+  created_at TIMESTAMPTZ
+)
+```
+
+Reason/omission 使用受控类型和 typed scope 校验；不保存省略正文。`context_manifests.omission_count` 与 child count 在 seal transaction 中一致。
 
 ### 7.7 `model_runs`
 
@@ -670,11 +752,23 @@ CHECK typed source foreign key 恰好符合 source_type
 | `credential_version_id` | UUIDv7 | 同 role credential snapshot FK，不含 secret |
 | `context_manifest_id` | UUIDv7 | nullable FK |
 | `memory_input_manifest_id` | UUIDv7 | nullable FK；仅 Memory Agent run 使用 |
+| `prompt_version` | TEXT | purpose-specific prompt snapshot |
+| `prompt_bundle_sha256` | BYTEA | exact ordered trusted instruction bundle hash |
+| `context_policy_version_id` | UUIDv7 | nullable FK；generation request required |
+| `retrieval_policy_version_id` | UUIDv7 | nullable FK；Context retrieval purpose required |
+| `retrieval_policy_version` | TEXT | nullable；与 Context manifest 一致 |
+| `token_policy_version` | TEXT | nullable；与 Context manifest 一致 |
+| `token_estimator_version` | TEXT | nullable；与 Context manifest 一致 |
+| `capability_snapshot_sha256` | BYTEA | config capabilities snapshot hash |
 | `input_fingerprint` | BYTEA | canonical request 的 keyed fingerprint；purge 时清除 |
 | `output_fingerprint` | BYTEA | nullable normalized output keyed fingerprint；purge 时清除 |
 | `adapter_version` | TEXT | protocol adapter 实现版本 |
 | `request_schema_version` | SMALLINT | canonical request schema |
 | `output_schema_version` | SMALLINT | normalized result schema |
+| `normalizer_version` | TEXT | normalized text/structured result version |
+| `finish_reason` | TEXT | nullable canonical finish reason |
+| `result_kind` | TEXT | nullable `text/structured/refusal/error` |
+| `is_complete` | BOOLEAN | nullable；只有完整且contract-valid才为 true |
 | `provider_request_id` | TEXT | nullable，脱敏长度限制 |
 | `input_tokens` | INTEGER | nullable nonnegative |
 | `output_tokens` | INTEGER | nullable nonnegative |
@@ -697,7 +791,7 @@ CHECK (logical_role = 'memory_agent') = (memory_input_manifest_id IS NOT NULL)
 
 `model_profiles` 提供 `(id, logical_role)` unique key，run 使用 composite FK 保证 role；config version 和 credential version 也分别通过 `(id, profile_id)` composite FK 绑定同一个 `model_profile_id`，数据库会拒绝把其他 role 的配置或 key 用于本次运行。
 
-业务输出由目标表反向引用 `model_run_id`：Main AI 由 outbound intent 引用，Memory Agent 由 proposal 引用，Proactive Agent 由 decision 引用。避免 `model_runs` 使用不可约束的 polymorphic output ID。
+业务输出由目标表反向引用 `model_run_id`：Main AI 由 outbound delivery group/intents 引用，Memory Agent 由 proposal 引用，Proactive Agent 由 decision 引用。避免 `model_runs` 使用不可约束的 polymorphic output ID。
 
 ### 7.8 `model_run_attempts`
 
@@ -807,20 +901,75 @@ UNIQUE (id, account_id, draft_id)
 
 `copilot_action_tokens` 只保存 token hash、admin ID、draft/revision、purpose、expires/used_at；`copilot_edit_sessions` 绑定 Bot chat/admin/reply message/draft 并强制短期过期。两表都不保存 callback 明文 token 或重复 draft正文。
 
-### 7.11 `outbound_intents`
+### 7.11 `outbound_delivery_groups`
+
+一个完整 normalized logical output 对应一个 delivery group。短文本 group 也存在，只包含一个 intent；长文本按 Context Contract 的 versioned deterministic splitter 生成多个 intent。
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
 | `id` | UUIDv7 | PK |
 | `account_id` | UUIDv7 | FK accounts |
 | `conversation_id` | UUIDv7 | composite FK conversations |
-| `turn_id` | UUIDv7 | nullable composite FK，proactive 也必须有 logical turn/decision ref |
+| `turn_id` | UUIDv7 | nullable composite FK；proactive 使用 decision scope |
 | `model_run_id` | UUIDv7 | NOT NULL composite FK |
-| `model_role` | TEXT | 与 source 一致的 `main_ai/proactive_agent` snapshot |
-| `proactive_decision_id` | UUIDv7 | nullable FK，延后添加 |
+| `model_role` | TEXT | 固定 `main_ai`；所有实际消息正文均由 Main AI run 生成 |
+| `proactive_decision_id` | UUIDv7 | nullable composite FK |
 | `copilot_draft_id` | UUIDv7 | nullable composite FK |
 | `approved_draft_revision_id` | UUIDv7 | nullable composite FK |
 | `source` | TEXT | `ai/proactive_ai/copilot_approved` |
+| `generation_no` | INTEGER | NOT NULL |
+| `state` | TEXT | `pending/sending/partial/reconciled/cancelled/partial_cancelled/failed_terminal/dead_letter` |
+| `account_control_version_snapshot` | BIGINT | NOT NULL |
+| `mode_version_snapshot` | BIGINT | NOT NULL |
+| `content_revision_snapshot` | BIGINT | NOT NULL |
+| `logical_content_sha256` | BYTEA | nullable 32-byte；purge/redaction 时清空 |
+| `normalizer_version` | TEXT | normalized logical text version |
+| `splitter_version` | TEXT | deterministic splitter/policy version |
+| `chunk_count` | INTEGER | positive，受 versioned policy 上限 |
+| `max_delivery_chunks_snapshot` | INTEGER | positive，取自 context policy version |
+| `reconciled_chunk_count` | INTEGER | nonnegative，不超过 chunk_count |
+| `reply_to_telegram_message_id` | BIGINT | nullable；只有首 chunk 使用 |
+| `send_authorized_at` | TIMESTAMPTZ | nullable；首段完整门禁通过 |
+| `first_side_effect_at` | TIMESTAMPTZ | nullable；任一 Telegram RPC 可能产生副作用 |
+| `created_at` | TIMESTAMPTZ | DB default |
+| `completed_at` | TIMESTAMPTZ | nullable |
+| `redacted_at` | TIMESTAMPTZ | nullable；清除 content-derived hash |
+
+```text
+UNIQUE (turn_id, generation_no, source)
+  WHERE turn_id IS NOT NULL
+UNIQUE (proactive_decision_id)
+  WHERE proactive_decision_id IS NOT NULL
+UNIQUE (copilot_draft_id)
+  WHERE copilot_draft_id IS NOT NULL
+UNIQUE (id, account_id, conversation_id, model_run_id, model_role, source, generation_no)
+CHECK (reconciled_chunk_count BETWEEN 0 AND chunk_count)
+CHECK (chunk_count BETWEEN 1 AND max_delivery_chunks_snapshot)
+CHECK ((source = 'ai' AND model_role = 'main_ai' AND turn_id IS NOT NULL
+        AND proactive_decision_id IS NULL AND copilot_draft_id IS NULL) OR
+       (source = 'proactive_ai' AND model_role = 'main_ai'
+        AND proactive_decision_id IS NOT NULL AND copilot_draft_id IS NULL) OR
+       (source = 'copilot_approved' AND model_role = 'main_ai'
+        AND turn_id IS NOT NULL AND proactive_decision_id IS NULL
+        AND copilot_draft_id IS NOT NULL AND approved_draft_revision_id IS NOT NULL))
+```
+
+`(model_run_id, account_id, conversation_id, model_role)` 使用 composite FK 指向生成最终消息正文的 Main AI run；reactive/COPILOT 还使用包含 turn 的 widest FK。Proactive Agent run由`proactive_decisions`引用，主动消息group通过`proactive_decision_id`关联该decision并单独引用后续Main AI generation run。Proactive decision 与 COPILOT draft/revision 的 composite FK 绑定同一 account/conversation。Group 只有全部 chunks reconciled 才能进入 `reconciled`；已有副作用后被真人接管、edit/delete 或 control gate阻止剩余 chunks 时进入 `partial_cancelled`。
+
+### 7.12 `outbound_intents`
+
+| 字段 | 类型 | 约束与语义 |
+|---|---|---|
+| `id` | UUIDv7 | PK |
+| `account_id` | UUIDv7 | FK accounts |
+| `conversation_id` | UUIDv7 | composite FK conversations |
+| `turn_id` | UUIDv7 | nullable composite FK，与 group 一致 |
+| `model_run_id` | UUIDv7 | NOT NULL composite FK |
+| `model_role` | TEXT | 固定 `main_ai`，与 group 的最终文本 run 一致 |
+| `source` | TEXT | `ai/proactive_ai/copilot_approved` |
+| `delivery_group_id` | UUIDv7 | NOT NULL widest composite FK group |
+| `chunk_ordinal` | INTEGER | 从 1 开始 |
+| `chunk_count_snapshot` | INTEGER | 与 group chunk_count 一致 |
 | `state` | TEXT | Message Lifecycle intent 状态 |
 | `generation_no` | INTEGER | NOT NULL |
 | `account_control_version_snapshot` | BIGINT | NOT NULL |
@@ -829,7 +978,7 @@ UNIQUE (id, account_id, draft_id)
 | `idempotency_key` | BYTEA | 32-byte stable key |
 | `content_text` | TEXT | nullable sensitive retry payload；redaction 时清空 |
 | `content_sha256` | BYTEA | nullable 32-byte hash；redaction 时清空 |
-| `reply_to_telegram_message_id` | BIGINT | nullable |
+| `reply_to_telegram_message_id` | BIGINT | nullable；仅 ordinal 1 可设置 |
 | `telegram_random_id` | BIGINT | NOT NULL，稳定复用 |
 | `telegram_message_id` | BIGINT | nullable |
 | `reconciled_message_id` | UUIDv7 | nullable composite FK messages |
@@ -849,25 +998,16 @@ UNIQUE (account_id, idempotency_key)
 UNIQUE (account_id, telegram_random_id)
 UNIQUE (account_id, conversation_id, telegram_message_id)
   WHERE telegram_message_id IS NOT NULL
-UNIQUE (turn_id, generation_no, source)
-UNIQUE (proactive_decision_id)
-  WHERE proactive_decision_id IS NOT NULL
-UNIQUE (copilot_draft_id)
-  WHERE copilot_draft_id IS NOT NULL
+UNIQUE (delivery_group_id, chunk_ordinal)
 CHECK (octet_length(idempotency_key) = 32)
 CHECK (model_run_id IS NOT NULL)
-CHECK ((source = 'ai' AND model_role = 'main_ai' AND turn_id IS NOT NULL
-        AND proactive_decision_id IS NULL AND copilot_draft_id IS NULL) OR
-       (source = 'proactive_ai' AND model_role = 'proactive_agent'
-        AND proactive_decision_id IS NOT NULL AND copilot_draft_id IS NULL) OR
-       (source = 'copilot_approved' AND model_role = 'main_ai'
-        AND turn_id IS NOT NULL AND proactive_decision_id IS NULL
-        AND copilot_draft_id IS NOT NULL AND approved_draft_revision_id IS NOT NULL))
+CHECK (chunk_ordinal BETWEEN 1 AND chunk_count_snapshot)
+CHECK (chunk_ordinal = 1 OR reply_to_telegram_message_id IS NULL)
 ```
 
-`(model_run_id, account_id, conversation_id, model_role)` 使用 composite FK 指向 model run；AI/COPILOT turn 还以包含 `turn_id` 的最宽 FK 保证 run 确属该 turn，不能把 Memory Agent 的输出或其他会话 run 错绑到发送。proactive intent 的 decision FK、COPILOT intent 的 draft/revision FK 同样包含 account/conversation scope。同一 intent 的所有发送重试复用 `telegram_random_id`。content_text 在 intent reconciled 后仍可短期保留用于审计一致性，但 contact purge/account wipe 必须擦除；默认长期正文事实是 reconciled `messages/message_revisions`。
+Intent 使用 `(delivery_group_id, account_id, conversation_id, model_run_id, model_role, source, generation_no)` widest composite FK 指向 group，数据库保证所有 chunks 属于同一 logical output。`idempotency_key` 覆盖 group ID、ordinal 和 chunk hash。同一 intent 的所有发送重试复用 `telegram_random_id`。Content text 在 intent reconciled 后仍可短期保留用于审计一致性，但 contact purge/account wipe 必须擦除；默认长期正文事实是 reconciled `messages/message_revisions`。
 
-### 7.12 `outbound_attempts`
+### 7.13 `outbound_attempts`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -912,6 +1052,7 @@ UNIQUE (outbound_intent_id, attempt_no)
 
 ```text
 UNIQUE (queue_name, idempotency_key)
+UNIQUE (id, account_id)
 CHECK leased 状态与 lease 字段一致
 ```
 
@@ -1477,7 +1618,7 @@ CHECK ((model_run_id IS NULL AND model_role IS NULL) OR
        (model_run_id IS NOT NULL AND model_role = 'proactive_agent'))
 ```
 
-decision 的 `(model_run_id, account_id, model_role)` 使用 composite FK 指向 model run。最终发送仍通过带唯一 `proactive_decision_id` 的 outbound intent，不允许 Proactive worker 直接产生 Telegram 副作用。只在 outbound 一侧保存关系，避免双向 nullable FK 产生不一致指针。
+decision 的 `(model_run_id, account_id, model_role)` 使用 composite FK 指向 model run。最终发送仍通过带唯一 `proactive_decision_id` 的 outbound delivery group及其 intents，不允许 Proactive worker 直接产生 Telegram 副作用。只在 outbound 一侧保存关系，避免双向 nullable FK 产生不一致指针。
 
 `proactive_decision_evidence` 保存可约束来源：
 
@@ -1696,7 +1837,7 @@ response_schema?
 stream
 ```
 
-它们由 prompt version、context manifest、业务 purpose 和 adapter version 共同确定；`model_runs` 保存这些版本及 canonical input keyed fingerprint。需要保留的业务输出写入 outbound intent、memory proposal 或 proactive decision，model run 不保存完整 raw body。
+它们由 prompt version、context manifest、业务 purpose 和 adapter version 共同确定；`model_runs` 保存这些版本及 canonical input keyed fingerprint。需要保留的业务输出写入 outbound delivery group/intents、memory proposal 或 proactive decision，model run 不保存完整 raw body。
 
 `protocol_options` 使用 `protocol` 作为 discriminator：
 
@@ -1708,6 +1849,115 @@ stream
 | `embedding` | `EmbeddingOptions@N` | dimensions、encoding、batch policy 等受控参数 |
 
 `openai_chat_completions` 只表示 Chat Completions，不支持旧式纯文本 `/completions`。任意请求 JSON、任意 header、完整 URL override 和 secret 都不能进入该 JSONB。切换 protocol 必须重新验证 schema 和 endpoint policy，并创建新 config version。
+
+### 11.8 Prompt、Context 与 retrieval policy version
+
+Model config 与 Context policy 独立版本化，避免修改 budget 时伪装成模型 endpoint 切换：
+
+```text
+context_policies(
+  id UUIDv7 PK,
+  logical_role TEXT,
+  purpose TEXT,
+  active_version_id UUIDv7?,
+  version BIGINT,
+  created_at,
+  updated_at,
+  UNIQUE (logical_role, purpose)
+)
+
+context_policy_versions(
+  id UUIDv7 PK,
+  policy_id UUIDv7,
+  version_no INTEGER,
+  status validated|active|retired,
+  max_input_tokens INTEGER,
+  safety_reserve_basis_points INTEGER,
+  minimum_safety_reserve_tokens INTEGER,
+  current_budget_basis_points INTEGER,
+  recent_budget_basis_points INTEGER,
+  profile_budget_basis_points INTEGER,
+  structured_budget_basis_points INTEGER,
+  semantic_budget_basis_points INTEGER,
+  summary_budget_basis_points INTEGER,
+  structured_limit INTEGER,
+  semantic_limit INTEGER,
+  ann_candidate_limit INTEGER,
+  current_image_limit INTEGER,
+  fallback_auto_image_tokens INTEGER,
+  telegram_max_text_units INTEGER,
+  max_delivery_chunks INTEGER,
+  token_estimator_policy TEXT,
+  created_at,
+  activated_at?,
+  UNIQUE (policy_id, version_no),
+  UNIQUE (id, policy_id),
+  CHECK six budget basis-point columns sum to 10000
+)
+```
+
+V1 Main AI 默认分别为 24,000、500 basis points、1,024、20/30/15/15/10/10%、12、8、64、10、2,048、4,096、8。`FOREIGN KEY (active_version_id, id) REFERENCES context_policy_versions(id, policy_id)`使用deferrable composite FK，并由partial unique在activation transaction中保证每个policy只有一个active version。
+
+检索公式和 prompt 也保留不可变 registry。检索策略使用稳定identity和显式active pointer，不能依赖“版本号最大”推断当前版本：
+
+```text
+retrieval_policies(
+  id UUIDv7 PK,
+  policy_name TEXT UNIQUE,
+  active_version_id UUIDv7?,
+  version BIGINT,
+  created_at,
+  updated_at
+)
+
+retrieval_policy_versions(
+  id UUIDv7 PK,
+  policy_id UUIDv7,
+  version_no INTEGER,
+  status validated|active|retired,
+  structured weight columns,
+  semantic weight columns,
+  half_life_schema_version,
+  half_life_policy JSONB,
+  tie_break_version,
+  source_default_schema_version,
+  source_defaults JSONB,
+  content_sha256,
+  created_at,
+  activated_at?,
+  UNIQUE (policy_id, version_no),
+  UNIQUE (id, policy_id)
+)
+
+prompt_versions(
+  id UUIDv7 PK,
+  account_id?,
+  logical_role,
+  purpose,
+  version,
+  source_kind packaged|admin,
+  content_text,
+  content_sha256,
+  schema_version,
+  status validated|active|retired,
+  created_at,
+  activated_at?,
+  redacted_at?
+)
+```
+
+```text
+UNIQUE (account_id, logical_role, purpose, version)
+  WHERE account_id IS NOT NULL
+UNIQUE (logical_role, purpose, version)
+  WHERE account_id IS NULL
+UNIQUE (account_id, logical_role, purpose)
+  WHERE account_id IS NOT NULL AND status = 'active'
+UNIQUE (logical_role, purpose)
+  WHERE account_id IS NULL AND status = 'active'
+```
+
+`FOREIGN KEY (active_version_id, id) REFERENCES retrieval_policy_versions(id, policy_id)`使用deferrable composite FK；partial unique保证每个policy至多一个`active`version。Weights、limits、tie-break和active binding使用普通列/约束；只有按独立schema验证的per-type half-life/source default放JSONB。Prompt正文可能含个人identity instruction，按敏感配置读取、导出、备份和account wipe policy处理，不写日志。一次run保存实际 prompt bundle/version hash、retrieval policy version ID和context policy version ID；配置切换不改变在途run。
 
 ## 12. Agent state、服务状态与 audit
 
@@ -1780,7 +2030,80 @@ CHECK scope columns match scope_type
 
 同一 scope/reason 至多一个 active generation。block 不保存 provider raw body；clear 后旧 row 保留最小 operational audit。
 
-### 12.3 服务状态
+### 12.3 Context preview
+
+`/context`只查询manifest聚合view。完整`/context_preview`使用三张不保存正文的表：
+
+```text
+context_preview_requests(
+  id UUIDv7 PK,
+  control_command_id UUIDv7 UNIQUE,
+  bot_identity_id UUIDv7,
+  admin_user_id BIGINT,
+  bot_chat_id BIGINT,
+  account_id UUIDv7,
+  conversation_id UUIDv7,
+  context_manifest_id UUIDv7,
+  manifest_sha256 BYTEA,
+  source_revision_vector_sha256 BYTEA,
+  state pending_confirmation|confirmed|delivering|delivered|send_unknown|
+        delete_pending|deleted|delete_partial|expired|cancelled|failed,
+  chunk_count INTEGER?,
+  delivered_chunk_count INTEGER NOT NULL DEFAULT 0,
+  token_expires_at TIMESTAMPTZ,
+  confirmed_at TIMESTAMPTZ?,
+  delivered_at TIMESTAMPTZ?,
+  delete_after TIMESTAMPTZ?,
+  completed_at TIMESTAMPTZ?,
+  last_error_code TEXT?,
+  created_at TIMESTAMPTZ,
+  UNIQUE (id, admin_user_id, bot_chat_id),
+  UNIQUE (id, bot_identity_id, bot_chat_id),
+  CHECK delivered_chunk_count >= 0 AND
+        (chunk_count IS NULL OR delivered_chunk_count <= chunk_count)
+)
+
+context_preview_tokens(
+  id UUIDv7 PK,
+  request_id UUIDv7 UNIQUE,
+  admin_user_id BIGINT,
+  bot_chat_id BIGINT,
+  purpose context_preview_confirm,
+  token_hash BYTEA UNIQUE,
+  expires_at TIMESTAMPTZ,
+  used_at TIMESTAMPTZ?,
+  created_at TIMESTAMPTZ,
+  FOREIGN KEY (request_id, admin_user_id, bot_chat_id)
+    REFERENCES context_preview_requests(id, admin_user_id, bot_chat_id)
+)
+
+context_preview_deliveries(
+  id BIGINT IDENTITY PK,
+  request_id UUIDv7,
+  bot_identity_id UUIDv7,
+  bot_chat_id BIGINT,
+  ordinal INTEGER,
+  state pending|sending|sent|send_unknown|delete_pending|deleted|delete_failed,
+  bot_message_id BIGINT?,
+  sent_at TIMESTAMPTZ?,
+  delete_after TIMESTAMPTZ?,
+  deleted_at TIMESTAMPTZ?,
+  last_error_code TEXT?,
+  UNIQUE (request_id, ordinal),
+  FOREIGN KEY (request_id, bot_identity_id, bot_chat_id)
+    REFERENCES context_preview_requests(id, bot_identity_id, bot_chat_id),
+  UNIQUE (bot_identity_id, bot_chat_id, bot_message_id)
+    WHERE bot_message_id IS NOT NULL
+)
+```
+
+Delivery表冗余`bot_identity_id/bot_chat_id`以建立上述unique和删除路由，并通过包含request scope的composite FK保持一致。Preview token保存hash而非callback明文，并通过request间接绑定exact manifest，同时直接绑定admin、Bot chat和默认5分钟deadline。
+
+确认CAS消费token后，`control`再次验证manifest/source未redacted，在内存中重建并按plain-text chunk发送。每个已知Bot message ID默认10分钟后best-effort删除。Bot send在RPC后断连可能成为`send_unknown`；由于Bot API路径没有本项目可持久化的random ID对账，系统不自动重发unknown chunk，避免扩大敏感内容复制。没有message ID时无法可靠自动删除，必须告警并在Disclosure中保留该残余风险。
+
+Preview正文不进入request/token/delivery、queue、audit或普通log；图片只显示reference/hash/MIME/尺寸/detail metadata，`control`不读取media二进制。
+
+### 12.4 服务状态
 
 `service_instances` 保存当前 heartbeat projection：
 
@@ -1799,7 +2122,7 @@ UNIQUE (service_name, instance_id)
 
 `service_status_events` 使用 BIGINT IDENTITY append-only 记录状态变化，不按每次 heartbeat 写历史，避免无价值增长。
 
-### 12.4 `audit_log`
+### 12.5 `audit_log`
 
 | 字段 | 类型 | 约束与语义 |
 |---|---|---|
@@ -1848,6 +2171,7 @@ updated_at
 | model/outbound attempts | terminal 后有限 retention，保留错误码和 usage，不保留 raw body |
 | COPILOT draft/revision/edit session | active 时可操作；ready 30 分钟过期，terminal 正文有限 retention |
 | control command/action token | command metadata 有界 retention；token/session 强制短期 TTL |
+| context preview request/token/delivery | token 默认 5 分钟；request/delivery 只保留 IDs、hash、状态和删除结果，正文永不落表；已知 Bot 消息默认 10 分钟后尽力删除 |
 | audit | 有界长期 retention，不能复制 sensitive content |
 | credential retired version | 受控轮换后销毁 ciphertext，保留非秘密版本审计 |
 
@@ -1875,9 +2199,12 @@ updated_at
 1. 创建 durable erasure request，contact/conversation 标记 `deleting`，关闭自动发送。
 2. 在同一逻辑边界让 messages、media、memories、summaries、embeddings、proactive candidates 不再可见。
 3. 擦除所有 message revisions、COPILOT draft revisions/edit sessions、outbound payload、memory/summary versions、debug capture 和关系派生正文。
-4. 删除 `media-data` 物理对象并确认结果。
-5. 删除或匿名化可删除的 operational rows；保留最小 tombstone、erasure ledger 和不含正文的法定/安全 audit。
-6. 完成后 conversation/contact 标记 deleted，写 completion audit。
+4. 取消仍待确认/发送的 context preview request，消费或失效未使用 token；对已知 Bot message ID 创建不含正文的立即删除任务并记录结果。
+5. 删除 `media-data` 物理对象并确认结果。
+6. 删除或匿名化可删除的 operational rows；保留最小 tombstone、erasure ledger 和不含正文的法定/安全 audit。
+7. 完成后 conversation/contact 标记 deleted，写 completion audit。
+
+已经发送到 Telegram Bot chat 的 preview 属于外部副本。Contact purge 必须尽力删除已知 message ID，但不能把 Telegram 通知、客户端缓存、转发、截图、平台副本或 `send_unknown` 消息声明为已经擦除。
 
 #### Account wipe
 
@@ -1886,6 +2213,7 @@ updated_at
 - 停止 `app`、worker side effects 和配置激活；
 - 保留部署级 model profile/credential 配置；account wipe 不等于 deployment credential destruction。若要退役整个部署，必须另建显式 credential destruction 操作；
 - 删除 media、embedding、jobs、cache 和 outbox pending payload；
+- 取消全部 context preview request/token，并尽力删除有已知 Bot message ID 的 preview；
 - 在数据库 purge 完成后由 Operations 单独处理 Telethon Session volume 和备份；
 - 保留不会恢复敏感正文的最小 erasure ledger。
 
@@ -2023,9 +2351,38 @@ copilot_drafts(conversation_id)
 copilot_drafts(expires_at)
   WHERE state IN ('ready','editing')
 copilot_draft_revisions(draft_id, revision_no) UNIQUE
+context_manifests(turn_id, logical_role, builder_version, manifest_sha256) UNIQUE
+  WHERE turn_id IS NOT NULL
+context_manifests(background_job_id, logical_role, builder_version, manifest_sha256) UNIQUE
+  WHERE background_job_id IS NOT NULL
+context_manifest_items(manifest_id, ordinal) UNIQUE
+context_manifest_item_reasons(manifest_item_id, reason_ordinal) PRIMARY KEY
+context_manifest_omissions(manifest_id, layer, reason_code)
+context_policies(logical_role, purpose) UNIQUE
+context_policy_versions(policy_id, version_no) UNIQUE
+context_policy_versions(policy_id) UNIQUE WHERE status = 'active'
+retrieval_policies(policy_name) UNIQUE
+retrieval_policy_versions(policy_id, version_no) UNIQUE
+retrieval_policy_versions(policy_id) UNIQUE WHERE status = 'active'
+prompt_versions(account_id, logical_role, purpose, version) UNIQUE
+  WHERE account_id IS NOT NULL
+prompt_versions(logical_role, purpose, version) UNIQUE
+  WHERE account_id IS NULL
+prompt_versions(account_id, logical_role, purpose) UNIQUE
+  WHERE account_id IS NOT NULL AND status = 'active'
+prompt_versions(logical_role, purpose) UNIQUE
+  WHERE account_id IS NULL AND status = 'active'
+outbound_delivery_groups(turn_id, generation_no, source) UNIQUE
+  WHERE turn_id IS NOT NULL
+outbound_delivery_groups(proactive_decision_id) UNIQUE
+  WHERE proactive_decision_id IS NOT NULL
+outbound_delivery_groups(copilot_draft_id) UNIQUE
+  WHERE copilot_draft_id IS NOT NULL
+outbound_delivery_groups(state, created_at)
+  WHERE state IN ('pending','sending','partial')
 outbound_intents(account_id, idempotency_key) UNIQUE
 outbound_intents(account_id, telegram_random_id) UNIQUE
-outbound_intents(copilot_draft_id) UNIQUE WHERE copilot_draft_id IS NOT NULL
+outbound_intents(delivery_group_id, chunk_ordinal) UNIQUE
 outbound_intents(state, next_attempt_at)
   WHERE state IN ('pending','sending','sent_unconfirmed','retry_wait','unknown')
 outbound_intents(conversation_id, telegram_message_id)
@@ -2046,6 +2403,13 @@ orchestrator_blocks(scope_type, account_id, reason_code)
 control_commands(bot_identity_id, telegram_update_id) UNIQUE
 copilot_action_tokens(expires_at) WHERE used_at IS NULL
 copilot_edit_sessions(expires_at) WHERE completed_at IS NULL
+context_preview_requests(state, token_expires_at)
+  WHERE state = 'pending_confirmation'
+context_preview_requests(state, delete_after)
+  WHERE state IN ('delivered','delete_pending','delete_partial')
+context_preview_tokens(expires_at) WHERE used_at IS NULL
+context_preview_deliveries(delete_after)
+  WHERE state IN ('sent','delete_pending','delete_failed')
 ```
 
 ### 15.4 Memory 与 proactive
@@ -2115,15 +2479,18 @@ V1 不分区。`message_events`、`audit_log`、`model_run_attempts`、`outbound
 
 1. 确认 account control version、effective mode、mode_version、content_revision、resume floor、coverage 和 active turn。
 2. seal turn membership/revision snapshot。
-3. 创建 context manifest 和 model run `queued`。
-4. 更新 turn `generating`，写 outbox 后 commit。
-5. 事务外发送 read/typing 和调用 model provider。
+3. 使用固定 prompt/builder/retrieval/token/capability/embedding snapshots 创建 context manifest/items/reasons/omissions。
+4. 提交前重验 selected current revisions、active memory/summary、delete/redact 和 config pointer，创建 model run `queued`。
+5. 更新 turn `generating`，写 outbox 后 commit。
+6. 事务外发送 read/typing 和调用 model provider。
 
 provider 返回后使用 model run state/generation CAS 提交 succeeded/discarded，不能依赖原进程仍持有内存状态。
 
 ### 16.4 Outbound intent 与 Telegram send
 
-在 account control snapshot + conversation row lock/CAS 事务中执行所有发送门禁，按 `ai/proactive_ai/copilot_approved` 的独立授权约束创建唯一 outbound intent 并 commit。事务外调用 Telegram。RPC 返回或 listener update 在新事务按 random ID/message ID 对账。
+在 account control snapshot + conversation row lock/CAS 事务中执行所有发送门禁。完整 normalized output 按 versioned splitter 生成 1..N chunks，并原子创建唯一 outbound delivery group、全部 ordered intents、各自稳定 random ID 和 outbox，然后 commit。不能在发送第一段后再生成后续 intent。
+
+事务外按 chunk ordinal 串行调用 Telegram。首段前执行完整 revision/mode/control gate；首段已有副作用后，新 incoming 进入下一 turn，transient/FloodWait 只恢复未确认 chunk。后续chunk不再要求conversation `content_revision`等于group初始snapshot，因为前序group outgoing和新incoming都是允许的变化；它改为直接重验selected source revisions未edit/delete/redact、没有真人接管且account/mode/maintenance门禁有效。强门禁可以把未发送部分终止为 group `partial_cancelled`，已发送部分不删除或从头重发。
 
 如果 RPC 结果 unknown，不回滚或删除 intent；reconciler 继续使用同一 random ID。
 
@@ -2141,7 +2508,7 @@ source 确认为 human 的事务同时：
 - 递增 conversation mode_version/content_revision；
 - 在功能启用时创建/续期 temporary HUMAN deadline；
 - 写 mode/history 原因并更新 response coverage；
-- cancel active pre-send turn/run/intent/COPILOT draft；
+- cancel active pre-send turn/run/delivery group/intent/COPILOT draft；
 - refresh memory job 和 outbox。
 
 如果 source 仍是 `system_pending`，不能提前作为 human 提交上述不可逆状态；reconciler 必须先解析。
@@ -2153,10 +2520,10 @@ source 确认为 human 的事务同时：
 1. 锁 draft，确认 `ready`、exact revision、admin、token、30 分钟 deadline。
 2. 确认 effective COPILOT、account/mode/content version 和 turn evidence 未变化。
 3. 将 action token 标记 used、draft 标记 approved。
-4. 创建唯一 `source=copilot_approved` outbound intent并写outbox。
+4. 创建唯一 `source=copilot_approved` outbound delivery group、全部 ordered intents并写outbox。
 5. commit 后由 app 执行 Telegram RPC。
 
-任一步失败整体回滚；已 used token、旧 revision 或 invalidated draft 不能再次批准。RPC unknown 后只运行 intent reconciliation。
+任一步失败整体回滚；已 used token、旧 revision 或 invalidated draft 不能再次批准。RPC unknown 后只运行 group/intent reconciliation。
 
 ### 16.8 Memory proposal acceptance
 
@@ -2201,13 +2568,32 @@ shadow space 在事务外按 `(space, typed target, chunk_index)` 幂等构建�
 
 进行中的 model run 继续引用旧 config/credential version。API key 独立轮换不创建 config version；销毁 retired credential ciphertext 前必须确认没有需要恢复/重试的非终态 run。
 
-### 16.12 Job claim
+### 16.12 Context/prompt/retrieval policy activation
+
+Control Bot draft在事务外完成schema、权重和fixture validation。激活时按固定顺序锁 logical role/purpose 的 context policy、retrieval policy binding和prompt binding：
+
+1. 验证六层budget basis points总和、limits、token estimator、retrieval weights/half-life/tie-break和prompt source/trust。
+2. 创建immutable version或确认待激活version仍为`validated`。
+3. 旧active转retired、新version转active，更新deferrable active pointer/version。
+4. 写audit/outbox后commit。
+
+已经创建的manifest/run继续引用旧version；新activation不改写旧manifest、不重建在途run，也不自动触发backlog回复。
+
+### 16.13 Context preview confirmation、投递与删除
+
+`control`在短事务中锁定token和request，并同时验证管理员allowlist、Bot identity/chat、purpose、未使用状态、5分钟deadline、manifest/hash/source revision vector和所有source仍未redacted。验证成功后以CAS消费token并把request改为`confirmed`；任一条件失败整体回滚并fail closed。
+
+确认事务后，`control`只通过受限view/function按精确manifest source refs在内存中重建canonical文本，生成确定性plain-text chunks，并在发送前插入不含正文的delivery metadata。每段Bot RPC完成后短事务记录已知message ID；RPC后断连则标记`send_unknown`且不自动重发。所有已知段发送完成后设置request `delivered`和默认10分钟`delete_after`。
+
+删除worker只领取已到期且具有已知message ID的delivery row，调用Bot delete后记录`deleted`或稳定错误码。删除job、outbox、log和audit都不得携带preview正文；没有message ID的unknown段只能告警并保留残余风险。Contact purge/account wipe可把删除deadline提前，但不能从已redacted source重新构建正文。
+
+### 16.14 Job claim
 
 worker 用短事务 `SELECT ... FOR UPDATE SKIP LOCKED LIMIT n` 领取 job，设置随机 owner 和 expiry 后 commit。执行任务不持有行锁；完成时使用 `(job_id, lease_owner, state, version)` CAS。
 
-### 16.13 Account 与 conversation control
+### 16.15 Account 与 conversation control
 
-account default/global pause/maintenance 只锁 `account_orchestrator_states`，递增 `control_version`、追加 history/outbox，不批量锁 conversations。旧 run/intent 通过 snapshot gate 失效。
+account default/global pause/maintenance 只锁 `account_orchestrator_states`，递增 `control_version`、追加 history/outbox，不批量锁 conversations。旧 run/delivery group/intent 通过 snapshot gate 失效。
 
 conversation override/contact pause/takeover/cancel 锁 conversation，单次动作只递增一次 `mode_version` 并追加 history。resume、takeover expiry和operational block clear同时推进automation resume floor，不创建backlog turn。重复同值command写`no_change`result但不递增版本。
 
@@ -2264,12 +2650,14 @@ app/control/worker schema readiness mismatch fails closed
 |---|---|
 | `migrator` | schema DDL，仅 migrate 任务持有 |
 | `app_runtime` | message/turn/run/intent/media metadata 所需 DML |
-| `control_runtime` | mode、model draft/version、credential ciphertext、audit INSERT |
+| `control_runtime` | mode、model draft/version、credential ciphertext、context preview metadata DML、受限 exact-manifest reconstruction function、audit INSERT |
 | `worker_runtime` | job/memory/summary/embedding/proactive 所需 DML |
 | `backup` | 受限一致性备份权限 |
 | `maintenance` | erasure/retention，强审计，不供常驻服务使用 |
 
 runtime role 不拥有 schema，不可修改 audit 历史，不可读取其他服务不需要的 secret 列。credential ciphertext 可以通过受限 view/function 返回给授权 role，普通配置查询 view 永不返回 ciphertext、nonce 或 fingerprint。
+
+`control_runtime`不能对canonical content表做任意scan；只有Control Bot应用先完成allowlist、exact request/token和manifest绑定校验后，才能调用只接受manifest ID的重建函数。`/context`使用的聚合view只返回计数、预算、reason、freshness和版本。重建函数不返回image二进制，且数据库权限不能替代应用层二次确认与审计。
 
 ## 19. 后续文档边界
 
@@ -2277,9 +2665,9 @@ Conversation Orchestrator 的 account control、mode overlay、reply floor、tem
 
 Memory Pipeline 的 trigger、input manifest、proposal validation、evidence trust、summary source、embedding rebuild、freshness 和人工 review 契约以 `docs/architecture/05-memory-pipeline.md` 为准；后续修改必须同时更新本文的字段、约束与 transaction。
 
-Context Contract 可以扩展 manifest item layer、token/image budget 和 adapter mapping，但不能把未记录来源的正文注入模型。
+Context Contract 的 manifest item layer、token/image budget、adapter mapping、capability snapshot和delivery group增量以 `docs/architecture/06-context-contract.md` 为准；不能把未记录来源的正文注入模型。
 
-Proactive Pipeline 可以扩展 candidate/budget/quiet-hour tables，但发送必须落到 `proactive_decisions -> outbound_intents`。
+Proactive Pipeline 可以扩展 candidate/budget/quiet-hour tables，但发送必须落到 `proactive_decisions -> outbound_delivery_groups -> outbound_intents`。
 
 Operations 负责确定 retention 数值、磁盘/备份加密、media 配额、数据库参数、backup/restore runbook 和 credential key rotation。
 
@@ -2289,7 +2677,7 @@ Test Strategy 负责把本文的约束、race、migration 和 erasure 恢复声�
 
 - [x] account、peer、account peer、contact、conversation 和 message identity 已定义。
 - [x] V1 单账号与未来多账号 composite boundary 已定义。
-- [x] message event/revision、media、reaction、turn、manifest、run、intent、attempt 和 job 表已定义。
+- [x] message event/revision、media、reaction、turn、manifest/reason/omission、run、delivery group、intent、attempt 和 job 表已定义。
 - [x] account control、mode overlay、reply floor、operational block、COPILOT draft/revision/action 和 approval intent 已定义。
 - [x] Memory identity/version/proposal/target/evidence/relation、input manifest 和 contiguous watermark 已定义。
 - [x] Summary version/source membership/watermark 与 embedding shadow-space activation 已定义。
@@ -2297,8 +2685,11 @@ Test Strategy 负责把本文的约束、race、migration 和 erasure 恢复声�
 - [x] life event、intention、relationship state、proactive decision、agent/service state 和 audit 已定义。
 - [x] 四个独立模型 role、endpoint、draft、config version 和独立 credential version 已定义。
 - [x] canonical generation 字段与 protocol-options discriminated JSONB 边界已定义。
+- [x] prompt、Context budget和retrieval policy的immutable version与active binding已定义。
+- [x] Context budget/version snapshot、跨层选择理由、omission和长输出delivery group已定义。
+- [x] metadata-only `/context` 与二次确认 `/context_preview` 的request/token/delivery、TTL、权限、删除和unknown-send边界已定义。
 - [x] 主键、业务唯一键、composite foreign key、CHECK 和必要索引已定义。
 - [x] UTC 时间、状态类型、JSONB、敏感数据和账号隔离约定已定义。
-- [x] ingest、control、turn、send、edit/delete、human outgoing、COPILOT approval、memory、config 和 job 事务边界已定义。
+- [x] ingest、control、turn、send、edit/delete、human outgoing、COPILOT approval、context preview、memory、config 和 job 事务边界已定义。
 - [x] memory forget、contact purge、account wipe、export、backup 和 erasure ledger 已定义。
 - [x] Alembic expand/migrate/contract 与 migration 验证规则已定义。

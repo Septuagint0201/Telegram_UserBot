@@ -24,7 +24,7 @@
 - [x] Memory Agent 不阻塞 Main AI 的实时回复流程。
 - [x] 记忆提取采用事件驱动、安静窗口合并、硬阈值触发和定期补偿扫描。
 - [x] Main AI 使用最近一次已提交的长期记忆，同时直接读取当前会话最新的 canonical message revision。
-- [x] Telegram 消息发送采用 outbound intent、幂等写入和发送结果对账。
+- [x] Telegram 消息发送采用 outbound delivery group、ordered intent、幂等写入和发送结果对账。
 - [x] AI 与真人 outgoing 消息通过系统发送记录和 Telegram message ID 对账区分。
 - [x] 手动模式控制优先，使用会话模式版本门禁阻止过期 AI 结果发送。
 - [x] 基础模式采用 account default + conversation override；pause、maintenance 和 temporary HUMAN 作为覆盖层。
@@ -45,6 +45,10 @@
 - [x] 时间淡化只影响检索，不自动删除记忆；显式 forget、contact purge 和 account wipe 保持不同语义。
 - [x] Embedding 更换模型时使用隔离 shadow space 完整重建并原子切换，不混合不同空间检索。
 - [x] Proactive Agent 只处理规则层筛选后的候选，不负责常规记忆调度。
+- [x] Main AI 默认输入上限为 24,000 token，并根据模型上下文窗口、输出上限和安全预留动态收紧。
+- [x] 模型派生的 identity、personality、relationship、memory 和 summary 都属于数据，只有系统与人工配置 instruction 可以发出指令。
+- [x] 长模型输出确定性拆分为一个 delivery group 下的有序幂等 outbound intent，部分失败只恢复未确认段落。
+- [x] `/context` 默认只显示 manifest 元数据；完整 `/context_preview` 绑定精确 manifest 并要求短期一次性 token 二次确认，Bot 消息随后尽力删除。
 
 ## 文档编写顺序
 
@@ -78,7 +82,7 @@
 - [x] 定义消息持久化、debounce、turn 聚合、生成、发送和确认状态机。
 - [x] 定义 AI 生成期间出现新 incoming message 时的 supersede 或排队策略。
 - [x] 定义 AI 已回复后联系人 edit/delete 原消息时是否触发后续动作。
-- [x] 定义 outbound intent、发送结果记录和启动后对账流程。
+- [x] 定义 outbound delivery group、ordered intent、发送结果记录和启动后对账流程。
 - [x] 定义同一 conversation 的串行化和锁租约规则。
 - [x] 定义模型请求取消与 `mode_version` 发送门禁。
 - [x] 定义超时、重试、死信、补偿和不可恢复失败的处理方式。
@@ -97,6 +101,7 @@
 - [x] 细化 model endpoint、model profile、credential、config version 和服务状态数据。
 - [x] 定义三个生成 ModelProfile 的独立活动版本约束，以及 Embedding 配置的独立模型。
 - [x] 定义 canonical generation 字段和三种 protocol options 的 discriminated schema。
+- [x] 定义 prompt、Context budget、retrieval policy 版本，以及长输出 delivery group/ordered intent 增量。
 - [x] 定义主键、业务唯一键、外键、检查约束和必要索引。
 - [x] 定义时间字段、时区、Telegram 原始数据和 JSONB 扩展字段规则。
 - [x] 定义各业务流程的事务边界和并发更新策略。
@@ -143,21 +148,22 @@
 
 目标文档：`docs/architecture/06-context-contract.md`
 
-- [ ] 定义 identity、personality、relationship、memory、summary、recent messages 和 current message 的装配顺序。
-- [ ] 定义各上下文层的 token 预算、截断规则和总预算。
-- [ ] 定义结构化记忆、向量记忆和最近历史的选择与排序算法。
-- [ ] 定义记忆处理滞后时扩大 canonical message 窗口的降级策略。
-- [ ] 定义上下文快照、来源 ID、token 数和检索理由的记录方式。
-- [ ] 定义用户内容、记忆内容和系统指令之间的信任边界。
-- [ ] 定义 prompt injection、恶意转发内容和不可信历史的隔离方式。
-- [ ] 定义模型 provider adapter、能力声明、超时和结构化输出契约。
-- [ ] 定义 Responses、Chat Completions 和 Messages 的请求映射与响应归一化。
-- [ ] 定义 Chat Completions 的 `max_completion_tokens` / `max_tokens` 兼容策略。
-- [ ] 定义 text、caption、reply、forward、album 和 image content part 的选择、预算与来源记录。
-- [ ] 定义三种生成协议对图片输入和 canonical `detail=auto` 的能力校验、wire 映射及等价默认值。
-- [ ] 定义模型配置草稿、验证、激活、版本切换和运行中请求的快照语义。
-- [ ] 定义 `temperature`、`max_output_tokens` 和 Provider 特有参数的能力映射。
-- [ ] 定义 prompt、模型和检索算法的版本管理方式。
+- [x] 定义 identity、personality、relationship、memory、summary、recent messages 和 current message 的装配顺序。
+- [x] 定义各上下文层的 token 预算、截断规则和总预算。
+- [x] 定义结构化记忆、向量记忆和最近历史的选择与排序算法。
+- [x] 定义记忆处理滞后时扩大 canonical message 窗口的降级策略。
+- [x] 定义上下文快照、来源 ID、token 数和检索理由的记录方式。
+- [x] 定义用户内容、记忆内容和系统指令之间的信任边界。
+- [x] 定义 prompt injection、恶意转发内容和不可信历史的隔离方式。
+- [x] 定义模型 provider adapter、能力声明、超时和结构化输出契约。
+- [x] 定义 Responses、Chat Completions 和 Messages 的请求映射与响应归一化。
+- [x] 定义 Chat Completions 的 `max_completion_tokens` / `max_tokens` 兼容策略。
+- [x] 定义 text、caption、reply、forward、album 和 image content part 的选择、预算与来源记录。
+- [x] 定义三种生成协议对图片输入和 canonical `detail=auto` 的能力校验、wire 映射及等价默认值。
+- [x] 定义模型配置草稿、验证、激活、版本切换和运行中请求的快照语义。
+- [x] 定义 `temperature`、`max_output_tokens` 和 Provider 特有参数的能力映射。
+- [x] 定义 prompt、模型和检索算法的版本管理方式。
+- [x] 定义 metadata-only `/context`、二次确认 `/context_preview`、一次性 token、正文不落库和 Bot 消息尽力删除边界。
 
 完成标准：同一上下文输入和版本可以重建，且所有进入模型的非系统内容都保留明确来源和信任级别。
 
@@ -230,6 +236,11 @@
 - [ ] 测试 rolling/daily/weekly summary source membership、迟到事件、时区快照、edit/delete 隔离与递归重建。
 - [ ] 测试 Memory candidate 接受/拒绝、一次性 action token、旧 version/evidence 失效和 `/forget` 二次确认。
 - [ ] 测试 Memory `fresh/degraded/stale` 积压降级，确保 Main AI 不等待且不读取 candidate/quarantined summary。
+- [ ] 测试 Context Builder 总预算、软配额借用、current turn 超限、manifest hash 重建和 source/trust 完整性。
+- [ ] 测试 structured/vector/recent 排序、ANN 精确重排、跨层去重、稳定 tie-break 和 memory lag canonical 扩展。
+- [ ] 测试 prompt injection、恶意 forward/reply label、历史 AI 指令和图片文字始终保持数据权限。
+- [ ] 测试长文本 deterministic splitter、grapheme 边界、delivery group 原子创建、逐段 random ID 对账和部分失败恢复。
+- [ ] 测试 `/context` 无正文、preview token 过期/重放/越权/source redaction、Bot send unknown、定时删除失败和所有日志/队列不含 preview 正文。
 - [ ] 测试 Proactive Pipeline 的时区、预算、幂等和最终安全闸门。
 - [ ] 测试 migration、备份恢复和 Docker Compose 集成运行。
 - [ ] 建立关键行为验收矩阵和回归测试数据集。

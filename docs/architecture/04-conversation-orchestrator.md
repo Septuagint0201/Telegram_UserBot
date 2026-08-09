@@ -35,7 +35,7 @@ Orchestrator 是决定“现在允许系统做什么”的唯一业务层，不�
 - 解析 account、contact、conversation 的基础模式和覆盖门禁；
 - 根据 incoming、真人 outgoing、Control Bot command、timer 和 dependency state 决定状态转换；
 - 创建、seal、supersede 或取消 conversation turn；
-- 为 model run、COPILOT draft、proactive decision 和 outbound intent 生成不可变控制快照；
+- 为 model run、COPILOT draft、proactive decision、outbound delivery group 和 intents 生成不可变控制快照；
 - 在每个副作用边界重新执行发送门禁；
 - 维护“不自动补回复”的 eligibility floor 和已回复 coverage；
 - 产生结构化 audit、reason code 和 outbox 通知。
@@ -171,10 +171,10 @@ conversation row
 contact automation policy
 active temporary takeover
 applicable operational blocks
-current turn/run/intent state
+current turn/run/delivery group/intent state
 ```
 
-创建 model run 或 intent 时必须在 transaction/row lock 内读取，不能把几次无锁查询拼成一个门禁结果。Redis cache 只能缩短正常路径；cache miss、过期或矛盾时以 PostgreSQL 为准。
+创建 model run 或 delivery group/intents 时必须在 transaction/row lock 内读取，不能把几次无锁查询拼成一个门禁结果。Redis cache 只能缩短正常路径；cache miss、过期或矛盾时以 PostgreSQL 为准。
 
 ## 6. 持久化控制状态
 
@@ -293,9 +293,9 @@ pending messages were not auto-replied
 进入 pause：
 
 1. 在控制 row lock 下更新 overlay/version/history。
-2. 使所有尚未进入不可判定 Telegram RPC 的相关 run/intent 失效。
+2. 使所有尚未进入不可判定 Telegram RPC 的相关 run/delivery group/intents 失效。
 3. 发布 invalidation outbox。
-4. 已经 `sending/unknown` 的 intent 进入 reconciliation，不声明取消成功。
+4. 已经 `sending/unknown` 的 intent 及其 group 进入 reconciliation，不声明取消成功。
 
 退出 pause 默认设置相关 conversation 的 automation resume floor 为当时最新 event watermark；因此 pause 期间 incoming 不会突然触发旧消息回复。global resume 不做无界全表同步更新；floor 在 conversation 下次被访问时以 account resume watermark 惰性物化，resolver 必须能比较 account floor 和 conversation floor。
 
@@ -374,8 +374,8 @@ floor 在以下时机推进到当前 committed event watermark：
 
 coverage 在以下时机推进：
 
-- AUTO outbound intent 成功 reconciled；
-- `copilot_approved` outbound intent 成功 reconciled；
+- AUTO outbound delivery group 全部 intents 成功 reconciled；
+- `copilot_approved` outbound delivery group 全部 intents 成功 reconciled；
 - confirmed human outgoing 被明确关联为对当前 pending segment 的回应；
 - 管理员显式执行“忽略 pending”操作；V1 不提供默认命令，可由未来 UX 增加。
 
@@ -432,7 +432,7 @@ no active conflicting COPILOT draft/send
 
 ### 10.3 Output 与发送
 
-模型输出提交为 `output_ready` 后，创建 outbound intent 前再次运行完整 resolver 和版本检查。intent 至少快照：
+模型输出提交为 `output_ready` 后，创建 outbound delivery group 和全部 ordered intents 前再次运行完整 resolver 和版本检查。Group/intent 至少快照：
 
 ```text
 account_control_version
@@ -443,7 +443,7 @@ model config/credential version
 response coverage end event
 ```
 
-intent commit 后、Telegram RPC 前执行轻量门禁；mode、control、human outgoing、edit/delete、lease loss 或 policy change 均无宽限并取消未发送 intent。
+Group/intents 原子 commit 后、首个 Telegram RPC 前执行完整轻量门禁；mode、control、human outgoing、edit/delete、lease loss 或 policy change 均无宽限并取消未发送 group。已有部分 chunk 副作用后按 Message Lifecycle 只终止剩余 intents 并记录 `partial_cancelled`。
 
 ### 10.4 Incoming during generation
 
@@ -478,7 +478,7 @@ Control Bot `/status` 可以显示 unanswered count 和最近时间，但不得�
 
 1. 锁 conversation 并读取 active work。
 2. `mode_version + 1`、`content_revision + 1`。
-3. 使 pre-send turn/run/intent 和 COPILOT draft 失效。
+3. 使 pre-send turn/run/delivery group/intents 和 COPILOT draft 失效。
 4. 若 temporary takeover 启用，将 `temporary_human_until = now + configured seconds`；否则不改变 base mode。
 5. 更新 response coverage；无法可靠判断 coverage 时保守记录 human event，但不越过未知范围。
 6. 写 history/audit/outbox 并 commit。
@@ -489,8 +489,8 @@ Control Bot `/status` 可以显示 unanswered count 和最近时间，但不得�
 
 真人 outgoing 与 AI result 同时到达时，只有一个 transaction 能先锁定 conversation：
 
-- human transaction 先提交：AI 的 mode/content snapshot 失效，不得创建 intent；
-- intent 已安全 commit、但 RPC 尚未开始：human transaction 将 intent cancelled；
+- human transaction 先提交：AI 的 mode/content snapshot 失效，不得创建 delivery group/intents；
+- group/intents 已安全 commit、但 RPC 尚未开始：human transaction 将整组 cancelled；
 - Telegram RPC 已开始或结果 unknown：不假定取消成功，等待 random ID/message ID reconciliation；
 - AI 已 confirmed sent 后才出现 human outgoing：两条消息都保留，后续 Memory 可观察该事实，不删除已发送 AI 消息。
 
@@ -630,13 +630,13 @@ mode_version matches
 content_revision matches
 turn/messages still valid
 admin approval valid and unused
-no existing outbound intent for draft
+no existing outbound delivery group for draft
 ```
 
 通过后同一事务：
 
 - 将 draft 标记 `approved`；
-- 创建唯一 outbound intent；
+- 创建唯一 outbound delivery group 和全部 ordered intents；
 - 设置 `source=copilot_approved`、`model_role=main_ai`；
 - 保存 `copilot_draft_id`、approved revision 和 approval actor reference；
 - 写 audit/outbox。
@@ -674,21 +674,21 @@ Telegram random_id/message_id
 
 ### 14.3 Send/reconciliation
 
-intent commit 后复用 Message Lifecycle 的 RPC 前门禁、stable `telegram_random_id`、unknown-send reconciliation 和 FloodWait 规则。approval 不能绕过 global/contact pause、maintenance、erasure 或 version change。
+Group/intents commit 后复用 Message Lifecycle 的 RPC 前门禁、每段 stable `telegram_random_id`、unknown-send reconciliation 和 FloodWait 规则。Approval 不能绕过 global/contact pause、maintenance、erasure 或 version change。
 
-发送成功后 draft `sent`、intent reconciled、coverage 推进。RPC unknown 时 draft 保持 `send_queued` 或 `send_unknown` 投影，按钮全部禁用；在 reconciliation 完成前禁止创建第二个 intent或再次批准。
+全部 chunks 发送成功后 draft `sent`、group reconciled、coverage 推进。RPC unknown 或 partial 时 draft 保持 `send_queued` 或 `send_unknown` 投影，按钮全部禁用；在 reconciliation 完成前禁止创建第二个 group 或再次批准。
 
 ## 15. Proactive 与模式
 
 ### 15.1 AUTO
 
-AUTO 中 Proactive candidate 依次通过候选规则、预算、quiet hours、contact policy、conversation activity 和最终 Orchestrator gate。Proactive Agent 决定是否/主题，Main AI 生成文本，最后创建 `source=proactive_ai` intent。
+AUTO 中 Proactive candidate 依次通过候选规则、预算、quiet hours、contact policy、conversation activity 和最终 Orchestrator gate。Proactive Agent 决定是否/主题，Main AI 生成文本，最后创建 `source=proactive_ai` delivery group 及其 intents。
 
-run/decision/intent 同时快照 account control、mode、content、budget 和 policy version。任一变化都没有 3 秒宽限。
+run/decision/group/intents 同时快照 account control、mode、content、budget 和 policy version。任一变化都没有 3 秒宽限。
 
 ### 15.2 COPILOT
 
-6B 的 manual-only 规则只针对 incoming 的响应式草稿。已由 Proactive Pipeline 规则层筛出的主动候选在 effective COPILOT 下可以自动运行 Proactive Agent 和 Main AI，但最终产物进入 COPILOT draft `ready`，绝不创建 outbound intent，等待管理员 Send/Edit/Ignore。
+6B 的 manual-only 规则只针对 incoming 的响应式草稿。已由 Proactive Pipeline 规则层筛出的主动候选在 effective COPILOT 下可以自动运行 Proactive Agent 和 Main AI，但最终产物进入 COPILOT draft `ready`，绝不创建 outbound delivery group/intent，等待管理员 Send/Edit/Ignore。
 
 proactive draft：
 
@@ -712,7 +712,7 @@ pause 的目标是立即关闭新的模型聊天副作用，同时保留可恢�
 
 - 新 AUTO/COPILOT/proactive model run；
 - 新 read acknowledgement 和 typing；
-- 新 outbound intent；
+- 新 outbound delivery group/intent；
 - 尚未开始的 Telegram RPC。
 
 它不阻止：
@@ -761,12 +761,12 @@ BLOCKED reason 必须是稳定 code，不把 provider body、endpoint secret 或
 
 | Version | 所有者 | 何时变化 | 主要消费者 |
 |---|---|---|---|
-| `account_control_version` | account orchestrator row | account default、global pause、maintenance、global block/policy | 所有 conversation run/intent/draft/decision |
+| `account_control_version` | account orchestrator row | account default、global pause、maintenance、global block/policy | 所有 conversation run/group/intent/draft/decision |
 | `mode_version` | conversation row | override、contact pause、takeover、human outgoing、cancel | 当前 conversation work |
 | `content_revision` | conversation row | message create/edit/delete、confirmed outgoing | turn/context/run/draft |
-| `turn generation_no` | active turn | replacement/regeneration | model run/intent |
-| `draft revision_no` | COPILOT draft | model output或管理员 edit | approval/intent |
-| `proactive budget_version` | Proactive policy | quota/window mutation | proactive decision/intent |
+| `turn generation_no` | active turn | replacement/regeneration | model run/group/intent |
+| `draft revision_no` | COPILOT draft | model output或管理员 edit | approval/group/intent |
+| `proactive budget_version` | Proactive policy | quota/window mutation | proactive decision/group/intent |
 
 所有 version 都是单调整数，不使用 wall-clock 作为 CAS。时间只用于 deadline；相同时间戳不能表示相同状态。
 
@@ -783,8 +783,10 @@ copilot_draft
   -> turn snapshots + draft revision + expires_at
 proactive_decision
   -> control/mode/content/policy/budget snapshots
+outbound_delivery_group
+  -> all final applicable snapshots + source authorization + splitter/chunk count
 outbound_intent
-  -> all final applicable snapshots + source authorization
+  -> group snapshots + chunk ordinal + stable random ID
 ```
 
 只在日志中打印版本而不落库，不能满足崩溃恢复或 stale-result prevention。
@@ -798,14 +800,15 @@ account orchestrator row
   -> contact policy row (only when changing it)
   -> conversation row
   -> active turn/draft/decision
-  -> outbound intent
+  -> outbound delivery group
+  -> outbound intents by ordinal
 ```
 
-普通 conversation transaction 已知 account snapshot 时不长期持有 account row lock；它读取版本，并在写 conversation/intent 前用条件查询确认版本仍匹配。global control transaction只更新 account row，不遍历锁定 conversations。
+普通 conversation transaction 已知 account snapshot 时不长期持有 account row lock；它读取版本，并在写 conversation/group/intents 前用条件查询确认版本仍匹配。global control transaction只更新 account row，不遍历锁定 conversations。
 
 ### 17.4 Final gate
 
-创建 intent 和 RPC 前检查的共同核心：
+创建 group/intents 和首个 RPC 前检查的共同核心：
 
 ```text
 account active and control_version matches
@@ -817,16 +820,18 @@ conversation mode_version matches
 content_revision matches or exact incoming grace authorization
 turn/draft/decision active and version matches
 no confirmed human outgoing invalidation
-no duplicate idempotency key/random_id
+no duplicate delivery group/idempotency key/random_id
 lease/CAS ownership valid
 ```
+
+首段已产生Telegram副作用后，后续chunk使用阶段化门禁：仍检查account/mode/maintenance、group/ordinal、lease、真人接管，以及selected source revision未edit/delete/redact；不再要求通用`content_revision`等于初始snapshot。前序同group outgoing和新incoming造成的revision变化被允许，新incoming进入下一turn，不授权其他source变化。
 
 source-specific rules：
 
 - `ai`：effective AUTO，active AUTO turn；
 - `proactive_ai`：effective AUTO，active approved proactive decision；
 - `copilot_approved`：effective COPILOT，active approval + exact draft revision；
-- `human`：来自 Telegram outgoing source reconciliation，不由 Orchestrator创建 intent。
+- `human`：来自 Telegram outgoing source reconciliation，不由 Orchestrator创建 group/intent。
 
 ## 18. 状态转换与不变量
 
@@ -881,7 +886,7 @@ Control Bot 先持久化 command，再回复成功。若 commit 后 Bot acknowle
 
 - collecting/ready turn：lease expiry 后按 durable deadline 重新领取；
 - running model call：attempt 状态和 lease 判定是否重试，旧 provider result 必须通过 version CAS；
-- output_ready：重新运行 final gate，再创建或找到既有 intent；
+- output_ready：重新运行 final gate，再创建或找到既有 delivery group/intents；
 - cancelled/superseded：late result 保存最小 usage/error 后 discarded；
 - typing：依赖 Telegram TTL 自然消失，不重放；
 - read acknowledgement：按 high-watermark有限对账，不因失败重复生成。
@@ -891,8 +896,8 @@ Control Bot 先持久化 command，再回复成功。若 commit 后 Bot acknowle
 - generating draft：恢复逻辑与 model run 一致；
 - ready 但 Bot card 未成功投递：durable notification job 重试，使用同一 draft/card generation；
 - edit session 丢失：session 过期，draft 回到 ready 或保持原 revision；不采纳半提交文本；
-- approved 但 intent 未创建：app 依据 durable approval command CAS 创建一次；
-- intent 已创建：任何重试只读取既有 intent；
+- approved 但 group/intents 未创建：app 依据 durable approval command CAS 原子创建一次；
+- group/intents 已创建：任何重试只读取既有 group并从未确认ordinal继续；
 - send unknown：禁用 card，先 reconciliation。
 
 ### 19.4 Timer/scan recovery
@@ -965,11 +970,11 @@ copilot_edit_sessions
 
 draft 和 revisions 是敏感内容表，受 contact purge、account wipe 和 retention控制。action token只保存 hash、purpose、admin、draft/revision、expires/used_at。
 
-`outbound_intents` 增加 nullable `copilot_draft_id` 和 `approved_draft_revision_id`，并以 partial unique保证一个 draft 最多一个 intent；source CHECK 扩展 `copilot_approved`，绑定 `model_role=main_ai`。
+`outbound_delivery_groups` 保存 nullable `copilot_draft_id` 和 `approved_draft_revision_id`，并以 partial unique 保证一个 draft 最多一个 logical output；source CHECK 扩展 `copilot_approved`，绑定 `model_role=main_ai`。Group 下 1..N intents 只保存 chunk payload、ordinal和独立 random ID。
 
 ### 20.6 Snapshot 字段
 
-turn、model run、proactive decision、COPILOT draft 和 outbound intent 增加 `account_control_version_snapshot`。不能只通过 conversation 反查当前 account version，因为历史 run 必须保留启动时事实。
+turn、model run、proactive decision、COPILOT draft、outbound delivery group 和 intents 增加 `account_control_version_snapshot`。不能只通过 conversation 反查当前 account version，因为历史 run 必须保留启动时事实。
 
 所有新增 composite FK 继续包含 account/conversation scope；具体 DDL 名称、索引和 migration 规则以更新后的 Data Model 文档为准。
 
@@ -1058,7 +1063,7 @@ automation resume floor
 
 ### 22.3 真人竞态
 
-- human outgoing早于intent commit时AI不得发送。
+- human outgoing早于group/intents commit时AI不得发送。
 - human outgoing晚于RPC start时进入reconciliation而非宣称取消。
 - `system_pending`最终为AI时不触发temporary HUMAN。
 - temporary takeover续期、expiry和停机补偿使用CAS且不补backlog。
@@ -1069,7 +1074,7 @@ automation resume floor
 - 新incoming/edit/delete/mode change使active draft失效且不自动重生成。
 - card token被其他用户、过期、重放或对应旧revision时拒绝。
 - Edit创建新immutable revision；Send只批准精确revision。
-- approved intent/Telegram send在重试和崩溃后至多一次。
+- approved delivery group各chunk的Telegram send在重试和崩溃后按random ID至多一次。
 - canonical source为`copilot_approved`，style learning区分未编辑/已编辑/纯human。
 - COPILOT proactive candidate只形成draft，HUMAN/PAUSED不运行。
 
@@ -1077,7 +1082,7 @@ automation resume floor
 
 - provider/config/credential block不改base mode，clear后不补旧消息。
 - draft card投递失败可重试但不重复生成draft。
-- DB restore后旧approval、过期takeover和unknown intent在自动发送前完成reconcile。
+- DB restore后旧approval、过期takeover和unknown/partial group-intent在自动发送前完成reconcile。
 - global control、conversation change与model result竞态只有一个合法CAS结果。
 
 ## 23. 后续文档边界
