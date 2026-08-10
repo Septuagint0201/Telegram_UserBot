@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit的acceptance manifest并正式关闭。M1代码候选已完成Windows静态/unit门禁，真实PostgreSQL/Redis integration等待签名候选的GitLab Linux证据；M2—M9尚未开始，Telegram/provider、部署和live证据仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0与M1已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭。M2—M9尚未开始，Telegram/provider、部署、production load和live证据仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -66,7 +66,7 @@ deploy/
 | Milestone | 目标 | 允许的外部副作用 | 状态 |
 |---|---|---|---|
 | M0 | 工程脚手架与测试基础 | 无 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | CANDIDATE — CI PENDING |
+| M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M2 | 模型配置、adapter与key-only控制面 | 仅local fake | NOT STARTED |
 | M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | NOT STARTED |
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | NOT STARTED |
@@ -150,6 +150,15 @@ deploy/
 - Redis清空后pending work从PostgreSQL重建，无重复domain completion。
 - Migration、constraint和role acceptance全部PASS。
 - 尚无Telegram、provider或credential写入能力。
+
+### 6.5 完成证据
+
+- Windows/CPython 3.14.7 上86个unit/property/contract测试为`PASS`，10个需要Docker的integration/recovery测试为`NOT RUN`；Ruff、strict mypy、import boundary、coverage、build、Disclosure与secret/artifact扫描均为`PASS`。
+- 签名提交`9c2dbf61c8b67e75182f47abbb419ae82773678a`对应的GitLab Linux pipeline [#9](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747812423)为`PASS`；`m0-preflight`和`m1-postgres-redis`分别在CPython 3.14.7运行成功。
+- Linux作业收集的96个测试全部`PASS`，覆盖digest-pinned PostgreSQL 17.10/pgvector 0.8.6、Redis 8.2.8、migration、角色、约束、CAS/lease/fencing、outbox恢复、one-way redaction和synthetic EXPLAIN。
+- M1 acceptance manifest绑定commit `9c2dbf61c8b67e75182f47abbb419ae82773678a`与tree `ef98f76a5bf223d41d86f86f9b7be5b3514f8227`，M1-001—M1-012全部为`PASS`。
+- Migration manifest记录revision `0001_m1_durable_state`、23张表、零匿名约束、empty→head、head→base→head和中断恢复为`PASS`；首个baseline的previous supported→head为`NOT_APPLICABLE_BASELINE`。
+- Windows真实PostgreSQL/Redis、Ubuntu production、backup/restore和production load仍为`NOT RUN`，没有用Linux disposable integration或1000行synthetic EXPLAIN替代这些证据。
 
 ## 7. M2 — Model配置、protocol adapter与key-only控制面
 
@@ -431,4 +440,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0已经关闭。M1-001—M1-011的代码、migration、角色、测试与CI候选已经落地，本地Windows static/unit门禁通过，但真实PostgreSQL/Redis证据仍为`NOT RUN`。下一步提交签名M1候选并运行GitLab digest-pinned integration；只有migration manifest、M1 acceptance manifest与全部job为`PASS`后才更新`M1-012`、关闭M1并进入M2。Telegram/provider、应用容器和部署仍不存在。
+M0与M1已经关闭，下一步进入M2。M2从model profile/version schema和canonical configuration contract开始，随后实现三种generation协议adapter、embedding、credential envelope、Control Bot非secret配置与key-only Web App；真实provider smoke继续保持`NOT RUN`。Telegram adapter、应用容器、自动发送和生产部署仍不存在。

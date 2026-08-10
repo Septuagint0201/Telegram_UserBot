@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与 M0 已经完成。M1 durable-state 候选已实现 PostgreSQL/pgvector、Redis/arq、Alembic、repository/UoW、CAS/lease/outbox 和 one-way redaction；Windows static/unit 门禁通过，真实服务 integration 等待签名候选的 GitLab Linux 证据。Telegram/provider、应用容器、生产部署、backup/restore、production performance 和 live smoke 仍为 `NOT RUN`。
+架构设计、M0 与 M1 已经完成。M1 durable-state 已实现 PostgreSQL/pgvector、Redis/arq、Alembic、repository/UoW、CAS/lease/outbox 和 one-way redaction；Windows static/unit 门禁与 GitLab Linux 真实 PostgreSQL/Redis integration 均为 `PASS`。Telegram/provider、应用容器、生产部署、backup/restore、production performance 和 live smoke 仍为 `NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -40,8 +40,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | Milestone | 范围 | 状态 | Runtime evidence |
 |---|---|---|---|
 | M0 | 工程脚手架与测试基础 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
-| M1 | PostgreSQL、Redis与 durable state | CANDIDATE — CI PENDING | WINDOWS STATIC/UNIT PASS; SERVICE INTEGRATION NOT RUN |
-| M2 | 模型配置、adapter与 key-only 控制面 | WAITING | NOT RUN |
+| M1 | PostgreSQL、Redis与 durable state | COMPLETE | WINDOWS STATIC/UNIT PASS; GITLAB SERVICE INTEGRATION PASS |
+| M2 | 模型配置、adapter与 key-only 控制面 | READY — NOT STARTED | NOT RUN |
 | M3 | Telegram ingest 与 outbound intent | WAITING | NOT RUN |
 | M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
 | M5 | Media 与 Context Contract | WAITING | NOT RUN |
@@ -88,24 +88,30 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 目标：建立 schema、事务、锁、lease、job/outbox 和可恢复的持久化基础。
 
-- [ ] **M1-001 固定兼容矩阵**（依赖：M0-012）— 固定 PostgreSQL、pgvector、Redis 与 testcontainer image digest；记录 Ubuntu/Windows 测试边界和升级窗口。
-- [ ] **M1-002 建立 Alembic baseline**（依赖：M1-001）— 创建 extension、schema、migration naming 与 checksum policy；验证 empty database 升级到 head 和 downgrade 边界。
-- [ ] **M1-003 建立 account/peer/conversation schema**（依赖：M1-002）— 落地 owner、Telegram peer、mode、overlay、`mode_version`、时区和状态约束；测试唯一键、CAS 与非法转换。
-- [ ] **M1-004 建立 message/revision/media schema 基础**（依赖：M1-003）— 落地业务键、event、revision、tombstone、album、media metadata 与内容分类；测试重复、乱序、编辑和删除。
-- [ ] **M1-005 建立 run/control/job/outbox/audit/erasure 基础表**（依赖：M1-003）— 定义 lease、attempt、intent、reservation、audit 和删除账本；约束状态、幂等键和保留边界。
-- [ ] **M1-006 实现 SQLAlchemy mapping、UoW 与 repository**（依赖：M1-003—M1-005）— 事务内聚合读取/写入并禁止隐式跨事务对象；运行 repository contract test。
-- [ ] **M1-007 实现 advisory lock、lease 与 CAS**（依赖：M1-006）— 支持 conversation/account/job ownership、到期接管和 fencing token；测试双 worker、时钟推进和失主恢复。
-- [ ] **M1-008 实现 Redis/arq dispatch 与 durable outbox recovery**（依赖：M1-005—M1-007）— Redis 只作加速/唤醒，PostgreSQL 保持事实来源；测试丢通知、重复投递和 Redis 重启。
-- [ ] **M1-009 实现删除与脱敏原语**（依赖：M1-004—M1-006）— 提供 tombstone、one-way redaction、erasure marker 和递归派生数据排队；验证正文不可从常规读路径恢复。
-- [ ] **M1-010 收紧 DB role、index 与 query budget**（依赖：M1-006）— 分离 migration/runtime/backup 权限，定义关键索引与 EXPLAIN baseline；记录数据规模和 `NOT RUN` 的生产证据。
-- [ ] **M1-011 验证 migration 与中断恢复**（依赖：M1-002—M1-010）— 覆盖 empty→head、previous→head、transaction interruption、worker crash 和兼容窗口；保存 migration manifest。
-- [ ] **M1-012 关闭 M1**（依赖：M1-001—M1-011）— 汇总 schema、migration、EXPLAIN、并发与恢复证据；未验证的生产负载不得标 `PASS`。
+- [x] **M1-001 固定兼容矩阵**（依赖：M0-012）— 固定 PostgreSQL、pgvector、Redis 与 testcontainer image digest；记录 Ubuntu/Windows 测试边界和升级窗口。
+- [x] **M1-002 建立 Alembic baseline**（依赖：M1-001）— 创建 extension、schema、migration naming 与 checksum policy；验证 empty database 升级到 head 和 downgrade 边界。
+- [x] **M1-003 建立 account/peer/conversation schema**（依赖：M1-002）— 落地 owner、Telegram peer、mode、overlay、`mode_version`、时区和状态约束；测试唯一键、CAS 与非法转换。
+- [x] **M1-004 建立 message/revision/media schema 基础**（依赖：M1-003）— 落地业务键、event、revision、tombstone、album、media metadata 与内容分类；测试重复、乱序、编辑和删除。
+- [x] **M1-005 建立 run/control/job/outbox/audit/erasure 基础表**（依赖：M1-003）— 定义 lease、attempt、intent、reservation、audit 和删除账本；约束状态、幂等键和保留边界。
+- [x] **M1-006 实现 SQLAlchemy mapping、UoW 与 repository**（依赖：M1-003—M1-005）— 事务内聚合读取/写入并禁止隐式跨事务对象；运行 repository contract test。
+- [x] **M1-007 实现 advisory lock、lease 与 CAS**（依赖：M1-006）— 支持 conversation/account/job ownership、到期接管和 fencing token；测试双 worker、时钟推进和失主恢复。
+- [x] **M1-008 实现 Redis/arq dispatch 与 durable outbox recovery**（依赖：M1-005—M1-007）— Redis 只作加速/唤醒，PostgreSQL 保持事实来源；测试丢通知、重复投递和 Redis 重启。
+- [x] **M1-009 实现删除与脱敏原语**（依赖：M1-004—M1-006）— 提供 tombstone、one-way redaction、erasure marker 和递归派生数据排队；验证正文不可从常规读路径恢复。
+- [x] **M1-010 收紧 DB role、index 与 query budget**（依赖：M1-006）— 分离 migration/runtime/backup 权限，定义关键索引与 EXPLAIN baseline；记录数据规模和 `NOT RUN` 的生产证据。
+- [x] **M1-011 验证 migration 与中断恢复**（依赖：M1-002—M1-010）— 覆盖 empty→head、previous→head、transaction interruption、worker crash 和兼容窗口；保存 migration manifest。
+- [x] **M1-012 关闭 M1**（依赖：M1-001—M1-011）— 汇总 schema、migration、EXPLAIN、并发与恢复证据；未验证的生产负载不得标 `PASS`。
 
 ### M1 退出门禁
 
-- [ ] PostgreSQL 是 durable truth；Redis 清空后可从数据库恢复未完成工作。
-- [ ] duplicate delivery、lease expiry 和 crash recovery 不产生重复事实或丢失 intent。
-- [ ] fresh/upgrade migration test、关键约束和 synthetic EXPLAIN 为 `PASS`。
+- [x] PostgreSQL 是 durable truth；Redis 清空后可从数据库恢复未完成工作。
+- [x] duplicate delivery、lease expiry 和 crash recovery 不产生重复事实或丢失 intent。
+- [x] fresh/upgrade migration test、关键约束和 synthetic EXPLAIN 为 `PASS`。
+
+### M1 完成证据
+
+- 签名提交 `9c2dbf61c8b67e75182f47abbb419ae82773678a` 的 GitLab Linux pipeline [#9](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747812423)与 `m0-preflight`、`m1-postgres-redis` 作业均为 `PASS`。
+- GitLab 在 digest-pinned PostgreSQL 17.10/pgvector 0.8.6 和 Redis 8.2.8 上执行的96个测试全部通过；M1 acceptance manifest 绑定相同 commit/tree，并将 M1-001—M1-012 全部记录为 `PASS`。
+- Migration manifest 记录 23 张表、零匿名约束、empty→head、head→base→head 和中断恢复为 `PASS`；首个 baseline 的 previous→head 为 `NOT_APPLICABLE_BASELINE`，production load 保持 `NOT RUN`。
 
 ## 7. M2 — 模型配置、Adapter与 Key-only 控制面
 
@@ -320,4 +326,4 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 17. 下一步
 
-M0已经关闭，M1候选代码已经落地。下一步运行签名候选的GitLab PostgreSQL/Redis integration；只有M1-001—M1-011的真实服务证据与manifest全部`PASS`后才关闭M1-012。真实Telegram、provider和自动发送仍禁止启用。
+M0与M1已经关闭。下一步进入M2，先建立三个独立generation profile与embedding配置的持久化/version contract，再实现协议adapter、credential envelope、Control Bot非secret配置和key-only Web App。真实Telegram、真实provider、自动发送和生产部署仍禁止启用。

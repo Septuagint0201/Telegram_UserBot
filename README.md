@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0已经完成。M1 durable-state候选现已实现PostgreSQL 17/pgvector、Redis/arq、Alembic baseline、SQLAlchemy repository/UoW、CAS/lease/fencing、transactional outbox、one-way redaction、数据库角色和隔离integration gate。Windows本地静态、unit/contract/property与build门禁已通过；真实PostgreSQL/Redis仍等待精确签名候选的GitLab Linux CI，不能提前标为`PASS`。
+V1架构设计、M0与M1已经完成。M1 durable-state实现PostgreSQL 17/pgvector、Redis/arq、Alembic baseline、SQLAlchemy repository/UoW、CAS/lease/fencing、transactional outbox、one-way redaction、数据库角色和隔离integration gate。Windows本地静态、unit/contract/property与build门禁，以及GitLab Linux真实PostgreSQL/Redis门禁均已通过。
 
 因此：
 
@@ -13,7 +13,7 @@ V1架构设计与M0已经完成。M1 durable-state候选现已实现PostgreSQL 1
 - Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-当前候选的精确兼容组合见[M1 Compatibility Set](docs/compatibility/m1.md)。下一步先让签名候选通过GitLab的digest-pinned PostgreSQL/Redis integration gate；只有该证据和closeout文档均完成后才关闭M1并进入M2。
+M1的精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)。下一步进入M2：先实现三个独立generation profile与embedding配置的持久化/version contract，再实现协议adapter、credential envelope、Control Bot非secret配置和key-only Web App。
 
 ## 架构摘要
 
@@ -105,7 +105,7 @@ data-export
 
 M0在Windows/CPython 3.14.7的本地结果：56 tests `PASS`，line coverage 97.77%，branch coverage 90.32%；Ruff、strict mypy、compileall、import boundary、build artifact Disclosure和secret/artifact扫描均`PASS`。签名提交`5e6f2b3512436a5ba70c958a42901b920ffa6caa`对应的[GitLab Linux pipeline #2](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747413992)及`m0-preflight`作业均为`PASS`；其acceptance manifest绑定相同commit/tree，并将M0-001—M0-012全部记录为`PASS`。
 
-M1候选在Windows/CPython 3.14.7的当前本地结果：86 tests `PASS`、10个integration/recovery test因本机无Docker按默认marker未运行，总coverage 98.08%；Ruff、strict mypy、import boundary、wheel/sdist Disclosure与secret/artifact扫描均`PASS`。这不是M1关闭证据；真实PostgreSQL/Redis、migration round trip、role、recovery与EXPLAIN必须由候选GitLab job实际通过。
+M1在Windows/CPython 3.14.7的本地结果：86 tests `PASS`、10个integration/recovery test因本机无Docker为`NOT RUN`，总coverage 98.08%；Ruff、strict mypy、import boundary、wheel/sdist Disclosure与secret/artifact扫描均`PASS`。签名提交`9c2dbf61c8b67e75182f47abbb419ae82773678a`对应的[GitLab Linux pipeline #9](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747812423)为`PASS`，真实PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上的96个测试全部通过；acceptance manifest绑定相同commit/tree并将M1-001—M1-012全部记录为`PASS`。Windows真实服务、Ubuntu production、backup/restore和production load仍为`NOT RUN`。
 
 常用本地门禁：
 

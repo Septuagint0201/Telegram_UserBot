@@ -6,9 +6,9 @@
 - Public source target: `https://gitlab.com/Septuagintks/telegram_userbot`
 - Maintainer: GitLab user `Septuagintks`
 - Review date: 2026-08-10 (Asia/Shanghai)
-- Current artifact status: M1 durable-state candidate; no Telegram/model-provider adapter or deployment
+- Current artifact status: M1 durable-state implementation; no Telegram/model-provider adapter or deployment
 
-The repository now contains a pre-alpha Python package, hash-locked development toolchain, synthetic tests, repository/build scanners, a local configuration-validation command, an Alembic PostgreSQL/pgvector baseline, SQLAlchemy durable-state repositories, one-way message-redaction primitives, PostgreSQL job/outbox/lease recovery, a content-free Redis/arq wake-up adapter, least-privilege role SQL, and a GitLab disposable PostgreSQL/Redis integration job. It contains no Telegram Session access, Telegram or model-provider adapter, credential storage, backup implementation, Web App, application container, Compose deployment, or automated message action. M1's real-service claims remain a candidate until the exact signed commit passes GitLab integration; the broader capabilities below remain planned system behavior and must not be interpreted as completed or independently audited safeguards.
+The repository now contains a pre-alpha Python package, hash-locked development toolchain, synthetic tests, repository/build scanners, a local configuration-validation command, an Alembic PostgreSQL/pgvector baseline, SQLAlchemy durable-state repositories, one-way message-redaction primitives, PostgreSQL job/outbox/lease recovery, a content-free Redis/arq wake-up adapter, least-privilege role SQL, and a GitLab disposable PostgreSQL/Redis integration job. It contains no Telegram Session access, Telegram or model-provider adapter, credential storage, backup implementation, Web App, application container, Compose deployment, or automated message action. M1's disposable real-service claims passed GitLab Linux pipeline #9 on signed commit `9c2dbf61c8b67e75182f47abbb419ae82773678a`; production, Ubuntu, backup/restore, Telegram, provider, and live behavior remain unimplemented or `NOT RUN`, and the broader capabilities below remain planned system behavior rather than independently audited safeguards.
 
 ## Security-sensitive and dual-use capabilities
 
@@ -77,7 +77,7 @@ PostgreSQL backup is designed to use continuous WAL archiving, daily differentia
 
 The existing local command still only parses an allowlisted local configuration, rejects credential-like keys and every external-integration flag, emits allowlisted JSON status metadata, and exits. Default tests deny non-loopback network access; loopback is allowed only because the Windows asyncio event loop requires an internal socket pair. M1 database/Redis modules run only when explicitly invoked with a PostgreSQL DSN and Redis URL; public CI supplies disposable passwordless synthetic services and no Telegram/provider/publication credential. The implementation performs no Telegram/provider request, telemetry, backup, credential operation, or automated message action. The V1 design sends no product analytics or vendor telemetry; operational metrics remain private, while configured alert destinations would receive only content-free status metadata.
 
-## Implemented safeguards through the M1 candidate
+## Implemented safeguards through M1
 
 The M0 scaffold currently implements and tests:
 
@@ -90,7 +90,7 @@ The M0 scaffold currently implements and tests:
 - strict format, lint, typing, import-boundary, coverage, Markdown-link, Disclosure, private-path, secret, build-content, and signed-commit-presence gates; and
 - an acceptance-manifest schema and generator that bind content-free evidence to a clean signed commit, source tree, lock hashes, and the canonical Disclosure.
 
-The M1 candidate additionally implements and tests:
+M1 additionally implements and tests:
 
 - a digest-pinned PostgreSQL 17.10/pgvector 0.8.6 and Redis 8.2.8 compatibility set, with hash-locked SQLAlchemy, Alembic, psycopg, arq, redis-py, and Testcontainers clients;
 - an explicit Alembic baseline for account/peer/conversation, message event/revision/media, mode/control/turn, durable job/outbox, audit, erasure, and migration-progress tables, using named constraints, composite account-scope foreign keys, UUIDv7 entity IDs, and monotonic event identities;
@@ -100,7 +100,7 @@ The M1 candidate additionally implements and tests:
 - separate migrator, app, control, worker, backup, and maintenance role grants, including runtime denial of audit update/delete; and
 - synthetic unit/integration tests and machine-readable migration/acceptance manifests for migration round trips, constraints, CAS/lease/fencing, Redis loss, role denial, redaction, interrupted progress, and synthetic EXPLAIN eligibility.
 
-These controls establish the M1 durable-state boundary. They do not implement or validate Telegram/provider access, credential encryption, physical media lifecycle, backup/restore, full orchestration, memory/context/proactive behavior, application containers, production deployment, production load, or Ubuntu recovery safeguards described below. PostgreSQL/Redis integration is not `PASS` until the exact signed candidate completes GitLab Linux CI.
+These controls establish the M1 durable-state boundary. GitLab Linux pipeline #9 validated the exact signed commit against disposable PostgreSQL 17.10/pgvector 0.8.6 and Redis 8.2.8, including migration, role, constraint, recovery, redaction, and synthetic EXPLAIN paths. They do not implement or validate Telegram/provider access, credential encryption, physical media lifecycle, backup/restore, full orchestration, memory/context/proactive behavior, application containers, production deployment, production load, Windows real-service operation, or Ubuntu recovery safeguards described below.
 
 The planned automated test suite uses deterministic synthetic fixtures, fake Telegram/provider services, disposable PostgreSQL/Redis containers, and content-free evidence by default. Production databases, real private conversations, personal Telegram accounts, and production Sessions are prohibited as test inputs. Real Telegram and Web App smoke tests are limited to an authorized dedicated staging account, Bot, and allowlisted test peers on an isolated host. Real provider smoke tests use fixed non-private text and test images with small limits. Ordinary and fork CI jobs receive no Telegram, provider, backup, or publication credentials; protected container, recovery, and soak work uses dedicated Ubuntu runners, while the real Telegram Session remains outside general CI. Routine sanitized test evidence is designed for 30-day retention and release, live, restore, and soak evidence for 365 days.
 
