@@ -306,9 +306,13 @@ message_revisions = Table(
     ),
     CheckConstraint("revision_no >= 1", name="revision_positive"),
     CheckConstraint(
-        "(body_kind = 'text' AND text_content IS NOT NULL AND caption IS NULL) OR "
-        "(body_kind = 'caption' AND caption IS NOT NULL AND text_content IS NULL) OR "
-        "(body_kind = 'none' AND text_content IS NULL AND caption IS NULL)",
+        "(redacted_at IS NOT NULL AND text_content IS NULL AND caption IS NULL) OR "
+        "(redacted_at IS NULL AND body_kind = 'text' AND "
+        "text_content IS NOT NULL AND caption IS NULL) OR "
+        "(redacted_at IS NULL AND body_kind = 'caption' AND "
+        "caption IS NOT NULL AND text_content IS NULL) OR "
+        "(redacted_at IS NULL AND body_kind = 'none' AND "
+        "text_content IS NULL AND caption IS NULL)",
         name="body_kind_matches_content",
     ),
     CheckConstraint(

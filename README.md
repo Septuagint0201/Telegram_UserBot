@@ -105,7 +105,7 @@ data-export
 
 M0在Windows/CPython 3.14.7的本地结果：56 tests `PASS`，line coverage 97.77%，branch coverage 90.32%；Ruff、strict mypy、compileall、import boundary、build artifact Disclosure和secret/artifact扫描均`PASS`。签名提交`5e6f2b3512436a5ba70c958a42901b920ffa6caa`对应的[GitLab Linux pipeline #2](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747413992)及`m0-preflight`作业均为`PASS`；其acceptance manifest绑定相同commit/tree，并将M0-001—M0-012全部记录为`PASS`。
 
-M1候选在Windows/CPython 3.14.7的当前本地结果：77 tests `PASS`、10个integration/recovery test因本机无Docker按默认marker未运行，总coverage 98.07%；Ruff、strict mypy、import boundary、wheel/sdist Disclosure与secret/artifact扫描均`PASS`。这不是M1关闭证据；真实PostgreSQL/Redis、migration round trip、role、recovery与EXPLAIN必须由候选GitLab job实际通过。
+M1候选在Windows/CPython 3.14.7的当前本地结果：83 tests `PASS`、10个integration/recovery test因本机无Docker按默认marker未运行，总coverage 98.07%；Ruff、strict mypy、import boundary、wheel/sdist Disclosure与secret/artifact扫描均`PASS`。这不是M1关闭证据；真实PostgreSQL/Redis、migration round trip、role、recovery与EXPLAIN必须由候选GitLab job实际通过。
 
 常用本地门禁：
 
