@@ -30,9 +30,13 @@ def test_runtime_dependencies_and_python_are_pinned() -> None:
         "SQLAlchemy==2.0.51",
         "alembic==1.19.1",
         "arq==0.28.0",
+        "cryptography==50.0.0",
+        "httpx==0.28.1",
         "psycopg[binary]==3.3.4",
         "redis==5.3.1",
+        "starlette==1.6.0",
         "tzdata==2026.3",
+        "uvicorn==0.52.1",
     ]
     assert document["project"]["requires-python"] == ">=3.14,<3.15"
 

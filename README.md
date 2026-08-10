@@ -4,16 +4,16 @@
 
 ## 当前状态
 
-V1架构设计、M0与M1已经完成。M1 durable-state实现PostgreSQL 17/pgvector、Redis/arq、Alembic baseline、SQLAlchemy repository/UoW、CAS/lease/fencing、transactional outbox、one-way redaction、数据库角色和隔离integration gate。Windows本地静态、unit/contract/property与build门禁，以及GitLab Linux真实PostgreSQL/Redis门禁均已通过。
+V1架构设计、M0与M1已经完成；M2模型配置与key-only控制面已形成待GitLab Linux验收的实现候选。M2候选包含四个独立profile、三种generation wire adapter与embedding adapter、AES-256-GCM credential envelope、SSRF/TLS admission contract、durable Control Bot配置会话和只写API-key Web App。Windows本地静态与unit/contract/property门禁已通过，M2的Linux数据库迁移和Chromium evidence尚未执行。
 
 因此：
 
-- 可以运行本地安全校验、无外部依赖测试和显式的disposable PostgreSQL/Redis integration test，但不能连接Telegram/provider、启动业务服务或部署本项目；
+- 可以运行本地安全校验、fake-only model contract、key-only ASGI测试和显式的disposable PostgreSQL/Redis/browser integration test，但不能连接真实Telegram/provider、启动完整业务服务或部署本项目；
 - 文档中的最终服务与业务命令仍是实现契约，不是已经存在的入口；
 - Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-M1的精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)。下一步进入M2：先实现三个独立generation profile与embedding配置的持久化/version contract，再实现协议adapter、credential envelope、Control Bot非secret配置和key-only Web App。
+精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)和[M2 Compatibility Set](docs/compatibility/m2.md)。M2只有在签名候选提交对应的GitLab PostgreSQL/Redis、Chromium和acceptance jobs全部`PASS`后才能关闭；下一阶段M3仍未开始。
 
 ## 架构摘要
 
@@ -97,7 +97,7 @@ session-backup
 data-export
 ```
 
-除Alembic migration文件外，这些业务入口目前尚未实现。未来运行命令必须随实际Compose文件和runbook一起加入README，并经过Test Strategy与Disclosure审查。
+M2已实现可嵌入`control`进程的model-control controller/backend与key-only ASGI app，但尚无Bot framework polling、Caddy或Compose wiring，因此它们不是可部署的完整业务入口。未来运行命令必须随实际Compose文件和runbook一起加入README，并经过Test Strategy与Disclosure审查。
 
 ## 测试与证据
 
@@ -106,6 +106,8 @@ data-export
 M0在Windows/CPython 3.14.7的本地结果：56 tests `PASS`，line coverage 97.77%，branch coverage 90.32%；Ruff、strict mypy、compileall、import boundary、build artifact Disclosure和secret/artifact扫描均`PASS`。签名提交`5e6f2b3512436a5ba70c958a42901b920ffa6caa`对应的[GitLab Linux pipeline #2](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747413992)及`m0-preflight`作业均为`PASS`；其acceptance manifest绑定相同commit/tree，并将M0-001—M0-012全部记录为`PASS`。
 
 M1在Windows/CPython 3.14.7的本地结果：86 tests `PASS`、10个integration/recovery test因本机无Docker为`NOT RUN`，总coverage 98.08%；Ruff、strict mypy、import boundary、wheel/sdist Disclosure与secret/artifact扫描均`PASS`。签名提交`9c2dbf61c8b67e75182f47abbb419ae82773678a`对应的[GitLab Linux pipeline #9](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747812423)为`PASS`，真实PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上的96个测试全部通过；acceptance manifest绑定相同commit/tree并将M1-001—M1-012全部记录为`PASS`。Windows真实服务、Ubuntu production、backup/restore和production load仍为`NOT RUN`。
+
+M2候选在Windows/CPython 3.14.7的本地结果：Ruff、strict mypy和默认unit/property/contract tests为`PASS`；本机无Docker且匹配Chromium binary不可用，所以真实PostgreSQL/Redis和browser jobs保持`NOT RUN/BLOCKED`。精确数量、coverage和GitLab证据在候选门禁稳定并通过后写入[M2 Compatibility Set](docs/compatibility/m2.md)，不以ASGI unit test替代真实Chromium证据。
 
 常用本地门禁：
 

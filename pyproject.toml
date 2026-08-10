@@ -21,9 +21,13 @@ dependencies = [
   "SQLAlchemy==2.0.51",
   "alembic==1.19.1",
   "arq==0.28.0",
+  "cryptography==50.0.0",
+  "httpx==0.28.1",
   "psycopg[binary]==3.3.4",
   "redis==5.3.1",
+  "starlette==1.6.0",
   "tzdata==2026.3",
+  "uvicorn==0.52.1",
 ]
 
 [project.scripts]
@@ -138,6 +142,7 @@ markers = [
   "recovery: crash or restore test",
   "soak: long-running resource test",
   "live: authorized live service test",
+  "browser: local browser security contract test",
   "requires_secret: protected test requiring a scoped credential",
 ]
 

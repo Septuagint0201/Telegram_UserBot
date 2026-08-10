@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0与M1已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭。M2—M9尚未开始，Telegram/provider、部署、production load和live证据仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0与M1已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭。M2已形成等待GitLab验收的实现候选，M3—M9尚未开始；Telegram/provider、部署、production load和live证据仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -67,7 +67,7 @@ deploy/
 |---|---|---|---|
 | M0 | 工程脚手架与测试基础 | 无 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M2 | 模型配置、adapter与key-only控制面 | 仅local fake | NOT STARTED |
+| M2 | 模型配置、adapter与key-only控制面 | 仅local fake | IMPLEMENTED — VALIDATION PENDING |
 | M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | NOT STARTED |
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | NOT STARTED |
 | M5 | Media与Context Contract | fake provider；测试图片 | NOT STARTED |
@@ -165,6 +165,8 @@ deploy/
 ### 7.1 目标
 
 实现三个generation profile、独立embedding profile、canonical adapter、credential envelope和Control Bot/Web App配置边界，外部请求仅发往local fake。
+
+当前状态：实现候选已完成Windows static/unit/contract门禁；disposable PostgreSQL/Redis migration、受限DB role、Linux Chromium browser和M2 acceptance仍等待精确签名commit的GitLab pipeline，故本milestone尚未关闭。
 
 ### 7.2 代码任务
 
@@ -440,4 +442,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0与M1已经关闭，下一步进入M2。M2从model profile/version schema和canonical configuration contract开始，随后实现三种generation协议adapter、embedding、credential envelope、Control Bot非secret配置与key-only Web App；真实provider smoke继续保持`NOT RUN`。Telegram adapter、应用容器、自动发送和生产部署仍不存在。
+M0与M1已经关闭；M2实现候选已完成并等待GitLab migration/browser/acceptance证据。通过后下一步进入M3 Telegram ingest/outbound intent；真实provider smoke继续保持`NOT RUN`，Telegram adapter、应用容器、自动发送和生产部署仍不存在。

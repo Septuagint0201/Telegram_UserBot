@@ -403,12 +403,12 @@ used_at
 - 不把API key写入URL、DOM持久属性、localStorage、sessionStorage、IndexedDB、service worker、analytics或crash reporter。
 - 输入框使用password type和autocomplete禁用提示，但披露浏览器/键盘/系统仍可能缓存输入。
 - 页面关闭、成功或失败后尽快覆盖JS变量和表单；不能声称JavaScript内存可可靠擦除。
-- response只返回`configured/deleted`、credential version和非秘密状态，不返回原key、ciphertext、nonce或可用于认证的片段。
+- 成功response固定为空的204，不返回credential状态、version、原key、ciphertext、nonce或可用于认证的片段；状态和版本只通过Control Bot查看。
 - 不加载第三方analytics、广告、字体、CDN脚本或任意外部图片。
 
 ### 11.4 Rate limit与审计
 
-每admin和client IP默认15分钟最多5次失败，成功写入每role每分钟最多2次。Rate limit状态可在Redis加速，但token CAS和credential version在PostgreSQL。审计只记录admin ID、role、action、result code、credential version和request ID，不记录key、initData、token、IP全文或request body。
+M2先以PostgreSQL对每admin执行15分钟最多5次credential请求、对每admin/role执行每分钟最多2次写请求；M8在Caddy可信代理边界建立后再叠加脱敏client network维度。Rate limit可在Redis加速，但PostgreSQL状态、token CAS和credential version仍是事实源。审计只记录admin ID、role、action、result code、credential version和request ID，不记录key、initData、token、IP全文或request body。
 
 ## 12. Secret inventory与挂载矩阵
 
@@ -455,7 +455,7 @@ AAD至少绑定deployment ID、logical role、credential identity和version，�
 
 ### 13.3 API key set/replace/delete
 
-- Set/replace在一个事务中创建credential version、验证expected profile/role、写audit/outbox；旧active version转retired。
+- Set/replace在一个事务中创建credential version、验证expected profile/role、切换active pointer并写audit/outbox；旧version保留为非active、可按已启动run的固定引用读取，直到受控销毁。
 - Delete先阻止新run，等待或终止安全的in-flight references，再销毁active ciphertext并使模型profile`credential_missing`。
 - Provider验证失败不删除旧active key；新key保持unvalidated或立即redact，按管理员选择重试。
 - API key永不通过读取API返回。Control Bot只显示configured、last validation result和version。

@@ -591,11 +591,13 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 ```text
 /model_show <role>
 /model_config <role>
+/model_cancel
+/model_validate <role>
 /model_activate <role>
-/model_key <role>
+/model_key <role> [set|replace|delete]
 ```
 
-`/model_show` 查看某角色的非密钥配置；`/model_config` 启动短生命周期多步输入会话，用于修改 endpoint、兼容协议、模型名称、temperature、最大输出 token、超时、启用状态和协议特有选项；`/model_activate` 验证并激活 draft；`/model_key` 打开只处理该角色 API key 的 Telegram Web App。API key 禁止通过命令参数、Bot 消息或多步输入会话提交。
+`/model_show` 查看某角色的非密钥配置；`/model_config` 启动最长15分钟的多步输入会话，用于修改 endpoint、兼容协议、模型名称、temperature、最大输出 token、超时、启用状态和受控协议选项；`/model_cancel` 显式取消当前会话；`/model_validate` 用无私人数据 capability probe 验证 draft；`/model_activate` 以 profile/draft CAS 激活已验证版本；`/model_key` 打开只处理该角色 API key 的 Telegram Web App。API key 禁止通过命令参数、Bot 消息或多步输入会话提交。
 
 多步输入会话绑定管理员 Telegram User ID、目标 logical role 和随机 session ID，同一管理员同一时间只允许一个活动配置会话；会话必须支持显式取消、超时失效、逐项校验和最终确认。Bot 删除消息不作为秘密清除机制，因此任何可能包含密钥的输入都必须直接拒绝且不得落入配置或审计记录。
 
@@ -616,11 +618,11 @@ allowed_admin_ids
 Web App 只提供受限的 API key 凭据功能：
 
 ```text
-模型逻辑角色
-API key 设置或替换
-API key 删除
-credential 状态（仅“已配置”或“未配置”）
+按一次性launch限定的模型逻辑角色
+API key 设置、替换或删除
 ```
+
+Web App 不提供 credential 读取或状态查询接口；“已配置/未配置”、版本和非密钥配置只由 `/models`、`/model_show` 显示。
 
 生成模型固定为三个彼此独立的逻辑配置：
 
@@ -660,7 +662,7 @@ API key 采用只写不读语义：
 - 管理员在 Web App 中输入一次后，通过 HTTPS 发送给 `control`。
 - 服务端使用AES-256-GCM、随机96-bit nonce、绑定deployment/role/version的AAD和版本化master key keyring加密。
 - 主密钥以root控制、仅`app/control/worker` reader GID可读的host file作为Compose secret挂载，不与数据库密文或backup credential存放在一起；必须验证非root容器实际可读且其他服务未挂载。
-- 后续页面只显示“已配置”和必要的非敏感标识，不返回、回显或记录完整 key。
+- Web App 成功响应只有空的204结果，不返回 credential 状态、版本、原key、密文、nonce或认证片段；状态只在Control Bot查看。
 - 更换 key 必须重新输入；日志、审计记录、异常和 Telegram 消息中不得出现 key。
 
 V1 将 `control`、`app` 和 `worker` 视为受信任计算边界，并向这三个服务只读挂载同一主密钥。只有 `control` 可以接受和写入模型配置；`app` 与 `worker` 只能按 credential reference 读取密文，并在发起模型请求时于进程内存中短暂解密。`https-gateway`、PostgreSQL 和 Redis 不挂载主密钥，也不能获得明文 API key。
@@ -1669,7 +1671,9 @@ proactive and state:
 model control:
   model_endpoints, model_profiles, model_config_drafts,
   model_config_versions, model_credentials,
-  model_credential_versions, control_input_sessions,
+  model_credential_versions, model_capability_snapshots,
+  control_input_sessions, model_key_launch_sessions,
+  model_key_rate_limits,
   context_policies, context_policy_versions,
   retrieval_policies, retrieval_policy_versions, prompt_versions
 

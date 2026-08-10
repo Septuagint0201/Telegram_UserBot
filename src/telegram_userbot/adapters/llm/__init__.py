@@ -1,1 +1,41 @@
-"""Generation adapter placeholder for M2."""
+"""Canonical model protocol adapters."""
+
+from telegram_userbot.adapters.llm.protocols import (
+    CanonicalContent,
+    CanonicalEmbeddingRequest,
+    CanonicalGenerationRequest,
+    CanonicalMessage,
+    CanonicalProtocolClient,
+    ContentKind,
+    ModelUsage,
+    NormalizedEmbedding,
+    NormalizedGeneration,
+    ProviderProtocolError,
+    ProviderTransport,
+    ProviderWireRequest,
+    ProviderWireResponse,
+    build_embedding_request,
+    build_generation_request,
+    normalize_embedding_response,
+    normalize_generation_response,
+)
+
+__all__ = [
+    "CanonicalContent",
+    "CanonicalEmbeddingRequest",
+    "CanonicalGenerationRequest",
+    "CanonicalMessage",
+    "CanonicalProtocolClient",
+    "ContentKind",
+    "ModelUsage",
+    "NormalizedEmbedding",
+    "NormalizedGeneration",
+    "ProviderProtocolError",
+    "ProviderTransport",
+    "ProviderWireRequest",
+    "ProviderWireResponse",
+    "build_embedding_request",
+    "build_generation_request",
+    "normalize_embedding_response",
+    "normalize_generation_response",
+]

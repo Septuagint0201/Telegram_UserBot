@@ -10,9 +10,11 @@ class ManifestSemanticError(ValueError):
 
 
 def requirement_ids_for_milestone(milestone: object) -> frozenset[str]:
-    if milestone not in {"M0", "M1"}:
+    requirement_counts = {"M0": 12, "M1": 12, "M2": 11}
+    if milestone not in requirement_counts:
         raise ManifestSemanticError("unsupported evidence milestone")
-    return frozenset(f"{milestone}-{index:03d}" for index in range(1, 13))
+    count = requirement_counts[milestone]
+    return frozenset(f"{milestone}-{index:03d}" for index in range(1, count + 1))
 
 
 def _as_mapping(value: object, field: str) -> Mapping[str, object]:

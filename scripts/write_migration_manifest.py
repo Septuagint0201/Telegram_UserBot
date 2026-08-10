@@ -1,4 +1,4 @@
-"""Record content-free M1 PostgreSQL/Redis compatibility and schema evidence."""
+"""Record content-free PostgreSQL/Redis compatibility and migration-chain evidence."""
 
 import argparse
 import hashlib
@@ -13,7 +13,7 @@ import redis
 EXPECTED_POSTGRES_MAJOR = "17"
 EXPECTED_VECTOR_VERSION = "0.8.6"
 EXPECTED_REDIS_VERSION = "8.2.8"
-EXPECTED_REVISION = "0001_m1_durable_state"
+EXPECTED_REVISION = "0002_m2_model_control"
 
 
 def _hash(path: Path) -> str:
@@ -64,17 +64,29 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
         raise RuntimeError("service image digests are required")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "revision": EXPECTED_REVISION,
-        "migration_sha256": _hash(root / "alembic" / "versions" / "0001_m1_durable_state.py"),
-        "roles_sha256": _hash(root / "deploy" / "postgres" / "m1_roles.sql"),
+        "migration_sha256": _hash(root / "alembic" / "versions" / "0002_m2_model_control.py"),
+        "migration_chain_sha256": {
+            "0001_m1_durable_state": _hash(
+                root / "alembic" / "versions" / "0001_m1_durable_state.py"
+            ),
+            "0002_m2_model_control": _hash(
+                root / "alembic" / "versions" / "0002_m2_model_control.py"
+            ),
+        },
+        "roles_sha256": _hash(root / "deploy" / "postgres" / "m2_roles.sql"),
+        "role_chain_sha256": {
+            "m1": _hash(root / "deploy" / "postgres" / "m1_roles.sql"),
+            "m2": _hash(root / "deploy" / "postgres" / "m2_roles.sql"),
+        },
         "table_count": len(tables),
         "tables": [row[0] for row in tables],
         "unnamed_constraint_count": 0,
         "migration_paths": {
             "empty_to_head": "PASS",
             "head_to_base_to_head": "PASS",
-            "previous_supported_to_head": "NOT_APPLICABLE_BASELINE",
+            "previous_supported_to_head": "PASS",
             "interrupted_progress_resume": "PASS",
         },
         "query_baselines": [

@@ -155,9 +155,13 @@ accounts
   +--< background_jobs
   +--< data_erasure_requests
 
-model_endpoints --< model_config_versions >-- model_profiles
+model_endpoints --< model_capability_snapshots
+       |                  |
+       +--< model_config_drafts --< control_input_sessions
+       +--< model_config_versions >-- model_profiles
                                              |
                                              +-- model_credentials --< model_credential_versions
+                                             +--< model_key_launch_sessions
 context_policies --< context_policy_versions
 retrieval_policies --< retrieval_policy_versions
 prompt_versions -> context_manifests / model_runs
@@ -1855,12 +1859,14 @@ endpoint 可被多个 profile 复用，但一旦被不可变 config version 引�
 | `id` | UUIDv7 | PK |
 | `label` | TEXT | 管理员标签 |
 | `base_url` | TEXT | 规范化 URL，经过 SSRF policy 验证 |
-| `auth_scheme` | TEXT | `bearer/x_api_key/custom_supported` |
+| `canonical_sha256` | BYTEA | 32-byte canonical URL hash |
 | `network_policy_id` | UUIDv7 | server-managed allowlist policy ref |
+| `network_policy_version` | BIGINT | 验证时的不可变policy版本 |
+| `network_category` | TEXT | `public/private` |
+| `created_by_admin_id` | BIGINT | 创建者；不代表可修改network policy |
 | `created_at` | TIMESTAMPTZ | DB default |
-| `retired_at` | TIMESTAMPTZ | nullable |
 
-base URL unique 不是强制，因为相同 URL 可以有不同 auth/network policy；使用 canonical hash 发现重复但不自动合并。
+`UNIQUE(canonical_sha256, network_policy_id, network_policy_version)`复用完全相同的已验证endpoint。endpoint row和capability snapshot均由数据库trigger禁止UPDATE/DELETE；变更URL或policy必须创建新row。认证header属于protocol-specific config option，不放在endpoint identity中。
 
 ### 11.2 `model_profiles`
 
@@ -1878,7 +1884,8 @@ embedding
 | `id` | UUIDv7 | PK |
 | `logical_role` | TEXT | `UNIQUE NOT NULL` |
 | `profile_kind` | TEXT | `generation/embedding` |
-| `active_config_version_id` | UUIDv7 | nullable deferrable FK |
+| `state` | TEXT | `disabled/active/blocked` |
+| `active_config_version_no` | INTEGER | nullable deferrable composite FK |
 | `version` | BIGINT | role binding CAS version |
 | `created_at` | TIMESTAMPTZ | DB default |
 | `updated_at` | TIMESTAMPTZ | 激活时更新 |
@@ -1897,25 +1904,29 @@ UNIQUE (id, profile_kind)
 ```text
 id UUIDv7 PK
 profile_id
-admin_user_id BIGINT
-control_session_id UUIDv7
-state editing|validating|validated|cancelled|expired|activated
+created_by_admin_id BIGINT
+expected_profile_version BIGINT
+state editing|validated|cancelled|expired|activated|conflict
 endpoint_id?
-protocol
-model_name
+credential_id?
+protocol?
+model_name?
 temperature?
 max_output_tokens?
-timeout_seconds
-enabled
+timeout_seconds?
+enabled?
 protocol_options_schema_version
 protocol_options JSONB
+capability_snapshot_id?
+validation_error_code?
 draft_version BIGINT
 created_at
 updated_at
 expires_at
+consumed_at?
 ```
 
-同一 profile 可以有多个管理员历史 draft，但 partial unique index 限制同一 admin/profile 同时一个 `editing/validating` draft。draft 使用 `draft_version` optimistic lock。
+同一 profile 可以有多个管理员历史 draft，但 partial unique index 限制同一 admin/profile 同时一个 `editing/validated` draft。draft 使用 `draft_version` optimistic lock；激活同时比较`expected_profile_version`。Web App从不写draft。
 
 ### 11.4 `model_config_versions`
 
@@ -1927,7 +1938,6 @@ validated draft 复制成不可变版本；不能把 draft row 直接改名为 a
 | `profile_id` | UUIDv7 | FK profiles |
 | `profile_kind` | TEXT | `generation/embedding`，与 profile composite FK 一致 |
 | `version_no` | INTEGER | role 内递增 |
-| `status` | TEXT | `validated/active/retired` |
 | `source_draft_id` | UUIDv7 | nullable FK |
 | `endpoint_id` | UUIDv7 | FK endpoints |
 | `credential_id` | UUIDv7 | profile-owned stable credential FK |
@@ -1939,36 +1949,41 @@ validated draft 复制成不可变版本；不能把 draft row 直接改名为 a
 | `enabled` | BOOLEAN | NOT NULL |
 | `protocol_options_schema_version` | SMALLINT | NOT NULL |
 | `protocol_options` | JSONB | discriminated schema |
-| `capabilities_schema_version` | SMALLINT | NOT NULL |
-| `capabilities` | JSONB | 验证后的能力 snapshot |
+| `capability_snapshot_id` | UUIDv7 | NOT NULL FK到独立不可变snapshot |
+| `config_sha256` | BYTEA | canonical payload SHA-256 |
+| `created_by_admin_id` | BIGINT | 激活者 |
 | `validated_at` | TIMESTAMPTZ | NOT NULL |
-| `activated_at` | TIMESTAMPTZ | nullable |
-| `retired_at` | TIMESTAMPTZ | nullable |
 | `created_at` | TIMESTAMPTZ | DB default |
 
 ```text
 UNIQUE (profile_id, version_no)
 UNIQUE (profile_id, id)
-UNIQUE (profile_id) WHERE status = 'active'
 CHECK profile_kind 与 generation/embedding 字段组合一致
 ```
 
-`model_profiles` 提供 `(id, profile_kind)` unique key，config version 使用 `(profile_id, profile_kind)` composite FK；因此字段组合 CHECK 不需要跨表读取，PostgreSQL 可以直接执行。config payload 字段在创建后不可修改，只有 `status/activated_at/retired_at` lifecycle envelope 可按受控状态机更新。
+`model_profiles` 提供 `(id, profile_kind)` unique key，config version 使用 `(profile_id, profile_kind)` composite FK；因此字段组合 CHECK 不需要跨表读取。整个config version row由trigger禁止UPDATE/DELETE，active lifecycle只通过`model_profiles.active_config_version_no + version`的CAS指针表达。
 
-`model_profiles(id, active_config_version_id)` 使用 deferrable composite FK 指向 `model_config_versions(profile_id, id)`，并与 partial unique active row 在同一 activation transaction 保持一致。config version 引用稳定 credential identity，不锁死某次 key 轮换；每个 `model_run` 在开始时另行记录实际使用的 `credential_version_id`。
+`model_profiles(id, active_config_version_no)` 使用deferrable composite FK指向`model_config_versions(profile_id, version_no)`。config version只引用稳定credential identity，不锁死某次key轮换；获取active snapshot时解析credential当前active version，每个`model_run`开始时再固定实际使用的credential version，使轮换只影响新run而不破坏旧run恢复。
 
-### 11.5 Credential
+### 11.5 `model_capability_snapshots`
+
+每次无私人数据probe写入一行不可变观察，至少包含endpoint、protocol、model、text/temperature/reasoning/image/stream/structured能力、Chat token字段、context/output上限、输入role、embedding dimensions、status和`observed_at/expires_at`。draft validation和activation事务都必须确认snapshot匹配endpoint/protocol/model、状态为`valid`且未过期，并重新执行domain admission；过期或能力漂移创建新snapshot，不更新旧row。
+
+### 11.6 Credential
 
 `model_credentials` 是 role-owned 稳定 identity：
 
 ```text
 id UUIDv7 PK
 profile_id UNIQUE
-status configured|missing|disabled|deleting
+status missing|active|deleted
 active_version_no?
+latest_version_no INTEGER DEFAULT 0
 created_at
 updated_at
 ```
+
+`latest_version_no`只增不减，删除只清空active pointer而不重用历史序号；delete后重新set创建`latest_version_no + 1`。
 
 `model_credential_versions` 保存独立轮换版本：
 
@@ -1984,43 +1999,44 @@ updated_at
 | `key_version` | INTEGER | credential master key key ID/version |
 | `aad_schema_version` | SMALLINT | AAD绑定deployment/profile/credential/version |
 | `secret_fingerprint` | BYTEA | keyed fingerprint，只用于判断是否变化 |
-| `status` | TEXT | `active/retired/destroyed` |
 | `created_at` | TIMESTAMPTZ | DB default |
-| `retired_at` | TIMESTAMPTZ | nullable |
 | `destroyed_at` | TIMESTAMPTZ | nullable，destroyed 时 ciphertext、nonce、fingerprint 全部清空 |
+| `destroy_reason` | TEXT | destroyed时必填 |
 
 ```text
 UNIQUE (credential_id, version_no)
-UNIQUE (id, profile_id)
-UNIQUE (profile_id) WHERE status = 'active'
+UNIQUE (credential_id, profile_id, version_no)
 ```
 
 credential 不跨 profile 共享。即使管理员输入相同 key，也创建独立 ciphertext/version，轮换一个角色不会隐式改变另一个角色。
 
-key-only Web App 设置或替换 API key 时，在 credential row lock 下创建新 version、切换 `active_version_no` 和 active status，并发布 config invalidation。它不创建新的非密钥 config version。已经开始的 model run 继续记录并使用启动时取得的旧 credential version；旧 ciphertext 只有在没有引用它的非终态 run、重试或恢复窗口后才能进入 destroyed 状态。
+key-only Web App设置或替换API key时，在credential row lock和expected version CAS下创建新version并切换`active_version_no`；它不创建或修改非密钥config version。已经开始的model run继续使用启动时取得的旧credential version，受限SECURITY DEFINER函数允许app/worker按已固定版本读取任何尚未销毁的同profile版本。删除会禁用profile并单向清空所有版本的ciphertext/nonce/fingerprint；M4引入in-flight run后，删除编排必须先处理这些引用再执行销毁。
 
 `model_credentials` 提供 `(id, profile_id)` unique key；`model_config_versions(profile_id, credential_id)` 使用 composite FK，保证 config 不能引用其他 role 的 credential。`model_credential_versions` 同样以 `(credential_id, profile_id)` 约束 owner。`model_credentials(id, active_version_no)` 使用 deferrable composite FK 指向 `model_credential_versions(credential_id, version_no)`。
 
-### 11.6 `control_input_sessions`
+### 11.7 Control与key-only短会话
 
 持久化非密钥多步 Bot 配置会话的最小状态：
 
 ```text
 id UUIDv7 PK
-admin_user_id BIGINT
-session_kind
-target_profile_id?
-state active|confirmed|cancelled|expired
-step
-draft_id?
+admin_telegram_user_id BIGINT
+profile_id
+draft_id
+state active|consumed|cancelled|expired
+expected_draft_version
+pending_field?
+session_nonce_hash BYTEA
 created_at
 expires_at
-completed_at?
+consumed_at?
 ```
 
-不保存API key或可能是key的拒绝输入。Key-only Web App短期session使用独立row，至少记录admin、Bot/chat、role、action set、256-bit launch token hash、created/expires/used、initData auth timestamp和CAS version，不保存initData、token或提交明文。Launch token和`initData`默认5分钟过期且一次性。
+同一管理员只允许一个active输入会话；开始新会话会取消旧会话和对应open draft。不保存API key或疑似key的拒绝输入。
 
-### 11.7 Canonical generation 与 protocol options
+`model_key_launch_sessions`独立记录token hash、admin、profile、`set/replace/delete`、deployment version、expected credential version、5分钟过期和一次性`consumed_at`；不保存initData、明文token或key。`model_key_rate_limits`只保存HMAC/hash principal、窗口、计数、block时间和CAS version。
+
+### 11.8 Canonical generation 与 protocol options
 
 不可变 config version 只保存可配置的 canonical 字段：
 

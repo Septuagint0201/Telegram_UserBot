@@ -106,6 +106,58 @@ def _requirements_for(milestone: str) -> list[RequirementRecord]:
             ),
             _requirement("M1-012", "TODO.md", "docs/Implementation-Plan.md", "README.md"),
         ]
+    if milestone == "M2":
+        return [
+            _requirement(
+                "M2-001",
+                "alembic/versions/0002_m2_model_control.py",
+                "src/telegram_userbot/adapters/persistence/schema.py",
+                "tests/integration/test_m2_model_control.py",
+            ),
+            _requirement(
+                "M2-002",
+                "src/telegram_userbot/domain/model_config",
+                "tests/unit/domain/test_model_config_and_crypto.py",
+            ),
+            _requirement(
+                "M2-003",
+                "src/telegram_userbot/adapters/llm/protocols.py",
+                "src/telegram_userbot/adapters/embedding/__init__.py",
+            ),
+            _requirement("M2-004", "tests/contract/test_model_protocols.py"),
+            _requirement(
+                "M2-005",
+                "src/telegram_userbot/platform/crypto/credentials.py",
+                "deploy/postgres/m2_roles.sql",
+            ),
+            _requirement(
+                "M2-006",
+                "src/telegram_userbot/platform/network/endpoint_policy.py",
+                "tests/unit/domain/test_model_config_and_crypto.py",
+            ),
+            _requirement("M2-007", "src/telegram_userbot/adapters/telegram_bot/model_control.py"),
+            _requirement(
+                "M2-008",
+                "src/telegram_userbot/adapters/webapp",
+                ".artifacts/m2/browser-manifest.json",
+            ),
+            _requirement(
+                "M2-009",
+                "src/telegram_userbot/domain/model_config/capabilities.py",
+                "tests/integration/test_m2_model_control.py",
+            ),
+            _requirement(
+                "M2-010",
+                ".artifacts/m2/junit.xml",
+                ".artifacts/m2/browser-manifest.json",
+            ),
+            _requirement(
+                "M2-011",
+                "docs/compatibility/m2.md",
+                "TODO.md",
+                "docs/Implementation-Plan.md",
+            ),
+        ]
     raise ValueError("unsupported milestone")
 
 
@@ -127,16 +179,19 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
     )
     if missing_evidence:
         raise ValueError("acceptance evidence path is missing: " + missing_evidence[0])
-    is_m1 = milestone == "M1"
+    uses_disposable_services = milestone in {"M1", "M2"}
     environment: dict[str, object] = {
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),
         "platform": platform.system().lower(),
-        "external_service_access": is_m1,
+        "external_service_access": uses_disposable_services,
     }
-    if is_m1:
+    if uses_disposable_services:
+        artifact_milestone = milestone.lower()
         migration_manifest = json.loads(
-            (root / ".artifacts" / "m1" / "migration-manifest.json").read_text(encoding="utf-8")
+            (root / ".artifacts" / artifact_milestone / "migration-manifest.json").read_text(
+                encoding="utf-8"
+            )
         )
         environment["services"] = migration_manifest["services"]
 
@@ -162,12 +217,12 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
         "external_evidence": [
             {
                 "name": "telegram-provider-live-runtime"
-                if is_m1
+                if uses_disposable_services
                 else "telegram-provider-database-redis-runtime",
                 "status": "NOT RUN",
                 "reason": (
-                    "M1 validates only disposable PostgreSQL and Redis services"
-                    if is_m1
+                    f"{milestone} validates only disposable services and local fakes"
+                    if uses_disposable_services
                     else "M0 explicitly contains no external adapters or credentials"
                 ),
             },
@@ -188,7 +243,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--milestone", choices=("M0", "M1"), default="M0")
+    parser.add_argument("--milestone", choices=("M0", "M1", "M2"), default="M0")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]

@@ -13,8 +13,9 @@ Main AI、Memory Agent和Proactive Agent需要独立模型、参数和credential
 - 内部保存canonical endpoint/model/temperature/output limit/timeout/options，由protocol adapter映射wire字段。
 - V1支持`openai_responses`、`openai_chat_completions`和`anthropic_messages`；不支持legacy text `/completions`。
 - 非secret配置仅通过Control Bot命令和短生命周期输入session管理。
-- Telegram Web App只执行API key set/replace/delete，不读取key、不修改其他字段。
+- Telegram Web App只执行API key set/replace/delete，不读取key、不查询状态、不修改其他字段；状态只由Control Bot显示。
 - API key以AES-256-GCM应用层加密；数据库ciphertext与host master keyring分离。
+- 不可变config只绑定稳定credential identity；key轮换切换active credential version，新run取得并固定当前版本，已启动run可继续读取尚未销毁的旧版本。
 - Endpoint默认只允许public HTTPS；private endpoint必须由root policy精确allowlist并通过SSRF/TLS门禁。
 
 ## Consequences

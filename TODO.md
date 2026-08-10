@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计、M0 与 M1 已经完成。M1 durable-state 已实现 PostgreSQL/pgvector、Redis/arq、Alembic、repository/UoW、CAS/lease/outbox 和 one-way redaction；Windows static/unit 门禁与 GitLab Linux 真实 PostgreSQL/Redis integration 均为 `PASS`。Telegram/provider、应用容器、生产部署、backup/restore、production performance 和 live smoke 仍为 `NOT RUN`。
+架构设计、M0与M1已经完成。M2模型配置、协议adapter、credential envelope、Control Bot持久化配置会话和key-only Web App已形成实现候选；Windows static/unit/contract为`PASS`，GitLab Linux PostgreSQL/Redis、Chromium和M2 acceptance尚为`NOT RUN`，因此M2复选框尚未关闭。Telegram/provider live、应用容器、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -41,7 +41,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 |---|---|---|---|
 | M0 | 工程脚手架与测试基础 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
 | M1 | PostgreSQL、Redis与 durable state | COMPLETE | WINDOWS STATIC/UNIT PASS; GITLAB SERVICE INTEGRATION PASS |
-| M2 | 模型配置、adapter与 key-only 控制面 | READY — NOT STARTED | NOT RUN |
+| M2 | 模型配置、adapter与 key-only 控制面 | IMPLEMENTED — VALIDATION PENDING | WINDOWS STATIC/UNIT PASS; GITLAB M2 NOT RUN |
 | M3 | Telegram ingest 与 outbound intent | WAITING | NOT RUN |
 | M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
 | M5 | Media 与 Context Contract | WAITING | NOT RUN |
@@ -116,6 +116,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 ## 7. M2 — 模型配置、Adapter与 Key-only 控制面
 
 目标：完成三个独立 generation profile、协议适配、credential 加密和安全配置入口。
+
+当前候选已覆盖M2-001—M2-010的代码与本地测试；M2-011及所有复选框等待精确签名commit的GitLab migration/browser/acceptance evidence，不能由本地mock或ASGI测试提前关闭。
 
 - [ ] **M2-001 建立 model profile/version schema**（依赖：M1-012）— 为 `main_ai`、`memory_agent`、`proactive_agent` 建立独立配置、版本、capability 和 activation 状态；embedding 保持独立配置。
 - [ ] **M2-002 实现 canonical model configuration domain**（依赖：M2-001）— 统一 endpoint、protocol、model、temperature、maximum output tokens、timeout、enable 和协议扩展项；版本不可变且切换用 CAS。
@@ -326,4 +328,4 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 17. 下一步
 
-M0与M1已经关闭。下一步进入M2，先建立三个独立generation profile与embedding配置的持久化/version contract，再实现协议adapter、credential envelope、Control Bot非secret配置和key-only Web App。真实Telegram、真实provider、自动发送和生产部署仍禁止启用。
+M0与M1已经关闭；M2实现候选等待GitLab Linux的真实migration、数据库角色、Chromium和acceptance门禁。全部通过后关闭M2并进入M3；真实Telegram、真实provider、自动发送和生产部署仍禁止启用。

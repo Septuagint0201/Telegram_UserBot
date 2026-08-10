@@ -8,7 +8,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-from telegram_userbot.adapters.persistence.schema import metadata
+from telegram_userbot.adapters.persistence.schema import M1_TABLES, metadata
 
 revision: str = "0001_m1_durable_state"
 down_revision: str | Sequence[str] | None = None
@@ -18,7 +18,8 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    metadata.create_all(bind=op.get_bind(), checkfirst=False)
+    m1_tables = [metadata.tables[name] for name in M1_TABLES]
+    metadata.create_all(bind=op.get_bind(), tables=m1_tables, checkfirst=False)
     op.execute(
         """
         CREATE FUNCTION enforce_message_revision_immutability()
@@ -52,5 +53,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP FUNCTION IF EXISTS enforce_message_revision_immutability() CASCADE")
-    metadata.drop_all(bind=op.get_bind(), checkfirst=False)
+    m1_tables = [metadata.tables[name] for name in M1_TABLES]
+    metadata.drop_all(bind=op.get_bind(), tables=m1_tables, checkfirst=False)
     # The vector extension is shared deployment state and is intentionally retained.

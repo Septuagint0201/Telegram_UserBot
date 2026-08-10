@@ -33,16 +33,16 @@ def test_valid_manifest_semantics() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("milestone", ["M0", "M1"])
-def test_requirement_ids_follow_supported_manifest_milestone(milestone: str) -> None:
+@pytest.mark.parametrize(("milestone", "count"), [("M0", 12), ("M1", 12), ("M2", 11)])
+def test_requirement_ids_follow_supported_manifest_milestone(milestone: str, count: int) -> None:
     assert requirement_ids_for_milestone(milestone) == frozenset(
-        f"{milestone}-{index:03d}" for index in range(1, 13)
+        f"{milestone}-{index:03d}" for index in range(1, count + 1)
     )
 
 
 @pytest.mark.unit
 def test_requirement_ids_reject_unknown_or_missing_milestone() -> None:
-    for milestone in (None, "M2", 1):
+    for milestone in (None, "M3", 1):
         with pytest.raises(ManifestSemanticError, match="unsupported evidence milestone"):
             requirement_ids_for_milestone(milestone)
 

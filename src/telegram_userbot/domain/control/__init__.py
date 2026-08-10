@@ -1,1 +1,1 @@
-"""Control domain placeholder; implemented from M2."""
+"""Control-plane domain package."""

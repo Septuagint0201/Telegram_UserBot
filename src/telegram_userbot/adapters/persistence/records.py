@@ -76,3 +76,79 @@ class OutboxRecord:
     aggregate_id: str
     aggregate_version: int
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelProfileRecord:
+    id: UUID
+    logical_role: str
+    profile_kind: str
+    state: str
+    active_config_version_no: int | None
+    version: int
+    credential_id: UUID
+    credential_status: str
+    credential_active_version_no: int | None
+    credential_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class ModelControlProfileRecord:
+    id: UUID
+    logical_role: str
+    profile_kind: str
+    state: str
+    active_config_version_no: int | None
+    version: int
+    credential_id: UUID
+    credential_status: str
+    credential_version: int
+    protocol: str | None
+    model_name: str | None
+    endpoint_label: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelControlDraftRecord:
+    session_id: UUID | None
+    draft_id: UUID
+    profile_id: UUID
+    logical_role: str
+    profile_kind: str
+    credential_id: UUID
+    expected_profile_version: int
+    draft_version: int
+    state: str
+    pending_field: str | None
+    endpoint_id: UUID | None
+    protocol: str | None
+    model_name: str | None
+    temperature: float | None
+    max_output_tokens: int | None
+    timeout_seconds: int | None
+    enabled: bool | None
+    protocol_options: dict[str, object]
+    capability_snapshot_id: UUID | None
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ModelConfigSnapshotRecord:
+    id: UUID
+    profile_id: UUID
+    version_no: int
+    endpoint_id: UUID
+    credential_id: UUID
+    credential_version_no: int
+    capability_snapshot_id: UUID | None
+    canonical_payload: dict[str, Any]
+    config_sha256: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedKeyLaunchRecord:
+    profile_id: UUID
+    logical_role: str
+    credential_id: UUID
+    credential_status: str
+    credential_version: int

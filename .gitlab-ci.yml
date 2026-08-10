@@ -5,6 +5,8 @@ default:
 stages:
   - preflight
   - integration
+  - browser
+  - acceptance
 
 variables:
   CI_DEBUG_TRACE: "false"
@@ -75,7 +77,7 @@ m1-postgres-redis:
     - .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
   script:
     - .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
-    - .venv/bin/pytest -m "not soak and not live and not requires_secret" --junitxml=.artifacts/m1/junit.xml --cov-report=xml:.artifacts/m1/coverage.xml
+    - .venv/bin/pytest -m "not browser and not soak and not live and not requires_secret" --junitxml=.artifacts/m1/junit.xml --cov-report=xml:.artifacts/m1/coverage.xml
     - .venv/bin/python scripts/check_coverage.py .artifacts/coverage.json
     - .venv/bin/python scripts/write_migration_manifest.py --output .artifacts/m1/migration-manifest.json
     - .venv/bin/python scripts/write_acceptance_manifest.py --milestone M1 --commit "$CI_COMMIT_SHA" --output .artifacts/m1/acceptance-manifest.json
@@ -93,4 +95,104 @@ m1-postgres-redis:
       - .artifacts/coverage.json
       - .artifacts/m1/acceptance-manifest.json
       - .artifacts/m1/migration-manifest.json
+      - DISCLOSURE
+
+m2-model-control:
+  stage: integration
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  services:
+    - name: "pgvector/pgvector:0.8.6-pg17-bookworm@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38"
+      alias: postgres
+    - name: "redis:8.2.8-bookworm@sha256:2f7462b9e93e0a7ae2edf3a0a0babc8a4d29f8bfc50849b906b7caaef925edc1"
+      alias: redis
+      command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+  variables:
+    POSTGRES_DB: "telegram_userbot_test"
+    POSTGRES_HOST_AUTH_METHOD: "trust"
+    TEST_POSTGRES_DSN: "postgresql+psycopg://postgres@postgres:5432/telegram_userbot_test"
+    TEST_REDIS_URL: "redis://redis:6379/0"
+    TEST_POSTGRES_IMAGE: "pgvector/pgvector:0.8.6-pg17-bookworm@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38"
+    TEST_REDIS_IMAGE: "redis:8.2.8-bookworm@sha256:2f7462b9e93e0a7ae2edf3a0a0babc8a4d29f8bfc50849b906b7caaef925edc1"
+  before_script:
+    - python --version
+    - python -m venv .venv
+    - .venv/bin/python -m pip install --require-hashes -r requirements/bootstrap.lock
+    - .venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+    - .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+  script:
+    - .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
+    - .venv/bin/pytest -m "not browser and not soak and not live and not requires_secret" --junitxml=.artifacts/m2/junit.xml --cov-report=xml:.artifacts/m2/coverage.xml
+    - .venv/bin/python scripts/check_coverage.py .artifacts/coverage.json
+    - .venv/bin/python scripts/write_migration_manifest.py --output .artifacts/m2/migration-manifest.json
+    - .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m2
+  artifacts:
+    when: on_success
+    expire_in: 30 days
+    reports:
+      junit: .artifacts/m2/junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: .artifacts/m2/coverage.xml
+    paths:
+      - .artifacts/coverage.json
+      - .artifacts/m2/junit.xml
+      - .artifacts/m2/migration-manifest.json
+      - DISCLOSURE
+
+m2-browser:
+  stage: browser
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  before_script:
+    - python --version
+    - python -m venv .venv
+    - .venv/bin/python -m pip install --require-hashes -r requirements/bootstrap.lock
+    - .venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+    - .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+    - .venv/bin/python -m playwright install --with-deps chromium
+  script:
+    - .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
+    - .venv/bin/pytest -m browser tests/browser --no-cov --junitxml=.artifacts/m2/browser-junit.xml
+    - .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m2
+  artifacts:
+    when: on_success
+    expire_in: 30 days
+    reports:
+      junit: .artifacts/m2/browser-junit.xml
+    paths:
+      - .artifacts/m2/browser-junit.xml
+      - .artifacts/m2/browser-manifest.json
+      - DISCLOSURE
+
+m2-acceptance:
+  stage: acceptance
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  needs:
+    - job: m2-model-control
+      artifacts: true
+    - job: m2-browser
+      artifacts: true
+  before_script:
+    - python --version
+    - python -m venv .venv
+    - .venv/bin/python -m pip install --require-hashes -r requirements/bootstrap.lock
+    - .venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+    - .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+  script:
+    - .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
+    - .venv/bin/python scripts/write_acceptance_manifest.py --milestone M2 --commit "$CI_COMMIT_SHA" --output .artifacts/m2/acceptance-manifest.json
+    - .venv/bin/python scripts/validate_acceptance_manifest.py .artifacts/m2/acceptance-manifest.json
+    - .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m2
+  artifacts:
+    when: on_success
+    expire_in: 30 days
+    paths:
+      - .artifacts/m2/acceptance-manifest.json
+      - .artifacts/m2/browser-manifest.json
+      - .artifacts/m2/migration-manifest.json
       - DISCLOSURE

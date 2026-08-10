@@ -17,6 +17,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     MetaData,
+    Numeric,
     SmallInteger,
     Table,
     Text,
@@ -803,3 +804,436 @@ migration_progress = Table(
 )
 
 M1_TABLES = tuple(metadata.tables)
+
+
+# M2 model-control tables intentionally follow the frozen M1 table set above.
+model_endpoints = Table(
+    "model_endpoints",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("label", Text, nullable=False),
+    Column("base_url", Text, nullable=False),
+    Column("canonical_sha256", LargeBinary, nullable=False),
+    Column("network_policy_id", UUID_TYPE, nullable=False),
+    Column("network_policy_version", BigInteger, nullable=False),
+    Column("network_category", Text, nullable=False),
+    Column("created_by_admin_id", BigInteger, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    CheckConstraint("octet_length(canonical_sha256) = 32", name="canonical_hash_32_bytes"),
+    CheckConstraint("network_policy_version >= 1", name="network_policy_version_positive"),
+    CheckConstraint("network_category IN ('public','private')", name="network_category_values"),
+    UniqueConstraint(
+        "canonical_sha256",
+        "network_policy_id",
+        "network_policy_version",
+        name="uq_model_endpoints_canonical_policy",
+    ),
+)
+
+model_profiles = Table(
+    "model_profiles",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("logical_role", Text, nullable=False, unique=True),
+    Column("profile_kind", Text, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'disabled'")),
+    Column("active_config_version_no", Integer),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    CheckConstraint(
+        "logical_role IN ('main_ai','memory_agent','proactive_agent','embedding')",
+        name="logical_role_values",
+    ),
+    CheckConstraint("profile_kind IN ('generation','embedding')", name="profile_kind_values"),
+    CheckConstraint("state IN ('disabled','active','blocked')", name="state_values"),
+    CheckConstraint("version >= 1", name="version_positive"),
+    CheckConstraint(
+        "(logical_role = 'embedding') = (profile_kind = 'embedding')",
+        name="role_matches_kind",
+    ),
+    CheckConstraint(
+        "(state = 'active' AND active_config_version_no IS NOT NULL) OR (state <> 'active')",
+        name="active_requires_config",
+    ),
+    UniqueConstraint("id", "logical_role", name="uq_model_profiles_id_role"),
+    UniqueConstraint("id", "profile_kind", name="uq_model_profiles_id_kind"),
+)
+
+model_credentials = Table(
+    "model_credentials",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column(
+        "profile_id",
+        UUID_TYPE,
+        ForeignKey("model_profiles.id", name="fk_model_credentials_profile_id_model_profiles"),
+        nullable=False,
+        unique=True,
+    ),
+    Column("status", Text, nullable=False, server_default=text("'missing'")),
+    Column("active_version_no", Integer),
+    Column("latest_version_no", Integer, nullable=False, server_default=text("0")),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    CheckConstraint("status IN ('missing','active','deleted')", name="status_values"),
+    CheckConstraint("version >= 1", name="version_positive"),
+    CheckConstraint("latest_version_no >= 0", name="latest_version_nonnegative"),
+    CheckConstraint(
+        "active_version_no IS NULL OR active_version_no <= latest_version_no",
+        name="active_not_after_latest",
+    ),
+    CheckConstraint(
+        "(status = 'active') = (active_version_no IS NOT NULL)",
+        name="active_version_matches_status",
+    ),
+    UniqueConstraint("id", "profile_id", name="uq_model_credentials_id_profile"),
+)
+
+model_credential_versions = Table(
+    "model_credential_versions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("credential_id", UUID_TYPE, nullable=False),
+    Column("profile_id", UUID_TYPE, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("algorithm", Text, nullable=False),
+    Column("key_version", Integer, nullable=False),
+    Column("aad_schema_version", SmallInteger, nullable=False),
+    Column("nonce", LargeBinary),
+    Column("ciphertext", LargeBinary),
+    Column("secret_fingerprint", LargeBinary),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("destroyed_at", UTC_TIMESTAMP),
+    Column("destroy_reason", Text),
+    ForeignKeyConstraint(
+        ["credential_id", "profile_id"],
+        ["model_credentials.id", "model_credentials.profile_id"],
+        name="fk_model_credential_versions_credential_scope",
+    ),
+    CheckConstraint("version_no >= 1", name="version_no_positive"),
+    CheckConstraint("key_version >= 1", name="key_version_positive"),
+    CheckConstraint("aad_schema_version >= 1", name="aad_version_positive"),
+    CheckConstraint("algorithm = 'aes_256_gcm'", name="algorithm_supported"),
+    CheckConstraint(
+        "(destroyed_at IS NULL AND destroy_reason IS NULL AND nonce IS NOT NULL AND "
+        "ciphertext IS NOT NULL AND secret_fingerprint IS NOT NULL) OR "
+        "(destroyed_at IS NOT NULL AND destroy_reason IS NOT NULL AND nonce IS NULL AND "
+        "ciphertext IS NULL AND secret_fingerprint IS NULL)",
+        name="destroy_is_one_way_redaction",
+    ),
+    CheckConstraint("nonce IS NULL OR octet_length(nonce) = 12", name="nonce_12_bytes"),
+    CheckConstraint(
+        "secret_fingerprint IS NULL OR octet_length(secret_fingerprint) = 32",
+        name="fingerprint_32_bytes",
+    ),
+    UniqueConstraint(
+        "credential_id", "version_no", name="uq_model_credential_versions_credential_no"
+    ),
+    UniqueConstraint(
+        "credential_id",
+        "profile_id",
+        "version_no",
+        name="uq_model_credential_versions_scope_no",
+    ),
+)
+
+model_credentials.append_constraint(
+    ForeignKeyConstraint(
+        [
+            model_credentials.c.id,
+            model_credentials.c.profile_id,
+            model_credentials.c.active_version_no,
+        ],
+        [
+            model_credential_versions.c.credential_id,
+            model_credential_versions.c.profile_id,
+            model_credential_versions.c.version_no,
+        ],
+        name="fk_model_credentials_active_version",
+        deferrable=True,
+        initially="DEFERRED",
+        use_alter=True,
+    )
+)
+
+model_capability_snapshots = Table(
+    "model_capability_snapshots",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("endpoint_id", UUID_TYPE, ForeignKey("model_endpoints.id"), nullable=False),
+    Column("protocol", Text, nullable=False),
+    Column("model_name", Text, nullable=False),
+    Column("supports_text", Boolean, nullable=False),
+    Column("supports_temperature", Boolean, nullable=False),
+    Column("supports_reasoning_effort", Boolean, nullable=False),
+    Column("supports_image", Boolean, nullable=False),
+    Column("supports_stream", Boolean, nullable=False),
+    Column("supports_structured_output", Boolean, nullable=False),
+    Column("chat_token_limit_field", Text),
+    Column("max_context_tokens", Integer, nullable=False),
+    Column("max_output_tokens_limit", Integer),
+    Column("supported_input_roles", JSONB, nullable=False),
+    Column("embedding_dimensions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("status", Text, nullable=False),
+    Column("metadata_schema_version", SmallInteger, nullable=False, server_default=text("1")),
+    Column("metadata", JSONB, nullable=False, server_default=EMPTY_JSON),
+    Column("observed_at", UTC_TIMESTAMP, nullable=False),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    CheckConstraint(
+        "protocol IN ('openai_responses','openai_chat_completions',"
+        "'anthropic_messages','embedding')",
+        name="protocol_values",
+    ),
+    CheckConstraint("status IN ('valid','invalid','unreachable')", name="status_values"),
+    CheckConstraint("expires_at > observed_at", name="expiry_after_observation"),
+    CheckConstraint("max_context_tokens > 0", name="max_context_tokens_positive"),
+    CheckConstraint(
+        "max_output_tokens_limit IS NULL OR max_output_tokens_limit > 0",
+        name="max_output_tokens_limit_positive",
+    ),
+    CheckConstraint(
+        "chat_token_limit_field IS NULL OR chat_token_limit_field IN "
+        "('max_completion_tokens','max_tokens')",
+        name="chat_token_limit_field_values",
+    ),
+)
+Index(
+    "ix_model_capability_snapshots_lookup",
+    model_capability_snapshots.c.endpoint_id,
+    model_capability_snapshots.c.protocol,
+    model_capability_snapshots.c.model_name,
+    model_capability_snapshots.c.observed_at.desc(),
+)
+
+model_config_versions = Table(
+    "model_config_versions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("profile_id", UUID_TYPE, nullable=False),
+    Column("profile_kind", Text, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("source_draft_id", UUID_TYPE),
+    Column("endpoint_id", UUID_TYPE, ForeignKey("model_endpoints.id"), nullable=False),
+    Column("credential_id", UUID_TYPE, nullable=False),
+    Column(
+        "capability_snapshot_id",
+        UUID_TYPE,
+        ForeignKey("model_capability_snapshots.id"),
+        nullable=False,
+    ),
+    Column("protocol", Text, nullable=False),
+    Column("model_name", Text, nullable=False),
+    Column("temperature", Numeric(5, 4)),
+    Column("max_output_tokens", Integer),
+    Column("timeout_seconds", Integer, nullable=False),
+    Column("enabled", Boolean, nullable=False),
+    Column(
+        "protocol_options_schema_version", SmallInteger, nullable=False, server_default=text("1")
+    ),
+    Column("protocol_options", JSONB, nullable=False, server_default=EMPTY_JSON),
+    Column("config_sha256", LargeBinary, nullable=False),
+    Column("created_by_admin_id", BigInteger, nullable=False),
+    Column("validated_at", UTC_TIMESTAMP, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["profile_id", "profile_kind"],
+        ["model_profiles.id", "model_profiles.profile_kind"],
+        name="fk_model_config_versions_profile_kind",
+    ),
+    ForeignKeyConstraint(
+        ["credential_id", "profile_id"],
+        ["model_credentials.id", "model_credentials.profile_id"],
+        name="fk_model_config_versions_credential_scope",
+    ),
+    CheckConstraint("version_no >= 1", name="version_no_positive"),
+    CheckConstraint(
+        "protocol IN ('openai_responses','openai_chat_completions',"
+        "'anthropic_messages','embedding')",
+        name="protocol_values",
+    ),
+    CheckConstraint("timeout_seconds BETWEEN 1 AND 600", name="timeout_range"),
+    CheckConstraint(
+        "temperature IS NULL OR (temperature >= 0 AND temperature <= 2)",
+        name="temperature_range",
+    ),
+    CheckConstraint(
+        "(profile_kind = 'generation' AND protocol <> 'embedding' AND "
+        "max_output_tokens IS NOT NULL AND max_output_tokens > 0) OR "
+        "(profile_kind = 'embedding' AND protocol = 'embedding' AND "
+        "temperature IS NULL AND max_output_tokens IS NULL)",
+        name="kind_matches_generation_fields",
+    ),
+    CheckConstraint("octet_length(config_sha256) = 32", name="config_hash_32_bytes"),
+    UniqueConstraint("profile_id", "version_no", name="uq_model_config_versions_profile_no"),
+    UniqueConstraint(
+        "profile_id", "version_no", "id", name="uq_model_config_versions_profile_no_id"
+    ),
+)
+
+model_profiles.append_constraint(
+    ForeignKeyConstraint(
+        [model_profiles.c.id, model_profiles.c.active_config_version_no],
+        [model_config_versions.c.profile_id, model_config_versions.c.version_no],
+        name="fk_model_profiles_active_config",
+        deferrable=True,
+        initially="DEFERRED",
+        use_alter=True,
+    )
+)
+
+model_config_drafts = Table(
+    "model_config_drafts",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("profile_id", UUID_TYPE, ForeignKey("model_profiles.id"), nullable=False),
+    Column("created_by_admin_id", BigInteger, nullable=False),
+    Column("expected_profile_version", BigInteger, nullable=False),
+    Column("draft_version", BigInteger, nullable=False, server_default=text("1")),
+    Column("state", Text, nullable=False, server_default=text("'editing'")),
+    Column("endpoint_id", UUID_TYPE, ForeignKey("model_endpoints.id")),
+    Column("credential_id", UUID_TYPE),
+    Column("protocol", Text),
+    Column("model_name", Text),
+    Column("temperature", Numeric(5, 4)),
+    Column("max_output_tokens", Integer),
+    Column("timeout_seconds", Integer),
+    Column("enabled", Boolean),
+    Column(
+        "protocol_options_schema_version", SmallInteger, nullable=False, server_default=text("1")
+    ),
+    Column("protocol_options", JSONB, nullable=False, server_default=EMPTY_JSON),
+    Column("capability_snapshot_id", UUID_TYPE, ForeignKey("model_capability_snapshots.id")),
+    Column("validation_error_code", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("consumed_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["credential_id", "profile_id"],
+        ["model_credentials.id", "model_credentials.profile_id"],
+        name="fk_model_config_drafts_credential_scope",
+    ),
+    CheckConstraint("expected_profile_version >= 1", name="expected_version_positive"),
+    CheckConstraint("draft_version >= 1", name="draft_version_positive"),
+    CheckConstraint(
+        "protocol IS NULL OR protocol IN ('openai_responses','openai_chat_completions',"
+        "'anthropic_messages','embedding')",
+        name="protocol_values",
+    ),
+    CheckConstraint(
+        "temperature IS NULL OR (temperature >= 0 AND temperature <= 2)",
+        name="temperature_range",
+    ),
+    CheckConstraint(
+        "max_output_tokens IS NULL OR max_output_tokens > 0",
+        name="max_output_tokens_positive",
+    ),
+    CheckConstraint(
+        "timeout_seconds IS NULL OR timeout_seconds BETWEEN 1 AND 600",
+        name="timeout_range",
+    ),
+    CheckConstraint(
+        "state IN ('editing','validated','activated','expired','cancelled','conflict')",
+        name="state_values",
+    ),
+    CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
+)
+Index(
+    "uq_model_config_drafts_open_profile_admin",
+    model_config_drafts.c.profile_id,
+    model_config_drafts.c.created_by_admin_id,
+    unique=True,
+    postgresql_where=model_config_drafts.c.state.in_(("editing", "validated")),
+)
+model_config_versions.append_constraint(
+    ForeignKeyConstraint(
+        [model_config_versions.c.source_draft_id],
+        [model_config_drafts.c.id],
+        name="fk_model_config_versions_source_draft",
+        use_alter=True,
+    )
+)
+
+prompt_versions = Table(
+    "prompt_versions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("logical_role", Text, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("template_sha256", LargeBinary, nullable=False),
+    Column("template_body", Text, nullable=False),
+    Column("created_by_admin_id", BigInteger, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    CheckConstraint(
+        "logical_role IN ('main_ai','memory_agent','proactive_agent')",
+        name="logical_role_values",
+    ),
+    CheckConstraint("version_no >= 1", name="version_no_positive"),
+    CheckConstraint("octet_length(template_sha256) = 32", name="template_hash_32_bytes"),
+    UniqueConstraint("logical_role", "version_no", name="uq_prompt_versions_role_no"),
+)
+
+control_input_sessions = Table(
+    "control_input_sessions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("admin_telegram_user_id", BigInteger, nullable=False),
+    Column("profile_id", UUID_TYPE, ForeignKey("model_profiles.id"), nullable=False),
+    Column("draft_id", UUID_TYPE, ForeignKey("model_config_drafts.id"), nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'active'")),
+    Column("expected_draft_version", BigInteger, nullable=False),
+    Column("pending_field", Text),
+    Column("session_nonce_hash", LargeBinary, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("consumed_at", UTC_TIMESTAMP),
+    CheckConstraint("state IN ('active','consumed','expired','cancelled')", name="state_values"),
+    CheckConstraint("expected_draft_version >= 1", name="draft_version_positive"),
+    CheckConstraint("octet_length(session_nonce_hash) = 32", name="nonce_hash_32_bytes"),
+    CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
+)
+Index(
+    "uq_control_input_sessions_active_admin",
+    control_input_sessions.c.admin_telegram_user_id,
+    unique=True,
+    postgresql_where=control_input_sessions.c.state == "active",
+)
+
+model_key_launch_sessions = Table(
+    "model_key_launch_sessions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("token_hash", LargeBinary, nullable=False, unique=True),
+    Column("admin_telegram_user_id", BigInteger, nullable=False),
+    Column("profile_id", UUID_TYPE, ForeignKey("model_profiles.id"), nullable=False),
+    Column("allowed_action", Text, nullable=False),
+    Column("deployment_version", BigInteger, nullable=False),
+    Column("expected_credential_version", BigInteger, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("consumed_at", UTC_TIMESTAMP),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    CheckConstraint("octet_length(token_hash) = 32", name="token_hash_32_bytes"),
+    CheckConstraint("allowed_action IN ('set','replace','delete')", name="action_values"),
+    CheckConstraint("deployment_version >= 1", name="deployment_version_positive"),
+    CheckConstraint("expected_credential_version >= 1", name="credential_version_positive"),
+    CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+    CheckConstraint("expires_at > created_at", name="expiry_after_creation"),
+)
+
+model_key_rate_limits = Table(
+    "model_key_rate_limits",
+    metadata,
+    Column("principal_hash", LargeBinary, primary_key=True),
+    Column("window_started_at", UTC_TIMESTAMP, nullable=False),
+    Column("attempt_count", Integer, nullable=False),
+    Column("blocked_until", UTC_TIMESTAMP),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    CheckConstraint("octet_length(principal_hash) = 32", name="principal_hash_32_bytes"),
+    CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+    CheckConstraint("version >= 1", name="version_positive"),
+)
+
+M2_TABLES = tuple(name for name in metadata.tables if name not in M1_TABLES)
