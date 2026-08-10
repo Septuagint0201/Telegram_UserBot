@@ -4,16 +4,16 @@
 
 ## 当前状态
 
-V1架构设计已经完成，M0工程脚手架已形成candidate并在Windows完成本地门禁。仓库现在包含Python package、hash lock、纯本地配置校验入口、synthetic测试和无secret GitLab CI，但仍没有Telegram/provider、PostgreSQL/Redis adapter、migration、Dockerfile、Compose部署或公开发布包。
+V1架构设计和M0工程脚手架已经完成，Windows本地门禁与GitLab Linux CI均已通过。仓库现在包含Python package、hash lock、纯本地配置校验入口、synthetic测试和无secret GitLab CI，但仍没有Telegram/provider、PostgreSQL/Redis adapter、migration、Dockerfile、Compose部署或公开发布包。
 
 因此：
 
 - 只能运行M0本地安全校验和测试，不能连接Telegram/provider、启动业务服务或部署本项目；
 - 文档中的最终服务与业务命令仍是实现契约，不是已经存在的入口；
-- Linux CI、database/Redis integration、live Telegram/provider、backup/restore和24小时soak仍为`NOT RUN`；
+- database/Redis integration、live Telegram/provider、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-下一步先让M0 candidate通过GitLab Linux CI并生成绑定签名commit的acceptance manifest，再关闭M0并进入[V1 Implementation Plan](docs/Implementation-Plan.md)的M1。
+下一步按[V1 Implementation Plan](docs/Implementation-Plan.md)进入M1，固定PostgreSQL、pgvector、Redis与测试容器兼容矩阵，并建立durable state基础。
 
 ## 架构摘要
 
@@ -103,7 +103,7 @@ data-export
 
 测试架构使用pytest、pytest-asyncio、Hypothesis、Testcontainers和Docker Compose，默认只使用synthetic fixture与fake Telegram/provider。真实Telegram只允许专用授权测试账号和allowlisted测试peer；真实provider smoke不能发送私人数据。
 
-M0 candidate在Windows/CPython 3.14.7的本地结果：56 tests `PASS`，line coverage 97.77%，branch coverage 90.32%；Ruff、strict mypy、compileall、import boundary、build artifact Disclosure和secret/artifact扫描均`PASS`。GitLab Linux CI在candidate推送前仍为`NOT RUN`。
+M0在Windows/CPython 3.14.7的本地结果：56 tests `PASS`，line coverage 97.77%，branch coverage 90.32%；Ruff、strict mypy、compileall、import boundary、build artifact Disclosure和secret/artifact扫描均`PASS`。签名提交`5e6f2b3512436a5ba70c958a42901b920ffa6caa`对应的[GitLab Linux pipeline #2](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747413992)及`m0-preflight`作业均为`PASS`；其acceptance manifest绑定相同commit/tree，并将M0-001—M0-012全部记录为`PASS`。
 
 常用本地门禁：
 

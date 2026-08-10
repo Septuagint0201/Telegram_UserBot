@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0已形成candidate并通过Windows本地门禁；M0 Linux CI与绑定candidate commit的acceptance artifact仍为`NOT RUN`，因此尚未关闭。M1—M9均未开始，所有外部服务、部署和live证据仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit的acceptance manifest并正式关闭。M1—M9尚未开始，所有外部服务、部署和live证据仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -65,7 +65,7 @@ deploy/
 
 | Milestone | 目标 | 允许的外部副作用 | 状态 |
 |---|---|---|---|
-| M0 | 工程脚手架与测试基础 | 无 | CANDIDATE — LOCAL PASS / LINUX CI NOT RUN |
+| M0 | 工程脚手架与测试基础 | 无 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | NOT STARTED |
 | M2 | 模型配置、adapter与key-only控制面 | 仅local fake | NOT STARTED |
 | M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | NOT STARTED |
@@ -110,14 +110,15 @@ deploy/
 - Production entrypoint不存在真实连接路径，默认运行不会发送网络请求。
 - CI artifact扫描无secret/正文；M0 evidence manifest绑定签名commit。
 
-### 5.5 Candidate证据
+### 5.5 完成证据
 
 - 标准GIL CPython 3.14，Windows本地patch为3.14.7；pip 25.3、Hatchling与全部工具由hash lock固定。
 - 全新隔离`.venv`按bootstrap/dev lock安装、editable package安装、`pip check`和import均`PASS`。
 - 56个unit/property/contract tests为`PASS`；line 97.77%，branch 90.32%。
 - Ruff format/lint、strict mypy、compileall、AST import boundary、wheel/sdist Disclosure和secret/artifact scan均`PASS`。
-- Telegram、provider、PostgreSQL、Redis、container、Linux CI和production evidence保持`NOT RUN`。
-- M0只有在candidate签名提交推送后的Linux CI与acceptance manifest均`PASS`后关闭。
+- 签名提交`5e6f2b3512436a5ba70c958a42901b920ffa6caa`的GitLab Linux pipeline #2与`m0-preflight`作业均为`PASS`，使用CPython 3.14.7。
+- GitLab acceptance manifest绑定相同commit和tree，M0-001—M0-012全部为`PASS`，且记录`external_service_access=false`。
+- Telegram、provider、PostgreSQL、Redis、应用container和production evidence保持`NOT RUN`。
 
 ## 6. M1 — Data Model、migration与durable work
 
@@ -430,4 +431,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0 candidate已经完成本地实现与验证。下一步是推送candidate、等待Linux CI和绑定该签名commit的acceptance manifest；通过后关闭`M0-012`并进入M1。外部服务、容器和部署尚不存在。
+M0已经完成本地与GitLab Linux验证，`M0-012`关闭。下一步从`M1-001`固定PostgreSQL、pgvector、Redis与testcontainer compatibility set开始；外部服务、应用容器和部署尚不存在。

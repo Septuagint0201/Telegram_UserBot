@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计已经完成，可以进入实现阶段；当前仓库仍没有可运行实现。所有开发任务均为未完成，所有 runtime、migration、recovery、performance 和 live smoke 证据均为 `NOT RUN`。
+架构设计与 M0 工程脚手架已经完成。当前仓库可安装、可运行纯本地安全校验并执行 synthetic 测试，但仍没有 Telegram/provider、数据库、Redis 或部署实现；相应 runtime、migration、recovery、performance 和 live smoke 证据仍为 `NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -39,8 +39,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 | Milestone | 范围 | 状态 | Runtime evidence |
 |---|---|---|---|
-| M0 | 工程脚手架与测试基础 | CANDIDATE | LOCAL PASS / LINUX CI NOT RUN |
-| M1 | PostgreSQL、Redis与 durable state | WAITING FOR M0 CLOSEOUT | NOT RUN |
+| M0 | 工程脚手架与测试基础 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
+| M1 | PostgreSQL、Redis与 durable state | READY | NOT RUN |
 | M2 | 模型配置、adapter与 key-only 控制面 | WAITING | NOT RUN |
 | M3 | Telegram ingest 与 outbound intent | WAITING | NOT RUN |
 | M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
@@ -76,13 +76,13 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 - [x] **M0-009 定义 acceptance manifest**（依赖：M0-003、M0-007）— 建立 requirement→test→artifact→commit schema、validator 和示例；验证缺失证据或未知状态会 fail closed。
 - [x] **M0-010 建立无 secret CI**（依赖：M0-005、M0-007、M0-009）— 配置 format、lint、type、unit、property、link、secret、artifact 扫描；CI 默认不访问 Telegram/provider 或公网 credential。
 - [x] **M0-011 建立仓库静态门禁**（依赖：M0-010）— 检查 Markdown link、Disclosure、private-key/API-key pattern、签名状态和生成 artifact；验证故意注入 sentinel 时 pipeline 失败。
-- [ ] **M0-012 关闭 M0**（依赖：M0-001—M0-011）— 汇总签名 commit、依赖锁、测试与 manifest 证据，更新 README 和 M1 启动条件；所有适用门禁为 `PASS` 才能关闭。
+- [x] **M0-012 关闭 M0**（依赖：M0-001—M0-011）— 汇总签名 commit、依赖锁、测试与 manifest 证据，更新 README 和 M1 启动条件；所有适用门禁为 `PASS` 才能关闭。
 
 ### M0 退出门禁
 
 - [x] clean checkout 可按hash lock确定性安装、import、lint、type-check和test（Windows/CPython 3.14.7）。
 - [x] fake-only测试证明默认入口不连接Telegram、provider、数据库或Redis，测试只允许asyncio所需loopback。
-- [ ] acceptance manifest 与安全扫描为 `PASS`；其他 runtime 证据仍明确为 `NOT RUN`。
+- [x] acceptance manifest 与安全扫描为 `PASS`；其他 runtime 证据仍明确为 `NOT RUN`。
 
 ## 6. M1 — PostgreSQL、Redis与 Durable State
 
@@ -304,7 +304,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 16. 必须在对应阶段确定的实现参数
 
-以下内容尚不妨碍开始 M0，但必须在截止 milestone 内记录为代码/manifest/ADR 中的精确值：
+以下内容必须在各自截止 milestone 内记录为代码、manifest 或 ADR 中的精确值：
 
 | 决策 | 截止点 |
 |---|---|
@@ -320,4 +320,4 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 17. 下一步
 
-推送M0 candidate并等待GitLab Linux preflight。只有该签名commit的acceptance manifest、coverage和artifact scan全部`PASS`后才能完成 **M0-012**；随后从 **M1-001** 固定PostgreSQL/pgvector/Redis compatibility set开始。真实Telegram、provider和自动发送仍禁止启用。
+M0已经关闭。下一步从 **M1-001** 固定PostgreSQL、pgvector、Redis与testcontainer compatibility set开始，再建立migration和durable state基础。真实Telegram、provider和自动发送仍禁止启用。
