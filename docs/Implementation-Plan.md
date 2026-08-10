@@ -4,6 +4,8 @@
 
 本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。它不是完成声明：当前仓库仍无可运行代码，全部milestone状态为`NOT STARTED`，全部runtime证据为`NOT RUN`。
 
+本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
+
 实现必须按依赖顺序推进。每个milestone只有在代码、migration、测试、文档和证据同时满足时才完成；不能先开放真实Telegram自动发送，再补幂等、mode gate或恢复测试。
 
 ## 2. 全局交付规则

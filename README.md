@@ -33,7 +33,7 @@ V1架构设计已经完成，尚未开始实现。仓库当前只有文档，没
 
 - [总体设计](docs/Design.md)
 - [V1 Implementation Plan](docs/Implementation-Plan.md)
-- [Architecture Documentation TODO](TODO.md)
+- [V1 Development TODO](TODO.md)
 - [Architecture Decision Records](docs/adr/README.md)
 - [Security and Dual-Use Disclosure](DISCLOSURE)
 
