@@ -35,3 +35,9 @@ def test_runtime_dependencies_and_python_are_pinned() -> None:
         "tzdata==2026.3",
     ]
     assert document["project"]["requires-python"] == ">=3.14,<3.15"
+
+
+@pytest.mark.unit
+def test_windows_only_lock_dependency_keeps_its_platform_marker() -> None:
+    lock = (ROOT / "requirements" / "dev.lock").read_text(encoding="utf-8")
+    assert 'pywin32==312 ; sys_platform == "win32" \\' in lock
