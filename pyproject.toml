@@ -1,0 +1,152 @@
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "telegram-personal-ai-digital-twin"
+version = "0.1.0.dev0"
+description = "Safety-first Telegram personal AI digital twin"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+authors = [
+  { name = "Septuagint" },
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "tzdata==2026.3",
+]
+
+[project.scripts]
+telegram-userbot-check = "telegram_userbot.processes.bootstrap:main"
+
+[tool.hatch.build]
+include = [
+  "src/telegram_userbot",
+  "README.md",
+  "DISCLOSURE",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/scripts",
+  "/schemas",
+  "/requirements",
+  "/pyproject.toml",
+  "/README.md",
+  "/DISCLOSURE",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/telegram_userbot"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"DISCLOSURE" = "telegram_userbot/DISCLOSURE"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+src = ["src", "scripts", "tests"]
+
+[tool.ruff.format]
+docstring-code-format = true
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = [
+  "A",
+  "ASYNC",
+  "B",
+  "C4",
+  "DTZ",
+  "E",
+  "F",
+  "FA",
+  "FLY",
+  "FURB",
+  "I",
+  "ICN",
+  "LOG",
+  "N",
+  "PERF",
+  "PIE",
+  "PL",
+  "PT",
+  "PTH",
+  "RET",
+  "RUF",
+  "S",
+  "SIM",
+  "T10",
+  "TRY",
+  "UP",
+  "W",
+]
+ignore = [
+  "PLR2004",
+  "S101",
+  "TRY003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ARG", "S101"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unreachable = true
+pretty = true
+show_error_codes = true
+files = ["src", "scripts", "tests"]
+
+[tool.pytest.ini_options]
+minversion = "9.1"
+testpaths = ["tests"]
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--cov=telegram_userbot",
+  "--cov-branch",
+  "--cov-report=term-missing",
+  "--cov-report=json:.artifacts/coverage.json",
+  "--cov-fail-under=85",
+  "-m",
+  "not integration and not recovery and not soak and not live and not requires_secret",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "unit: isolated unit test",
+  "property: generated property test",
+  "contract: port or wire contract test",
+  "integration: disposable external dependency test",
+  "recovery: crash or restore test",
+  "soak: long-running resource test",
+  "live: authorized live service test",
+  "requires_secret: protected test requiring a scoped credential",
+]
+
+[tool.coverage.run]
+branch = true
+parallel = false
+source = ["telegram_userbot"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = false
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  '\.\.\.',
+]
+
+[tool.coverage.json]
+output = ".artifacts/coverage.json"
+pretty_print = true

@@ -1,0 +1,49 @@
+default:
+  image: "python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2"
+  interruptible: true
+
+stages:
+  - preflight
+
+variables:
+  CI_DEBUG_TRACE: "false"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_INPUT: "1"
+  PYTHONHASHSEED: "0"
+
+m0-preflight:
+  stage: preflight
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  before_script:
+    - python --version
+    - python -m venv .venv
+    - .venv/bin/python -m pip install --require-hashes -r requirements/bootstrap.lock
+    - .venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+    - .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+  script:
+    - .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
+    - .venv/bin/ruff format --check .
+    - .venv/bin/ruff check .
+    - .venv/bin/mypy
+    - .venv/bin/python scripts/check_import_boundaries.py
+    - .venv/bin/python -m build --no-isolation --outdir .artifacts/dist
+    - .venv/bin/python scripts/inspect_build_artifacts.py .artifacts/dist
+    - .venv/bin/pytest --junitxml=.artifacts/junit.xml --cov-report=xml:.artifacts/coverage.xml
+    - .venv/bin/python scripts/check_coverage.py .artifacts/coverage.json
+    - .venv/bin/python scripts/write_acceptance_manifest.py --commit "$CI_COMMIT_SHA" --output .artifacts/m0/acceptance-manifest.json
+    - .venv/bin/python scripts/validate_acceptance_manifest.py .artifacts/m0/acceptance-manifest.json
+    - .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts
+  artifacts:
+    when: on_success
+    expire_in: 30 days
+    reports:
+      junit: .artifacts/junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: .artifacts/coverage.xml
+    paths:
+      - .artifacts/coverage.json
+      - .artifacts/m0/acceptance-manifest.json
+      - DISCLOSURE

@@ -1,0 +1,15 @@
+-r runtime.in
+
+build==1.5.0
+coverage==7.15.4
+editables==0.6
+hatchling==1.31.0
+hypothesis==6.165.2
+import-linter==2.13
+jsonschema==4.26.0
+mypy==2.3.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+ruff==0.16.2
+types-jsonschema==4.26.0.20260518

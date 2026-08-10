@@ -6,9 +6,9 @@
 - Public source target: `https://gitlab.com/Septuagintks/telegram_userbot`
 - Maintainer: GitLab user `Septuagintks`
 - Review date: 2026-08-10 (Asia/Shanghai)
-- Current artifact status: architecture and design documentation only
+- Current artifact status: M0 Python/test/CI scaffold; no external-service adapter or deployment
 
-The repository currently contains no runnable implementation, container image, package, binary, deployment, or release artifact. The capabilities below describe the system being designed and must not be interpreted as completed or independently audited safeguards.
+The repository now contains a pre-alpha M0 Python package, hash-locked development toolchain, synthetic tests, repository/build scanners, a GitLab preflight job, and a local configuration-validation command. It contains no Telegram, model-provider, PostgreSQL, Redis, backup, Web App, container, or deployment implementation. The capabilities below remain planned system behavior and must not be interpreted as completed or independently audited safeguards.
 
 ## Security-sensitive and dual-use capabilities
 
@@ -75,7 +75,22 @@ Canonical messages and active memories do not automatically expire by default. V
 
 PostgreSQL backup is designed to use continuous WAL archiving, daily differential backups, weekly full backups, and approximately four weeks of encrypted off-host retention. The Telethon Session is designed to be backed up daily and before upgrades into a separate encrypted repository with seven-day retention. The credential master key, database backup credentials, Session backup credentials, diagnostic key, and erasure-ledger key are separated. Restoration must overlay the latest independent erasure ledger and remain in bootstrap maintenance until schema, credentials, Session authorization, and unknown Telegram sends are reconciled. The 15-minute database RPO and two-hour whole-host RTO are unverified targets until restore drills provide evidence.
 
-The current documentation itself performs no collection, network request, telemetry, persistence, backup, or code execution. The V1 design sends no product analytics or vendor telemetry; operational metrics remain private, while configured alert destinations receive only content-free status metadata.
+The current M0 command only parses an allowlisted local configuration, rejects credential-like keys and every external-integration flag, emits allowlisted JSON status metadata, and exits. M0 tests deny non-loopback network access; loopback is allowed only because the Windows asyncio event loop requires an internal socket pair. The current implementation performs no Telegram/provider request, telemetry, database/Redis access, user-data persistence, backup, or automated message action. The V1 design sends no product analytics or vendor telemetry; operational metrics remain private, while configured alert destinations would receive only content-free status metadata.
+
+## Implemented M0 safeguards
+
+The M0 scaffold currently implements and tests:
+
+- typed opaque identifiers, UTC/monotonic time, revisions, versions, explicit result/evidence states, stable hashing, and redacted-value wrappers;
+- framework-neutral Clock, Random, ID, transaction, queue, Telegram, generation, and embedding ports, with deterministic fakes only;
+- a configuration allowlist that rejects credential-like keys, placeholder instance identifiers, unknown project keys, and all external integration enablement;
+- allowlist-only structured logging that rejects content/secret fields, wrapped sensitive values, and test sentinels without echoing rejected values;
+- deterministic synthetic fixtures, virtual time/randomness, a replayable state-machine harness, strict pytest markers, and non-loopback network denial;
+- hash-locked bootstrap/runtime/development/lock-generation dependency sets and a pinned official CPython CI image digest;
+- strict format, lint, typing, import-boundary, coverage, Markdown-link, Disclosure, private-path, secret, build-content, and signed-commit-presence gates; and
+- an acceptance-manifest schema and generator that bind content-free evidence to a clean signed commit, source tree, lock hashes, and the canonical Disclosure.
+
+These controls only establish the M0 engineering boundary. They do not implement or validate any Telegram, provider, persistence, encryption, backup, orchestration, memory, context, proactive, container, or production safeguard described below.
 
 The planned automated test suite uses deterministic synthetic fixtures, fake Telegram/provider services, disposable PostgreSQL/Redis containers, and content-free evidence by default. Production databases, real private conversations, personal Telegram accounts, and production Sessions are prohibited as test inputs. Real Telegram and Web App smoke tests are limited to an authorized dedicated staging account, Bot, and allowlisted test peers on an isolated host. Real provider smoke tests use fixed non-private text and test images with small limits. Ordinary and fork CI jobs receive no Telegram, provider, backup, or publication credentials; protected container, recovery, and soak work uses dedicated Ubuntu runners, while the real Telegram Session remains outside general CI. Routine sanitized test evidence is designed for 30-day retention and release, live, restore, and soak evidence for 365 days.
 

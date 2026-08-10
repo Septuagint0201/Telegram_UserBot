@@ -39,8 +39,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 | Milestone | 范围 | 状态 | Runtime evidence |
 |---|---|---|---|
-| M0 | 工程脚手架与测试基础 | READY | NOT RUN |
-| M1 | PostgreSQL、Redis与 durable state | WAITING | NOT RUN |
+| M0 | 工程脚手架与测试基础 | CANDIDATE | LOCAL PASS / LINUX CI NOT RUN |
+| M1 | PostgreSQL、Redis与 durable state | WAITING FOR M0 CLOSEOUT | NOT RUN |
 | M2 | 模型配置、adapter与 key-only 控制面 | WAITING | NOT RUN |
 | M3 | Telegram ingest 与 outbound intent | WAITING | NOT RUN |
 | M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
@@ -65,23 +65,23 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 目标：建立可安装、可测试、可静态检查且默认没有真实外部副作用的 Python 工程。
 
-- [ ] **M0-001 固定 Python 与构建元数据**（依赖：无）— 选择并固定 CPython minor、构建 backend、runtime/dev lockfile 和升级策略；验证 clean environment 可重复安装且锁文件 hash 一致。
-- [ ] **M0-002 建立 source package 与依赖边界**（依赖：M0-001）— 创建 `src/telegram_userbot` 分层目录、process entrypoint skeleton 和 import rule；验证 domain 不导入 Telethon、Bot framework、SQLAlchemy、Redis client 或 provider SDK。
-- [ ] **M0-003 定义共享核心类型**（依赖：M0-002）— 实现强类型 ID、UTC timestamp、monotonic deadline、revision/version、result/error 与 redaction 类型；用 property test 覆盖序列化、时区和非法值。
-- [ ] **M0-004 定义 application ports**（依赖：M0-003）— 定义 Clock、RandomSource、IdFactory、UnitOfWork、Queue、TelegramGateway、ModelGateway、EmbeddingGateway 接口；提供 deterministic fake contract test。
-- [ ] **M0-005 建立安全结构化日志**（依赖：M0-003）— 实现字段 allowlist、correlation ID、正文/secret 拒绝和 sentinel scanner；验证异常链、测试输出和 CI artifact 不泄露 sentinel。
-- [ ] **M0-006 建立 typed configuration**（依赖：M0-003）— 定义环境分层、safe default、placeholder/default-secret 拒绝和 production startup validation skeleton；M0 不接受真实 credential。
-- [ ] **M0-007 建立测试工具链**（依赖：M0-001）— 配置 pytest、async test、Hypothesis、coverage、unit/contract/integration/recovery/soak markers；验证 marker 隔离与固定随机种子重放。
-- [ ] **M0-008 建立 synthetic fixture 与状态机 harness**（依赖：M0-004、M0-007）— 提供 account、peer、message、clock、provider、Telegram fixture factory；验证 fixture 不含真实标识且并发调度可复现。
-- [ ] **M0-009 定义 acceptance manifest**（依赖：M0-003、M0-007）— 建立 requirement→test→artifact→commit schema、validator 和示例；验证缺失证据或未知状态会 fail closed。
-- [ ] **M0-010 建立无 secret CI**（依赖：M0-005、M0-007、M0-009）— 配置 format、lint、type、unit、property、link、secret、artifact 扫描；CI 默认不访问 Telegram/provider 或公网 credential。
-- [ ] **M0-011 建立仓库静态门禁**（依赖：M0-010）— 检查 Markdown link、Disclosure、private-key/API-key pattern、签名状态和生成 artifact；验证故意注入 sentinel 时 pipeline 失败。
+- [x] **M0-001 固定 Python 与构建元数据**（依赖：无）— 选择并固定 CPython minor、构建 backend、runtime/dev lockfile 和升级策略；验证 clean environment 可重复安装且锁文件 hash 一致。
+- [x] **M0-002 建立 source package 与依赖边界**（依赖：M0-001）— 创建 `src/telegram_userbot` 分层目录、process entrypoint skeleton 和 import rule；验证 domain 不导入 Telethon、Bot framework、SQLAlchemy、Redis client 或 provider SDK。
+- [x] **M0-003 定义共享核心类型**（依赖：M0-002）— 实现强类型 ID、UTC timestamp、monotonic deadline、revision/version、result/error 与 redaction 类型；用 property test 覆盖序列化、时区和非法值。
+- [x] **M0-004 定义 application ports**（依赖：M0-003）— 定义 Clock、RandomSource、IdFactory、UnitOfWork、Queue、TelegramGateway、ModelGateway、EmbeddingGateway 接口；提供 deterministic fake contract test。
+- [x] **M0-005 建立安全结构化日志**（依赖：M0-003）— 实现字段 allowlist、correlation ID、正文/secret 拒绝和 sentinel scanner；验证异常链、测试输出和 CI artifact 不泄露 sentinel。
+- [x] **M0-006 建立 typed configuration**（依赖：M0-003）— 定义环境分层、safe default、placeholder/default-secret 拒绝和 production startup validation skeleton；M0 不接受真实 credential。
+- [x] **M0-007 建立测试工具链**（依赖：M0-001）— 配置 pytest、async test、Hypothesis、coverage、unit/contract/integration/recovery/soak markers；验证 marker 隔离与固定随机种子重放。
+- [x] **M0-008 建立 synthetic fixture 与状态机 harness**（依赖：M0-004、M0-007）— 提供 account、peer、message、clock、provider、Telegram fixture factory；验证 fixture 不含真实标识且并发调度可复现。
+- [x] **M0-009 定义 acceptance manifest**（依赖：M0-003、M0-007）— 建立 requirement→test→artifact→commit schema、validator 和示例；验证缺失证据或未知状态会 fail closed。
+- [x] **M0-010 建立无 secret CI**（依赖：M0-005、M0-007、M0-009）— 配置 format、lint、type、unit、property、link、secret、artifact 扫描；CI 默认不访问 Telegram/provider 或公网 credential。
+- [x] **M0-011 建立仓库静态门禁**（依赖：M0-010）— 检查 Markdown link、Disclosure、private-key/API-key pattern、签名状态和生成 artifact；验证故意注入 sentinel 时 pipeline 失败。
 - [ ] **M0-012 关闭 M0**（依赖：M0-001—M0-011）— 汇总签名 commit、依赖锁、测试与 manifest 证据，更新 README 和 M1 启动条件；所有适用门禁为 `PASS` 才能关闭。
 
 ### M0 退出门禁
 
-- [ ] clean checkout 可离线或按锁文件确定性安装、import、lint、type-check 和 test。
-- [ ] fake-only 测试证明没有 Telegram、provider、数据库或 Redis 真实连接。
+- [x] clean checkout 可按hash lock确定性安装、import、lint、type-check和test（Windows/CPython 3.14.7）。
+- [x] fake-only测试证明默认入口不连接Telegram、provider、数据库或Redis，测试只允许asyncio所需loopback。
 - [ ] acceptance manifest 与安全扫描为 `PASS`；其他 runtime 证据仍明确为 `NOT RUN`。
 
 ## 6. M1 — PostgreSQL、Redis与 Durable State
@@ -320,4 +320,4 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 17. 下一步
 
-从 **M0-001** 开始：先固定 CPython 与构建/依赖策略，再建立 package layout。当前不能勾选任何实现或 runtime evidence；第一批代码只允许 fake/synthetic 路径，不启用真实 Telegram、provider 或自动发送。
+推送M0 candidate并等待GitLab Linux preflight。只有该签名commit的acceptance manifest、coverage和artifact scan全部`PASS`后才能完成 **M0-012**；随后从 **M1-001** 固定PostgreSQL/pgvector/Redis compatibility set开始。真实Telegram、provider和自动发送仍禁止启用。

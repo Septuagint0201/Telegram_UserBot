@@ -4,16 +4,16 @@
 
 ## 当前状态
 
-V1架构设计已经完成，尚未开始实现。仓库当前只有文档，没有Python package、dependency lock、Dockerfile、Compose manifest、migration、测试代码、可执行入口、镜像或发布包。
+V1架构设计已经完成，M0工程脚手架已形成candidate并在Windows完成本地门禁。仓库现在包含Python package、hash lock、纯本地配置校验入口、synthetic测试和无secret GitLab CI，但仍没有Telegram/provider、PostgreSQL/Redis adapter、migration、Dockerfile、Compose部署或公开发布包。
 
 因此：
 
-- 不能运行或部署本项目；
-- 文档中的命令、服务和配置都是实现契约，不是已经存在的入口；
-- runtime、integration、live Telegram/provider、backup/restore和24小时soak均为`NOT RUN`；
+- 只能运行M0本地安全校验和测试，不能连接Telegram/provider、启动业务服务或部署本项目；
+- 文档中的最终服务与业务命令仍是实现契约，不是已经存在的入口；
+- Linux CI、database/Redis integration、live Telegram/provider、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-下一步从[V1 Implementation Plan](docs/Implementation-Plan.md)的M0工程脚手架开始。
+下一步先让M0 candidate通过GitLab Linux CI并生成绑定签名commit的acceptance manifest，再关闭M0并进入[V1 Implementation Plan](docs/Implementation-Plan.md)的M1。
 
 ## 架构摘要
 
@@ -49,7 +49,7 @@ V1架构设计已经完成，尚未开始实现。仓库当前只有文档，没
 8. [Operations](docs/architecture/08-operations.md)
 9. [Test Strategy](docs/architecture/09-test-strategy.md)
 
-## 计划中的开发环境
+## 开发环境
 
 生产支持面已经固定为：
 
@@ -60,9 +60,26 @@ Docker Engine + Compose v2
 2 vCPU / 4 GiB RAM / 40 GiB SSD
 ```
 
-CPython、PostgreSQL/pgvector、Redis、Caddy和依赖的精确版本将在M0/M1用compatibility test固定。Windows可以运行unit/contract和可选Docker integration，但不能替代Ubuntu生产证据。
+M0固定标准GIL CPython 3.14（当前patch为3.14.7）、pip 25.3和`pyproject.toml`中的构建/检查工具；runtime/dev/lock工具使用独立hash lock。跨平台IANA时区数据固定为`tzdata==2026.3`。PostgreSQL/pgvector与Redis的精确版本留在M1，Caddy与production image留在M8。Windows unit/property/contract不能替代Linux CI或Ubuntu生产证据。
 
-当前没有`requirements`、`pyproject.toml`或`.venv`安装流程。实现这些文件之前，请不要根据文档自行猜测依赖或创建生产部署。
+Windows PowerShell的可重复开发安装：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements/bootstrap.lock
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements/dev.lock
+.\.venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation -e .
+```
+
+Ubuntu/Linux把解释器路径替换为`.venv/bin/python`。不要跳过hash校验或把真实credential放入开发环境。
+
+M0安全入口只验证配置并输出allowlist JSON日志：
+
+```powershell
+.\.venv\Scripts\telegram-userbot-check.exe
+```
+
+M0外部集成开关必须全部为false；该入口没有网络、数据库、Redis或Telegram连接实现。
 
 ## 计划中的运行入口
 
@@ -80,11 +97,23 @@ session-backup
 data-export
 ```
 
-这些入口目前尚未实现。未来运行命令必须随实际Compose文件、migration和runbook一起加入README，并经过Test Strategy与Disclosure审查。
+这些业务入口目前尚未实现。未来运行命令必须随实际Compose文件、migration和runbook一起加入README，并经过Test Strategy与Disclosure审查。
 
 ## 测试与证据
 
 测试架构使用pytest、pytest-asyncio、Hypothesis、Testcontainers和Docker Compose，默认只使用synthetic fixture与fake Telegram/provider。真实Telegram只允许专用授权测试账号和allowlisted测试peer；真实provider smoke不能发送私人数据。
+
+M0 candidate在Windows/CPython 3.14.7的本地结果：56 tests `PASS`，line coverage 97.77%，branch coverage 90.32%；Ruff、strict mypy、compileall、import boundary、build artifact Disclosure和secret/artifact扫描均`PASS`。GitLab Linux CI在candidate推送前仍为`NOT RUN`。
+
+常用本地门禁：
+
+```powershell
+.\.venv\Scripts\ruff.exe format --check .
+.\.venv\Scripts\ruff.exe check .
+.\.venv\Scripts\mypy.exe
+.\.venv\Scripts\python.exe scripts/check_import_boundaries.py
+.\.venv\Scripts\pytest.exe
+```
 
 证据状态严格区分：
 
