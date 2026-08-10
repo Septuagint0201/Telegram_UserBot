@@ -274,7 +274,7 @@ async def test_message_redaction_hides_content_and_rejects_unknown_reason() -> N
         {"message_id": str(message_id)},
         NOW,
     )
-    sql_session, _ = session(
+    sql_session, fake = session(
         execute_results=[
             FakeResult(rowcount=2),
             FakeResult(rowcount=1),
@@ -319,6 +319,8 @@ async def test_message_redaction_hides_content_and_rejects_unknown_reason() -> N
         )
         == 2
     )
+    redaction_sql = str(fake.statements[0])
+    assert "entities=NULL" in redaction_sql.replace(" ", "")
     assert await repository.visible_current_text(account_id=account_id, message_id=message_id) == (
         "hello",
         None,

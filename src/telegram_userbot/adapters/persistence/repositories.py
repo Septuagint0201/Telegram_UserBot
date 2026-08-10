@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import RowMapping, and_, case, insert, select, update
+from sqlalchemy import RowMapping, and_, case, insert, null, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -439,7 +439,7 @@ class MessageRedactionRepository:
                 .values(
                     text_content=None,
                     caption=None,
-                    entities=None,
+                    entities=null(),
                     content_sha256=None,
                     redacted_at=now,
                     redaction_reason=reason,
