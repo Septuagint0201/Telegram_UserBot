@@ -26,5 +26,12 @@ def test_pytest_policy_is_strict_and_deselects_sensitive_suites() -> None:
 @pytest.mark.unit
 def test_runtime_dependencies_and_python_are_pinned() -> None:
     document = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert document["project"]["dependencies"] == ["tzdata==2026.3"]
+    assert document["project"]["dependencies"] == [
+        "SQLAlchemy==2.0.51",
+        "alembic==1.19.1",
+        "arq==0.28.0",
+        "psycopg[binary]==3.3.4",
+        "redis==5.3.1",
+        "tzdata==2026.3",
+    ]
     assert document["project"]["requires-python"] == ">=3.14,<3.15"

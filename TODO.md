@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与 M0 工程脚手架已经完成。当前仓库可安装、可运行纯本地安全校验并执行 synthetic 测试，但仍没有 Telegram/provider、数据库、Redis 或部署实现；相应 runtime、migration、recovery、performance 和 live smoke 证据仍为 `NOT RUN`。
+架构设计与 M0 已经完成。M1 durable-state 候选已实现 PostgreSQL/pgvector、Redis/arq、Alembic、repository/UoW、CAS/lease/outbox 和 one-way redaction；Windows static/unit 门禁通过，真实服务 integration 等待签名候选的 GitLab Linux 证据。Telegram/provider、应用容器、生产部署、backup/restore、production performance 和 live smoke 仍为 `NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -40,7 +40,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | Milestone | 范围 | 状态 | Runtime evidence |
 |---|---|---|---|
 | M0 | 工程脚手架与测试基础 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
-| M1 | PostgreSQL、Redis与 durable state | READY | NOT RUN |
+| M1 | PostgreSQL、Redis与 durable state | CANDIDATE — CI PENDING | WINDOWS STATIC/UNIT PASS; SERVICE INTEGRATION NOT RUN |
 | M2 | 模型配置、adapter与 key-only 控制面 | WAITING | NOT RUN |
 | M3 | Telegram ingest 与 outbound intent | WAITING | NOT RUN |
 | M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
@@ -320,4 +320,4 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 17. 下一步
 
-M0已经关闭。下一步从 **M1-001** 固定PostgreSQL、pgvector、Redis与testcontainer compatibility set开始，再建立migration和durable state基础。真实Telegram、provider和自动发送仍禁止启用。
+M0已经关闭，M1候选代码已经落地。下一步运行签名候选的GitLab PostgreSQL/Redis integration；只有M1-001—M1-011的真实服务证据与manifest全部`PASS`后才关闭M1-012。真实Telegram、provider和自动发送仍禁止启用。

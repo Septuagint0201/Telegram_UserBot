@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit的acceptance manifest并正式关闭。M1—M9尚未开始，所有外部服务、部署和live证据仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit的acceptance manifest并正式关闭。M1代码候选已完成Windows静态/unit门禁，真实PostgreSQL/Redis integration等待签名候选的GitLab Linux证据；M2—M9尚未开始，Telegram/provider、部署和live证据仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -66,7 +66,7 @@ deploy/
 | Milestone | 目标 | 允许的外部副作用 | 状态 |
 |---|---|---|---|
 | M0 | 工程脚手架与测试基础 | 无 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | NOT STARTED |
+| M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | CANDIDATE — CI PENDING |
 | M2 | 模型配置、adapter与key-only控制面 | 仅local fake | NOT STARTED |
 | M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | NOT STARTED |
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | NOT STARTED |
@@ -431,4 +431,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0已经完成本地与GitLab Linux验证，`M0-012`关闭。下一步从`M1-001`固定PostgreSQL、pgvector、Redis与testcontainer compatibility set开始；外部服务、应用容器和部署尚不存在。
+M0已经关闭。M1-001—M1-011的代码、migration、角色、测试与CI候选已经落地，本地Windows static/unit门禁通过，但真实PostgreSQL/Redis证据仍为`NOT RUN`。下一步提交签名M1候选并运行GitLab digest-pinned integration；只有migration manifest、M1 acceptance manifest与全部job为`PASS`后才更新`M1-012`、关闭M1并进入M2。Telegram/provider、应用容器和部署仍不存在。

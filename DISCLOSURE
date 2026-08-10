@@ -6,9 +6,9 @@
 - Public source target: `https://gitlab.com/Septuagintks/telegram_userbot`
 - Maintainer: GitLab user `Septuagintks`
 - Review date: 2026-08-10 (Asia/Shanghai)
-- Current artifact status: M0 Python/test/CI scaffold; no external-service adapter or deployment
+- Current artifact status: M1 durable-state candidate; no Telegram/model-provider adapter or deployment
 
-The repository now contains a pre-alpha M0 Python package, hash-locked development toolchain, synthetic tests, repository/build scanners, a GitLab preflight job, and a local configuration-validation command. It contains no Telegram, model-provider, PostgreSQL, Redis, backup, Web App, container, or deployment implementation. The capabilities below remain planned system behavior and must not be interpreted as completed or independently audited safeguards.
+The repository now contains a pre-alpha Python package, hash-locked development toolchain, synthetic tests, repository/build scanners, a local configuration-validation command, an Alembic PostgreSQL/pgvector baseline, SQLAlchemy durable-state repositories, one-way message-redaction primitives, PostgreSQL job/outbox/lease recovery, a content-free Redis/arq wake-up adapter, least-privilege role SQL, and a GitLab disposable PostgreSQL/Redis integration job. It contains no Telegram Session access, Telegram or model-provider adapter, credential storage, backup implementation, Web App, application container, Compose deployment, or automated message action. M1's real-service claims remain a candidate until the exact signed commit passes GitLab integration; the broader capabilities below remain planned system behavior and must not be interpreted as completed or independently audited safeguards.
 
 ## Security-sensitive and dual-use capabilities
 
@@ -45,7 +45,7 @@ The project is not intended for:
 - bypassing Telegram controls, account restrictions, or provider safeguards; or
 - accessing systems, accounts, or data without authorization.
 
-## Planned data and network behavior
+## Implemented and planned data and network behavior
 
 The design currently specifies:
 
@@ -75,9 +75,9 @@ Canonical messages and active memories do not automatically expire by default. V
 
 PostgreSQL backup is designed to use continuous WAL archiving, daily differential backups, weekly full backups, and approximately four weeks of encrypted off-host retention. The Telethon Session is designed to be backed up daily and before upgrades into a separate encrypted repository with seven-day retention. The credential master key, database backup credentials, Session backup credentials, diagnostic key, and erasure-ledger key are separated. Restoration must overlay the latest independent erasure ledger and remain in bootstrap maintenance until schema, credentials, Session authorization, and unknown Telegram sends are reconciled. The 15-minute database RPO and two-hour whole-host RTO are unverified targets until restore drills provide evidence.
 
-The current M0 command only parses an allowlisted local configuration, rejects credential-like keys and every external-integration flag, emits allowlisted JSON status metadata, and exits. M0 tests deny non-loopback network access; loopback is allowed only because the Windows asyncio event loop requires an internal socket pair. The current implementation performs no Telegram/provider request, telemetry, database/Redis access, user-data persistence, backup, or automated message action. The V1 design sends no product analytics or vendor telemetry; operational metrics remain private, while configured alert destinations would receive only content-free status metadata.
+The existing local command still only parses an allowlisted local configuration, rejects credential-like keys and every external-integration flag, emits allowlisted JSON status metadata, and exits. Default tests deny non-loopback network access; loopback is allowed only because the Windows asyncio event loop requires an internal socket pair. M1 database/Redis modules run only when explicitly invoked with a PostgreSQL DSN and Redis URL; public CI supplies disposable passwordless synthetic services and no Telegram/provider/publication credential. The implementation performs no Telegram/provider request, telemetry, backup, credential operation, or automated message action. The V1 design sends no product analytics or vendor telemetry; operational metrics remain private, while configured alert destinations would receive only content-free status metadata.
 
-## Implemented M0 safeguards
+## Implemented safeguards through the M1 candidate
 
 The M0 scaffold currently implements and tests:
 
@@ -90,11 +90,21 @@ The M0 scaffold currently implements and tests:
 - strict format, lint, typing, import-boundary, coverage, Markdown-link, Disclosure, private-path, secret, build-content, and signed-commit-presence gates; and
 - an acceptance-manifest schema and generator that bind content-free evidence to a clean signed commit, source tree, lock hashes, and the canonical Disclosure.
 
-These controls only establish the M0 engineering boundary. They do not implement or validate any Telegram, provider, persistence, encryption, backup, orchestration, memory, context, proactive, container, or production safeguard described below.
+The M1 candidate additionally implements and tests:
+
+- a digest-pinned PostgreSQL 17.10/pgvector 0.8.6 and Redis 8.2.8 compatibility set, with hash-locked SQLAlchemy, Alembic, psycopg, arq, redis-py, and Testcontainers clients;
+- an explicit Alembic baseline for account/peer/conversation, message event/revision/media, mode/control/turn, durable job/outbox, audit, erasure, and migration-progress tables, using named constraints, composite account-scope foreign keys, UUIDv7 entity IDs, and monotonic event identities;
+- explicit `READ COMMITTED` transaction boundaries, repository/UoW detachment, conversation version CAS, PostgreSQL advisory locks, `FOR UPDATE SKIP LOCKED` job claims, owner/fencing-token lease completion, and expired-owner recovery;
+- a PostgreSQL transactional outbox and content-free Redis/arq notification format containing only job ID and dispatch generation, with duplicate notification IDs and PostgreSQL rebuild after Redis loss;
+- a database CHECK plus trigger enforcing immutable message revisions except one-way content-free redaction, a normal query path that excludes tombstones/redacted revisions, resumable erasure progress, and a content-free HMAC ledger schema;
+- separate migrator, app, control, worker, backup, and maintenance role grants, including runtime denial of audit update/delete; and
+- synthetic unit/integration tests and machine-readable migration/acceptance manifests for migration round trips, constraints, CAS/lease/fencing, Redis loss, role denial, redaction, interrupted progress, and synthetic EXPLAIN eligibility.
+
+These controls establish the M1 durable-state boundary. They do not implement or validate Telegram/provider access, credential encryption, physical media lifecycle, backup/restore, full orchestration, memory/context/proactive behavior, application containers, production deployment, production load, or Ubuntu recovery safeguards described below. PostgreSQL/Redis integration is not `PASS` until the exact signed candidate completes GitLab Linux CI.
 
 The planned automated test suite uses deterministic synthetic fixtures, fake Telegram/provider services, disposable PostgreSQL/Redis containers, and content-free evidence by default. Production databases, real private conversations, personal Telegram accounts, and production Sessions are prohibited as test inputs. Real Telegram and Web App smoke tests are limited to an authorized dedicated staging account, Bot, and allowlisted test peers on an isolated host. Real provider smoke tests use fixed non-private text and test images with small limits. Ordinary and fork CI jobs receive no Telegram, provider, backup, or publication credentials; protected container, recovery, and soak work uses dedicated Ubuntu runners, while the real Telegram Session remains outside general CI. Routine sanitized test evidence is designed for 30-day retention and release, live, restore, and soak evidence for 365 days.
 
-## Planned safeguards and controls
+## Safeguards and controls beyond M1
 
 The architecture requires:
 

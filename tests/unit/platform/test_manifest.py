@@ -51,7 +51,14 @@ def test_acceptance_json_schema_is_valid_and_accepts_all_id_forms() -> None:
             "python": "3.14.7",
             "implementation": "CPython",
             "platform": "synthetic",
-            "external_service_access": False,
+            "external_service_access": True,
+            "services": [
+                {
+                    "name": "postgresql-pgvector",
+                    "version": "17.10 / 0.8.6",
+                    "image": "example@sha256:" + "f" * 64,
+                }
+            ],
         },
         "disclosure": {"path": "DISCLOSURE", "sha256": "c" * 64},
         "locks": [

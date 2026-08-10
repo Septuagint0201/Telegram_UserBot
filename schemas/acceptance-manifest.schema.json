@@ -38,7 +38,20 @@
         "python": { "type": "string" },
         "implementation": { "const": "CPython" },
         "platform": { "type": "string" },
-        "external_service_access": { "const": false }
+        "external_service_access": { "type": "boolean" },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version", "image"],
+            "properties": {
+              "name": { "minLength": 1, "type": "string" },
+              "version": { "minLength": 1, "type": "string" },
+              "image": { "minLength": 1, "type": "string" }
+            }
+          }
+        }
       }
     },
     "disclosure": { "$ref": "#/$defs/hashedFile" },

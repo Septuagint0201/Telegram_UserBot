@@ -1,0 +1,1 @@
+"""Persistence adapter unit tests."""

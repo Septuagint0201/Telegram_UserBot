@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from typing import ClassVar, Self
-from uuid import UUID, uuid4
+from uuid import UUID, uuid7
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +18,7 @@ class EntityId:
 
     @classmethod
     def new(cls) -> Self:
-        return cls(uuid4())
+        return cls(uuid7())
 
     @classmethod
     def from_string(cls, raw: str) -> Self:

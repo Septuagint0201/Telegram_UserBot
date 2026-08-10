@@ -27,3 +27,11 @@ def test_concrete_identifier_types_do_not_compare_equal() -> None:
 def test_identifier_rejects_non_uuid_at_runtime() -> None:
     with pytest.raises(TypeError, match="UUID"):
         EntityId("not-a-uuid")  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_new_identifier_is_uuidv7() -> None:
+    first = AccountId.new()
+    second = AccountId.new()
+    assert first.value.version == 7
+    assert first.value < second.value

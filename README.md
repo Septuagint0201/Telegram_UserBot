@@ -4,16 +4,16 @@
 
 ## 当前状态
 
-V1架构设计和M0工程脚手架已经完成，Windows本地门禁与GitLab Linux CI均已通过。仓库现在包含Python package、hash lock、纯本地配置校验入口、synthetic测试和无secret GitLab CI，但仍没有Telegram/provider、PostgreSQL/Redis adapter、migration、Dockerfile、Compose部署或公开发布包。
+V1架构设计与M0已经完成。M1 durable-state候选现已实现PostgreSQL 17/pgvector、Redis/arq、Alembic baseline、SQLAlchemy repository/UoW、CAS/lease/fencing、transactional outbox、one-way redaction、数据库角色和隔离integration gate。Windows本地静态、unit/contract/property与build门禁已通过；真实PostgreSQL/Redis仍等待精确签名候选的GitLab Linux CI，不能提前标为`PASS`。
 
 因此：
 
-- 只能运行M0本地安全校验和测试，不能连接Telegram/provider、启动业务服务或部署本项目；
+- 可以运行本地安全校验、无外部依赖测试和显式的disposable PostgreSQL/Redis integration test，但不能连接Telegram/provider、启动业务服务或部署本项目；
 - 文档中的最终服务与业务命令仍是实现契约，不是已经存在的入口；
-- database/Redis integration、live Telegram/provider、backup/restore和24小时soak仍为`NOT RUN`；
+- Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-下一步按[V1 Implementation Plan](docs/Implementation-Plan.md)进入M1，固定PostgreSQL、pgvector、Redis与测试容器兼容矩阵，并建立durable state基础。
+当前候选的精确兼容组合见[M1 Compatibility Set](docs/compatibility/m1.md)。下一步先让签名候选通过GitLab的digest-pinned PostgreSQL/Redis integration gate；只有该证据和closeout文档均完成后才关闭M1并进入M2。
 
 ## 架构摘要
 
@@ -60,7 +60,7 @@ Docker Engine + Compose v2
 2 vCPU / 4 GiB RAM / 40 GiB SSD
 ```
 
-M0固定标准GIL CPython 3.14（当前patch为3.14.7）、pip 25.3和`pyproject.toml`中的构建/检查工具；runtime/dev/lock工具使用独立hash lock。跨平台IANA时区数据固定为`tzdata==2026.3`。PostgreSQL/pgvector与Redis的精确版本留在M1，Caddy与production image留在M8。Windows unit/property/contract不能替代Linux CI或Ubuntu生产证据。
+标准GIL CPython固定为3.14（当前patch为3.14.7），pip 25.3及全部runtime/dev/lock工具使用独立hash lock。跨平台IANA时区数据固定为`tzdata==2026.3`；M1固定PostgreSQL 17.10、pgvector 0.8.6、Redis server 8.2.8、redis-py 5.3.1和arq 0.28.0。Caddy与production image留在M8。Windows unit/property/contract不能替代Linux CI或Ubuntu生产证据。
 
 Windows PowerShell的可重复开发安装：
 
@@ -79,7 +79,7 @@ M0安全入口只验证配置并输出allowlist JSON日志：
 .\.venv\Scripts\telegram-userbot-check.exe
 ```
 
-M0外部集成开关必须全部为false；该入口没有网络、数据库、Redis或Telegram连接实现。
+该安全入口的外部集成开关仍必须全部为false；它不会启动M1数据库/Redis adapter，也没有Telegram连接实现。Alembic和integration test只能对显式提供的disposable PostgreSQL/Redis运行。
 
 ## 计划中的运行入口
 
@@ -97,13 +97,15 @@ session-backup
 data-export
 ```
 
-这些业务入口目前尚未实现。未来运行命令必须随实际Compose文件、migration和runbook一起加入README，并经过Test Strategy与Disclosure审查。
+除Alembic migration文件外，这些业务入口目前尚未实现。未来运行命令必须随实际Compose文件和runbook一起加入README，并经过Test Strategy与Disclosure审查。
 
 ## 测试与证据
 
 测试架构使用pytest、pytest-asyncio、Hypothesis、Testcontainers和Docker Compose，默认只使用synthetic fixture与fake Telegram/provider。真实Telegram只允许专用授权测试账号和allowlisted测试peer；真实provider smoke不能发送私人数据。
 
 M0在Windows/CPython 3.14.7的本地结果：56 tests `PASS`，line coverage 97.77%，branch coverage 90.32%；Ruff、strict mypy、compileall、import boundary、build artifact Disclosure和secret/artifact扫描均`PASS`。签名提交`5e6f2b3512436a5ba70c958a42901b920ffa6caa`对应的[GitLab Linux pipeline #2](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747413992)及`m0-preflight`作业均为`PASS`；其acceptance manifest绑定相同commit/tree，并将M0-001—M0-012全部记录为`PASS`。
+
+M1候选在Windows/CPython 3.14.7的当前本地结果：75 tests `PASS`、10个integration/recovery test因本机无Docker按默认marker未运行，总coverage 98.07%；Ruff、strict mypy、import boundary、wheel/sdist Disclosure与secret/artifact扫描均`PASS`。这不是M1关闭证据；真实PostgreSQL/Redis、migration round trip、role、recovery与EXPLAIN必须由候选GitLab job实际通过。
 
 常用本地门禁：
 
