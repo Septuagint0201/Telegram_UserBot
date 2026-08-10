@@ -41,3 +41,12 @@ def test_runtime_dependencies_and_python_are_pinned() -> None:
 def test_windows_only_lock_dependency_keeps_its_platform_marker() -> None:
     lock = (ROOT / "requirements" / "dev.lock").read_text(encoding="utf-8")
     assert 'pywin32==312 ; sys_platform == "win32" \\' in lock
+
+
+@pytest.mark.unit
+def test_session_scoped_integration_engine_has_matching_test_loops() -> None:
+    conftest = (ROOT / "tests" / "integration" / "conftest.py").read_text(encoding="utf-8")
+    assert '@pytest_asyncio.fixture(scope="session", loop_scope="session")' in conftest
+    for path in sorted((ROOT / "tests" / "integration").glob("test_*.py")):
+        source = path.read_text(encoding="utf-8")
+        assert 'pytestmark = pytest.mark.asyncio(loop_scope="session")' in source

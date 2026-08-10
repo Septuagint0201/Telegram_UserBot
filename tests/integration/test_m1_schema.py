@@ -8,6 +8,7 @@ from telegram_userbot.adapters.persistence.engine import schema_is_ready
 from telegram_userbot.adapters.persistence.schema import M1_TABLES
 
 ROOT = Path(__file__).resolve().parents[2]
+pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 @pytest.mark.integration

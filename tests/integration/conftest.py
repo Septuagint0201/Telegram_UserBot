@@ -102,7 +102,7 @@ def migrated_database(postgres_dsn: str) -> Iterator[str]:
             environ["TUDT_DATABASE_DSN"] = previous
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def postgres_engine(migrated_database: str) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(migrated_database, pool_pre_ping=True)
     try:
@@ -111,7 +111,7 @@ async def postgres_engine(migrated_database: str) -> AsyncIterator[AsyncEngine]:
         await engine.dispose()
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def db_session(postgres_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     connection = await postgres_engine.connect()
     transaction = await connection.begin()

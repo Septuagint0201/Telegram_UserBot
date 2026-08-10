@@ -17,6 +17,7 @@ from telegram_userbot.adapters.persistence.repositories import (
 from telegram_userbot.adapters.queue.redis import DurableJobNotifier
 
 NOW = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 @pytest.mark.integration

@@ -30,6 +30,7 @@ from telegram_userbot.adapters.persistence.schema import (
 )
 
 NOW = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def seed_conversation(session: AsyncSession) -> tuple[UUID, UUID, UUID]:
