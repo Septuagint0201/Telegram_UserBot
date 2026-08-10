@@ -9,6 +9,12 @@ class ManifestSemanticError(ValueError):
     pass
 
 
+def requirement_ids_for_milestone(milestone: object) -> frozenset[str]:
+    if milestone not in {"M0", "M1"}:
+        raise ManifestSemanticError("unsupported evidence milestone")
+    return frozenset(f"{milestone}-{index:03d}" for index in range(1, 13))
+
+
 def _as_mapping(value: object, field: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ManifestSemanticError(f"{field} must be an object")

@@ -8,6 +8,7 @@ import pytest
 
 from telegram_userbot.platform.evidence.manifest import (
     ManifestSemanticError,
+    requirement_ids_for_milestone,
     validate_manifest_semantics,
 )
 
@@ -29,6 +30,21 @@ def first_requirement(document: dict[str, object]) -> dict[str, object]:
 @pytest.mark.unit
 def test_valid_manifest_semantics() -> None:
     validate_manifest_semantics(valid_manifest(), required_requirement_ids=frozenset({"M0-001"}))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("milestone", ["M0", "M1"])
+def test_requirement_ids_follow_supported_manifest_milestone(milestone: str) -> None:
+    assert requirement_ids_for_milestone(milestone) == frozenset(
+        f"{milestone}-{index:03d}" for index in range(1, 13)
+    )
+
+
+@pytest.mark.unit
+def test_requirement_ids_reject_unknown_or_missing_milestone() -> None:
+    for milestone in (None, "M2", 1):
+        with pytest.raises(ManifestSemanticError, match="unsupported evidence milestone"):
+            requirement_ids_for_milestone(milestone)
 
 
 @pytest.mark.unit

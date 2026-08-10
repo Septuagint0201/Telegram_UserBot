@@ -10,7 +10,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
-from telegram_userbot.platform.evidence.manifest import validate_manifest_semantics
+from telegram_userbot.platform.evidence.manifest import (
+    requirement_ids_for_milestone,
+    validate_manifest_semantics,
+)
 
 
 class RequirementRecord(TypedDict):
@@ -177,7 +180,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
     }
     validate_manifest_semantics(
         document,
-        required_requirement_ids=frozenset(f"{milestone}-{index:03d}" for index in range(1, 13)),
+        required_requirement_ids=requirement_ids_for_milestone(milestone),
     )
     return document
 

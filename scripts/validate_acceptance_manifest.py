@@ -6,7 +6,10 @@ from pathlib import Path
 
 import jsonschema
 
-from telegram_userbot.platform.evidence.manifest import validate_manifest_semantics
+from telegram_userbot.platform.evidence.manifest import (
+    requirement_ids_for_milestone,
+    validate_manifest_semantics,
+)
 
 
 def main() -> int:
@@ -23,7 +26,7 @@ def main() -> int:
     )
     validate_manifest_semantics(
         document,
-        required_requirement_ids=frozenset(f"M0-{index:03d}" for index in range(1, 13)),
+        required_requirement_ids=requirement_ids_for_milestone(document.get("milestone")),
     )
     print("PASS acceptance manifest")
     return 0
