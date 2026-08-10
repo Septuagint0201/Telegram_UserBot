@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0与M1已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭。M2已形成等待GitLab验收的实现候选，M3—M9尚未开始；Telegram/provider、部署、production load和live证据仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0、M1与M2已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭。M3—M9尚未开始；Telegram/provider、部署、production load和live证据仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -67,8 +67,8 @@ deploy/
 |---|---|---|---|
 | M0 | 工程脚手架与测试基础 | 无 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M2 | 模型配置、adapter与key-only控制面 | 仅local fake | IMPLEMENTED — VALIDATION PENDING |
-| M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | NOT STARTED |
+| M2 | 模型配置、adapter与key-only控制面 | 仅local fake | COMPLETE — WINDOWS/GITLAB LINUX PASS |
+| M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | READY |
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | NOT STARTED |
 | M5 | Media与Context Contract | fake provider；测试图片 | NOT STARTED |
 | M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | NOT STARTED |
@@ -166,7 +166,7 @@ deploy/
 
 实现三个generation profile、独立embedding profile、canonical adapter、credential envelope和Control Bot/Web App配置边界，外部请求仅发往local fake。
 
-当前状态：实现候选已完成Windows static/unit/contract门禁；disposable PostgreSQL/Redis migration、受限DB role、Linux Chromium browser和M2 acceptance仍等待精确签名commit的GitLab pipeline，故本milestone尚未关闭。
+当前状态：Windows static/unit/contract与GitLab disposable PostgreSQL/Redis migration、受限DB role、Linux Chromium browser和M2 acceptance均已通过，本milestone已经关闭。
 
 ### 7.2 代码任务
 
@@ -192,6 +192,13 @@ deploy/
 - Web App不能修改endpoint/model/parameter，Bot消息不能接收API key。
 - Provider fake之外的网络默认blocked；真实provider smoke仍`NOT RUN`。
 - Auth、credential、SSRF和wire contract为release-critical，不得quarantine。
+
+### 7.5 完成证据
+
+- 签名提交`def4ff1f846307a7ea428de3c048616601cab7a4`对应的GitLab Linux pipeline [#2748486868](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2748486868)全部`PASS`。
+- Linux/CPython 3.14.7在digest-pinned PostgreSQL 17.10/pgvector 0.8.6和Redis 8.2.8上运行157个测试，零失败、零跳过；line coverage 92.11%，branch coverage 81.61%。
+- Migration manifest绑定Alembic head `0002_m2_model_control`并记录34张表、零匿名约束与四条migration路径`PASS`；Chromium 151.0.7922.34 browser manifest记录零外部请求、零存储、无credential echo。
+- M2 acceptance manifest绑定tree `afca1b77506911d82f2424be8bf5b686ce4cf4ce`，M2-001—M2-011全部`PASS`；真实Telegram/provider和Ubuntu production仍为`NOT RUN`。
 
 ## 8. M3 — Telegram event ingest、source与outbound intent
 
@@ -442,4 +449,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0与M1已经关闭；M2实现候选已完成并等待GitLab migration/browser/acceptance证据。通过后下一步进入M3 Telegram ingest/outbound intent；真实provider smoke继续保持`NOT RUN`，Telegram adapter、应用容器、自动发送和生产部署仍不存在。
+M0、M1与M2已经关闭。下一步进入M3 Telegram ingest/outbound intent；真实provider smoke继续保持`NOT RUN`，Telegram adapter、应用容器、自动发送和生产部署仍不存在。

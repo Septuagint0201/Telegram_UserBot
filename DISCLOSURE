@@ -6,9 +6,9 @@
 - Public source target: `https://gitlab.com/Septuagintks/telegram_userbot`
 - Maintainer: GitLab user `Septuagintks`
 - Review date: 2026-08-11 (Asia/Shanghai)
-- Current artifact status: M2 model-control implementation candidate; no Telegram user adapter, production provider transport, or deployment
+- Current artifact status: M2 model-control implementation; no Telegram user adapter, production provider transport, or deployment
 
-The repository contains a pre-alpha Python package, hash-locked toolchain, synthetic tests and scanners; the M1 PostgreSQL/pgvector/Redis durable-state implementation; and an M2 candidate containing immutable model-profile/config/capability schema, canonical Responses/Chat Completions/Messages/Embedding wire adapters, AES-256-GCM model-key envelopes, endpoint SSRF/TLS admission contracts, durable Control Bot configuration sessions, and a key-only Starlette Web App. M2 has no production provider HTTP transport and tests use local fakes; the Web App and controller are components without Bot polling, Caddy, Compose, or a deployable service entrypoint. The repository still contains no Telethon Session access, Telegram user adapter, backup implementation, production container deployment, or automated Telegram message action. M1 passed GitLab Linux pipeline #9 on signed commit `9c2dbf61c8b67e75182f47abbb419ae82773678a`; M2's Linux PostgreSQL/Redis, Chromium, and acceptance evidence is `NOT RUN` until its exact signed candidate is pushed. Real Telegram/provider, production, Ubuntu, backup/restore, and live behavior remain unimplemented or `NOT RUN`.
+The repository contains a pre-alpha Python package, hash-locked toolchain, synthetic tests and scanners; the M1 PostgreSQL/pgvector/Redis durable-state implementation; and an M2 implementation containing immutable model-profile/config/capability schema, canonical Responses/Chat Completions/Messages/Embedding wire adapters, AES-256-GCM model-key envelopes, endpoint SSRF/TLS admission contracts, durable Control Bot configuration sessions, and a key-only Starlette Web App. M2 has no production provider HTTP transport and tests use local fakes; the Web App and controller are components without Bot polling, Caddy, Compose, or a deployable service entrypoint. The repository still contains no Telethon Session access, Telegram user adapter, backup implementation, production container deployment, or automated Telegram message action. M2 passed GitLab Linux pipeline #2748486868 on signed commit `def4ff1f846307a7ea428de3c048616601cab7a4`, including PostgreSQL/Redis, Chromium, and acceptance gates. Real Telegram/provider, production, Ubuntu, backup/restore, and live behavior remain unimplemented or `NOT RUN`.
 
 ## Security-sensitive and dual-use capabilities
 
@@ -77,7 +77,7 @@ PostgreSQL backup is designed to use continuous WAL archiving, daily differentia
 
 The existing local command still only parses an allowlisted local configuration, rejects credential-like keys and every external-integration flag, emits allowlisted JSON status metadata, and exits. Default tests deny non-loopback network access; loopback is allowed for the Windows asyncio socket pair and the explicit Web App browser harness. Database/Redis modules and credential mutation components run only when explicitly constructed with their dependencies; public CI uses disposable passwordless synthetic services, generated test keys, synthetic Bot tokens, and no Telegram/provider/publication credential. M2 builds and normalizes provider wire requests only through an injected fake transport and performs no real provider or Telegram request. It implements credential set/replace/delete transactions in testable components, but no default command starts the Web App or accepts a real key. The implementation performs no telemetry, backup, or automated Telegram message action. The V1 design sends no product analytics or vendor telemetry; operational metrics remain private, while configured alert destinations would receive only content-free status metadata.
 
-## Implemented safeguards through the M2 candidate
+## Implemented safeguards through M2
 
 The M0 scaffold currently implements and tests:
 
@@ -102,7 +102,7 @@ M1 additionally implements and tests:
 
 These controls establish the M1 durable-state boundary. GitLab Linux pipeline #9 validated the exact signed commit against disposable PostgreSQL 17.10/pgvector 0.8.6 and Redis 8.2.8, including migration, role, constraint, recovery, redaction, and synthetic EXPLAIN paths.
 
-The M2 candidate additionally implements and locally tests:
+M2 additionally implements and tests:
 
 - four independent model profiles, immutable canonical config/capability/endpoint versions, draft/profile CAS, current-key resolution for new runs, and non-reused credential version numbers after deletion;
 - canonical request/response normalization for Responses, Chat Completions, Messages, and Embedding, with explicit rejection of legacy text `/completions`, image detail fixed to `auto`, structured/stream/error fixtures, and injected transports only;
@@ -112,11 +112,11 @@ The M2 candidate additionally implements and locally tests:
 - a key-only Web App with Telegram `initData` verification, five-minute admin/role/action/deployment/CAS-bound one-time launch proof, PostgreSQL rate limits, strict origin/body/schema checks, CSP/no-store headers, no key read/status API, empty success responses, and no third-party resource or browser storage use; and
 - Windows static/type/unit/property/contract evidence using synthetic values only. Local Docker service tests are `NOT RUN`, and the matching Chromium binary is unavailable in the current restricted Windows environment, so browser evidence is `BLOCKED` locally rather than inferred from ASGI tests.
 
-These M2 controls are component-level candidate claims, not production enablement. Their GitLab Linux migration, role, Chromium, and acceptance gates must pass on the exact signed candidate before M2 is closed. They do not validate a real provider, Telegram Bot/client, Caddy route, host key mount, production network policy, container, backup/restore, media, full orchestration, or live credential.
+These M2 controls are component-level claims, not production enablement. GitLab Linux pipeline #2748486868 validated their migration, role, Chromium, and acceptance gates against signed commit `def4ff1f846307a7ea428de3c048616601cab7a4`; it did not validate a real provider, Telegram Bot/client, Caddy route, host key mount, production network policy, container, backup/restore, media, full orchestration, or live credential.
 
 The planned automated test suite uses deterministic synthetic fixtures, fake Telegram/provider services, disposable PostgreSQL/Redis containers, and content-free evidence by default. Production databases, real private conversations, personal Telegram accounts, and production Sessions are prohibited as test inputs. Real Telegram and Web App smoke tests are limited to an authorized dedicated staging account, Bot, and allowlisted test peers on an isolated host. Real provider smoke tests use fixed non-private text and test images with small limits. Ordinary and fork CI jobs receive no Telegram, provider, backup, or publication credentials; protected container, recovery, and soak work uses dedicated Ubuntu runners, while the real Telegram Session remains outside general CI. Routine sanitized test evidence is designed for 30-day retention and release, live, restore, and soak evidence for 365 days.
 
-## Safeguards and controls beyond the M2 candidate
+## Safeguards and controls beyond M2
 
 Production completion still requires the following end-to-end controls. Some M2 component primitives named here exist, but their Bot/Caddy/container/host integration and live behavior are not implemented or validated:
 
@@ -152,7 +152,7 @@ Production completion still requires the following end-to-end controls. Some M2 
 - synthetic-only test fixtures, fake-by-default external services, protected runners, no rerun-to-PASS policy, secret/artifact scanning, and explicit `PASS`/`FAIL`/`NOT RUN`/`BLOCKED` evidence; and
 - private PostgreSQL and Redis network exposure.
 
-These are production and end-to-end requirements, not claims that the current candidate enables them by default. Future releases must test and accurately disclose which controls are implemented, wired, and enabled.
+These are production and end-to-end requirements, not claims that the current implementation enables them by default. Future releases must test and accurately disclose which controls are implemented, wired, and enabled.
 
 ## Privileges and persistence
 

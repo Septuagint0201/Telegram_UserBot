@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计、M0与M1已经完成。M2模型配置、协议adapter、credential envelope、Control Bot持久化配置会话和key-only Web App已形成实现候选；Windows static/unit/contract为`PASS`，GitLab Linux PostgreSQL/Redis、Chromium和M2 acceptance尚为`NOT RUN`，因此M2复选框尚未关闭。Telegram/provider live、应用容器、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。
+架构设计、M0、M1与M2已经完成。M2模型配置、协议adapter、credential envelope、Control Bot持久化配置会话和key-only Web App已经通过Windows本地门禁，以及GitLab Linux PostgreSQL/Redis、Chromium和acceptance门禁。Telegram/provider live、应用容器、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`；下一阶段为M3 Telegram ingest与outbound intent。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -41,8 +41,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 |---|---|---|---|
 | M0 | 工程脚手架与测试基础 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
 | M1 | PostgreSQL、Redis与 durable state | COMPLETE | WINDOWS STATIC/UNIT PASS; GITLAB SERVICE INTEGRATION PASS |
-| M2 | 模型配置、adapter与 key-only 控制面 | IMPLEMENTED — VALIDATION PENDING | WINDOWS STATIC/UNIT PASS; GITLAB M2 NOT RUN |
-| M3 | Telegram ingest 与 outbound intent | WAITING | NOT RUN |
+| M2 | 模型配置、adapter与 key-only 控制面 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
+| M3 | Telegram ingest 与 outbound intent | READY | NOT RUN |
 | M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
 | M5 | Media 与 Context Contract | WAITING | NOT RUN |
 | M6 | Memory、Summary 与 Embedding Pipeline | WAITING | NOT RUN |
@@ -117,25 +117,33 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 目标：完成三个独立 generation profile、协议适配、credential 加密和安全配置入口。
 
-当前候选已覆盖M2-001—M2-010的代码与本地测试；M2-011及所有复选框等待精确签名commit的GitLab migration/browser/acceptance evidence，不能由本地mock或ASGI测试提前关闭。
+签名提交`def4ff1f846307a7ea428de3c048616601cab7a4`对应的GitLab Linux pipeline [#2748486868](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2748486868)已经提供migration、browser和acceptance evidence，M2-001—M2-011全部关闭。
 
-- [ ] **M2-001 建立 model profile/version schema**（依赖：M1-012）— 为 `main_ai`、`memory_agent`、`proactive_agent` 建立独立配置、版本、capability 和 activation 状态；embedding 保持独立配置。
-- [ ] **M2-002 实现 canonical model configuration domain**（依赖：M2-001）— 统一 endpoint、protocol、model、temperature、maximum output tokens、timeout、enable 和协议扩展项；版本不可变且切换用 CAS。
-- [ ] **M2-003 实现 generation/embedding adapters**（依赖：M0-004、M2-002）— 支持 `openai_responses`、`openai_chat_completions`、`anthropic_messages` 与 embedding；明确拒绝 legacy text `/completions`。
-- [ ] **M2-004 建立 provider fake 与 wire contract fixture**（依赖：M2-003）— 覆盖 canonical→wire 字段、流式/非流式响应、usage、timeout、429/5xx、malformed response 和 cancel。
-- [ ] **M2-005 实现 API key envelope encryption**（依赖：M2-001）— 使用 AES-256-GCM、per-record nonce/AAD、key version 和 rotation seam；数据库、日志、audit 和响应永不返回明文。
-- [ ] **M2-006 实现 endpoint normalization 与 SSRF/TLS policy**（依赖：M2-002）— 规范 scheme/host/path，限制危险网络目标与 redirect，production 默认验证 TLS；用恶意 URL corpus 测试。
-- [ ] **M2-007 实现 Control Bot 非敏感配置命令**（依赖：M2-002）— `/models` 展示 profile 状态，通过短生命周期多步 session 配置 endpoint/protocol/model/参数；并发编辑检测版本冲突。
-- [ ] **M2-008 实现 key-only Web App**（依赖：M2-005、M2-007）— `/model_key <role>` 只打开 set/replace/delete API key 页面；校验 Telegram init data、nonce、过期、CSRF 和一次性提交，禁止消息输入 key。
-- [ ] **M2-009 实现 capability validation 与 activation gate**（依赖：M2-003—M2-008）— 激活前验证必需字段、协议能力、key 存在性和允许的 image/text 能力；失败保留旧 active version。
-- [ ] **M2-010 完成 browser/contract/security tests**（依赖：M2-004—M2-009）— 覆盖三个 profile、三种 generation 协议、embedding、key 替换/删除、重放、日志与 SSRF。
-- [ ] **M2-011 关闭 M2**（依赖：M2-001—M2-010）— 生成配置/协议矩阵与安全证据；真实 provider smoke 仍为 `NOT RUN`，除非在 M9 获得授权。
+- [x] **M2-001 建立 model profile/version schema**（依赖：M1-012）— 为 `main_ai`、`memory_agent`、`proactive_agent` 建立独立配置、版本、capability 和 activation 状态；embedding 保持独立配置。
+- [x] **M2-002 实现 canonical model configuration domain**（依赖：M2-001）— 统一 endpoint、protocol、model、temperature、maximum output tokens、timeout、enable 和协议扩展项；版本不可变且切换用 CAS。
+- [x] **M2-003 实现 generation/embedding adapters**（依赖：M0-004、M2-002）— 支持 `openai_responses`、`openai_chat_completions`、`anthropic_messages` 与 embedding；明确拒绝 legacy text `/completions`。
+- [x] **M2-004 建立 provider fake 与 wire contract fixture**（依赖：M2-003）— 覆盖 canonical→wire 字段、流式/非流式响应、usage、timeout、429/5xx、malformed response 和 cancel。
+- [x] **M2-005 实现 API key envelope encryption**（依赖：M2-001）— 使用 AES-256-GCM、per-record nonce/AAD、key version 和 rotation seam；数据库、日志、audit 和响应永不返回明文。
+- [x] **M2-006 实现 endpoint normalization 与 SSRF/TLS policy**（依赖：M2-002）— 规范 scheme/host/path，限制危险网络目标与 redirect，production 默认验证 TLS；用恶意 URL corpus 测试。
+- [x] **M2-007 实现 Control Bot 非敏感配置命令**（依赖：M2-002）— `/models` 展示 profile 状态，通过短生命周期多步 session 配置 endpoint/protocol/model/参数；并发编辑检测版本冲突。
+- [x] **M2-008 实现 key-only Web App**（依赖：M2-005、M2-007）— `/model_key <role>` 只打开 set/replace/delete API key 页面；校验 Telegram init data、nonce、过期、CSRF 和一次性提交，禁止消息输入 key。
+- [x] **M2-009 实现 capability validation 与 activation gate**（依赖：M2-003—M2-008）— 激活前验证必需字段、协议能力、key 存在性和允许的 image/text 能力；失败保留旧 active version。
+- [x] **M2-010 完成 browser/contract/security tests**（依赖：M2-004—M2-009）— 覆盖三个 profile、三种 generation 协议、embedding、key 替换/删除、重放、日志与 SSRF。
+- [x] **M2-011 关闭 M2**（依赖：M2-001—M2-010）— 生成配置/协议矩阵与安全证据；真实 provider smoke 仍为 `NOT RUN`，除非在 M9 获得授权。
 
 ### M2 退出门禁
 
-- [ ] 三个 generation profile 可独立版本化、验证和切换，canonical 字段不泄露协议差异。
-- [ ] 非 secret 配置只经 Bot 命令/session；API key 只经 key-only Web App。
-- [ ] fake wire contract、加密、SSRF、重放和 secret sentinel 测试为 `PASS`。
+- [x] 三个 generation profile 可独立版本化、验证和切换，canonical 字段不泄露协议差异。
+- [x] 非 secret 配置只经 Bot 命令/session；API key 只经 key-only Web App。
+- [x] fake wire contract、加密、SSRF、重放和 secret sentinel 测试为 `PASS`。
+
+### M2 完成证据
+
+- Pipeline [#2748486868](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2748486868)的`m0-preflight`、`m1-postgres-redis`、`m2-model-control`、`m2-browser`和`m2-acceptance`全部为`PASS`。
+- Linux/CPython 3.14.7在PostgreSQL 17.10/pgvector 0.8.6和Redis 8.2.8上运行157个测试，零失败、零跳过；line coverage 92.11%，branch coverage 81.61%。
+- Migration manifest记录Alembic head `0002_m2_model_control`、34张表、零匿名约束，以及empty→head、head→base→head、`0001`→head和中断恢复全部`PASS`。
+- Chromium 151.0.7922.34 browser manifest记录零外部请求、零browser storage entry、无credential echo；acceptance manifest绑定commit `def4ff1f846307a7ea428de3c048616601cab7a4`、tree `afca1b77506911d82f2424be8bf5b686ce4cf4ce`并将M2-001—M2-011全部标为`PASS`。
+- 真实Telegram/provider、Ubuntu production、backup/restore和production load仍为`NOT RUN`。
 
 ## 8. M3 — Telegram Ingest与 Outbound Intent
 
@@ -328,4 +336,4 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 17. 下一步
 
-M0与M1已经关闭；M2实现候选等待GitLab Linux的真实migration、数据库角色、Chromium和acceptance门禁。全部通过后关闭M2并进入M3；真实Telegram、真实provider、自动发送和生产部署仍禁止启用。
+M0、M1与M2已经关闭。下一步进入M3 Telegram ingest与outbound intent；真实Telegram、真实provider、自动发送和生产部署仍禁止启用。
