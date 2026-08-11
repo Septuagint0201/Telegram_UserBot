@@ -152,3 +152,71 @@ class ClaimedKeyLaunchRecord:
     credential_id: UUID
     credential_status: str
     credential_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramIngestResult:
+    event_id: int
+    duplicate: bool
+    projected: bool
+    message_id: UUID | None = None
+    revision_no: int | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundIntentRecord:
+    id: UUID
+    delivery_group_id: UUID
+    account_id: UUID
+    conversation_id: UUID
+    model_run_id: UUID | None
+    sequence_no: int
+    telegram_random_id: int
+    text_content: str
+    payload_sha256: bytes
+    state: str
+    telegram_message_id: int | None
+    attempt_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class NewDeliveryGroupRecord:
+    id: UUID
+    account_id: UUID
+    conversation_id: UUID
+    model_run_id: UUID | None
+    source: str
+    idempotency_key: bytes
+    created_at: datetime
+    mode_version: int | None = None
+    content_revision: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptCompletionRecord:
+    outcome: str
+    finished_at: datetime
+    telegram_message_id: int | None = None
+    error_code: str | None = None
+    retry_after_seconds: int | None = None
+    next_attempt_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReadHighWatermarkRecord:
+    operation_id: UUID
+    account_id: UUID
+    conversation_id: UUID
+    max_telegram_message_id: int
+    idempotency_key: bytes
+    completed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TypingLeaseRecord:
+    account_id: UUID
+    conversation_id: UUID
+    lease_token: UUID | None
+    lease_expires_at: datetime | None
+    updated_at: datetime

@@ -595,6 +595,14 @@ Operations默认每logical run最多3个attempt；role deadline默认Main 90秒�
 
 FloodWait 不进行忙循环。记录 Telegram 指示的等待时间，将 intent 转为 `retry_wait`、group保持 `pending/partial`，并在到期后重新检查门禁。
 
+每次Telegram side effect必须跨三个显式边界执行，不能把RPC藏在持有未提交数据库事务的repository方法中：
+
+1. transaction A锁定eligible intent，将其转为`sending`、递增attempt number并插入`started` attempt，然后commit；
+2. 只对该已提交attempt执行一次Telegram RPC；
+3. transaction B把同一attempt单向结算为success/FloodWait/transient/permanent/unknown并更新intent/group，然后commit。
+
+进程若在第2、3步之间退出，启动恢复将遗留`started` attempt和`sending` intent一并转为`unknown`后进入reconciliation。只有transaction A commit成功才允许RPC；rollback或claim失败都不得发送。M3提供这三个独立primitive，M4组合UoW、最终门禁和conversation ownership。
+
 自动FloodWait等待上限15分钟；超过后进入dead letter/operational alert，不创建replacement、不更换random ID。
 
 - 未执行 RPC 的 intent 可以在门禁仍有效时重试。

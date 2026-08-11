@@ -18,6 +18,7 @@ from sqlalchemy import (
     LargeBinary,
     MetaData,
     Numeric,
+    PrimaryKeyConstraint,
     SmallInteger,
     Table,
     Text,
@@ -1237,3 +1238,237 @@ model_key_rate_limits = Table(
 )
 
 M2_TABLES = tuple(name for name in metadata.tables if name not in M1_TABLES)
+
+# M3 owns outbound identity and Telegram lifecycle recovery. ``model_run_id`` is
+# intentionally stored now, while its FK is added by M4 when ``model_runs`` exists.
+outbound_delivery_groups = Table(
+    "outbound_delivery_groups",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("model_run_id", UUID_TYPE),
+    Column("source", Text, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'planned'")),
+    Column("intent_count", Integer, nullable=False),
+    Column("sent_count", Integer, nullable=False, server_default=text("0")),
+    Column("idempotency_key", LargeBinary, nullable=False),
+    Column("mode_version", BigInteger),
+    Column("content_revision", BigInteger),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("completed_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_outbound_delivery_groups_conversation_scope",
+    ),
+    CheckConstraint(
+        "source IN ('ai','proactive_ai','copilot_approved','system')",
+        name="source_values",
+    ),
+    CheckConstraint(
+        "state IN ('planned','sending','partial','sent','failed','unknown','cancelled')",
+        name="state_values",
+    ),
+    CheckConstraint("intent_count > 0", name="intent_count_positive"),
+    CheckConstraint("sent_count >= 0 AND sent_count <= intent_count", name="sent_count_range"),
+    CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_32_bytes"),
+    CheckConstraint("mode_version IS NULL OR mode_version >= 1", name="mode_version_positive"),
+    CheckConstraint(
+        "content_revision IS NULL OR content_revision >= 0", name="content_revision_nonnegative"
+    ),
+    UniqueConstraint(
+        "account_id", "idempotency_key", name="uq_outbound_delivery_groups_idempotency"
+    ),
+    UniqueConstraint("id", "account_id", name="uq_outbound_delivery_groups_id_account"),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        name="uq_outbound_delivery_groups_full_scope",
+    ),
+)
+Index(
+    "ix_outbound_delivery_groups_recovery",
+    outbound_delivery_groups.c.state,
+    outbound_delivery_groups.c.updated_at,
+    postgresql_where=outbound_delivery_groups.c.state.in_(("sending", "partial", "unknown")),
+)
+
+outbound_intents = Table(
+    "outbound_intents",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("delivery_group_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("model_run_id", UUID_TYPE),
+    Column("sequence_no", Integer, nullable=False),
+    Column("telegram_random_id", BigInteger, nullable=False),
+    Column("payload_kind", Text, nullable=False, server_default=text("'text'")),
+    Column("text_content", Text, nullable=False),
+    Column("payload_sha256", LargeBinary, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'pending'")),
+    Column("telegram_message_id", BigInteger),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("next_attempt_at", UTC_TIMESTAMP),
+    Column("unknown_since", UTC_TIMESTAMP),
+    Column("last_error_code", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("sent_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["delivery_group_id", "account_id", "conversation_id"],
+        [
+            "outbound_delivery_groups.id",
+            "outbound_delivery_groups.account_id",
+            "outbound_delivery_groups.conversation_id",
+        ],
+        name="fk_outbound_intents_delivery_group_scope",
+    ),
+    CheckConstraint("sequence_no >= 0", name="sequence_nonnegative"),
+    CheckConstraint("telegram_random_id > 0", name="random_id_positive"),
+    CheckConstraint("payload_kind = 'text'", name="payload_kind_v1"),
+    CheckConstraint("octet_length(payload_sha256) = 32", name="payload_hash_32_bytes"),
+    CheckConstraint(
+        "state IN ('pending','sending','sent','retry_wait','failed','unknown','cancelled')",
+        name="state_values",
+    ),
+    CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+    CheckConstraint(
+        "(state = 'sent' AND telegram_message_id IS NOT NULL AND sent_at IS NOT NULL) OR "
+        "(state <> 'sent')",
+        name="sent_has_receipt",
+    ),
+    CheckConstraint(
+        "(state = 'unknown' AND unknown_since IS NOT NULL) OR state <> 'unknown'",
+        name="unknown_has_timestamp",
+    ),
+    UniqueConstraint("delivery_group_id", "sequence_no", name="uq_outbound_intents_group_no"),
+    UniqueConstraint("account_id", "telegram_random_id", name="uq_outbound_intents_random_id"),
+    UniqueConstraint("id", "account_id", name="uq_outbound_intents_id_account"),
+)
+Index(
+    "ix_outbound_intents_dispatch",
+    outbound_intents.c.state,
+    outbound_intents.c.next_attempt_at,
+)
+Index(
+    "ix_outbound_intents_message_reconcile",
+    outbound_intents.c.account_id,
+    outbound_intents.c.conversation_id,
+    outbound_intents.c.telegram_message_id,
+    postgresql_where=outbound_intents.c.telegram_message_id.is_not(None),
+)
+
+outbound_attempts = Table(
+    "outbound_attempts",
+    metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("intent_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("attempt_no", Integer, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'started'")),
+    Column("error_code", Text),
+    Column("retry_after_seconds", Integer),
+    Column("started_at", UTC_TIMESTAMP, nullable=False),
+    Column("finished_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["intent_id", "account_id"],
+        ["outbound_intents.id", "outbound_intents.account_id"],
+        name="fk_outbound_attempts_intent_scope",
+    ),
+    CheckConstraint("attempt_no > 0", name="attempt_no_positive"),
+    CheckConstraint(
+        "state IN ('started','succeeded','flood_wait','transient','permanent','unknown')",
+        name="state_values",
+    ),
+    CheckConstraint(
+        "retry_after_seconds IS NULL OR retry_after_seconds >= 0",
+        name="retry_after_nonnegative",
+    ),
+    CheckConstraint(
+        "(state = 'started' AND finished_at IS NULL AND error_code IS NULL AND "
+        "retry_after_seconds IS NULL) OR "
+        "(state <> 'started' AND finished_at IS NOT NULL AND finished_at >= started_at)",
+        name="completion_matches_state",
+    ),
+    UniqueConstraint("intent_id", "attempt_no", name="uq_outbound_attempts_intent_no"),
+)
+
+telegram_read_states = Table(
+    "telegram_read_states",
+    metadata,
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("max_telegram_message_id", BigInteger, nullable=False),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_telegram_read_states_conversation_scope",
+    ),
+    PrimaryKeyConstraint("account_id", "conversation_id", name="pk_telegram_read_states"),
+    CheckConstraint("max_telegram_message_id > 0", name="max_message_id_positive"),
+)
+
+telegram_typing_states = Table(
+    "telegram_typing_states",
+    metadata,
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("active", Boolean, nullable=False, server_default=text("false")),
+    Column("lease_token", UUID_TYPE),
+    Column("lease_expires_at", UTC_TIMESTAMP),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_telegram_typing_states_conversation_scope",
+    ),
+    PrimaryKeyConstraint("account_id", "conversation_id", name="pk_telegram_typing_states"),
+    CheckConstraint(
+        "(active AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) OR "
+        "(NOT active AND lease_token IS NULL AND lease_expires_at IS NULL)",
+        name="active_has_lease",
+    ),
+    CheckConstraint("version >= 1", name="version_positive"),
+)
+
+telegram_operations = Table(
+    "telegram_operations",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("operation_kind", Text, nullable=False),
+    Column("idempotency_key", LargeBinary, nullable=False),
+    Column("max_telegram_message_id", BigInteger),
+    Column("state", Text, nullable=False),
+    Column("error_code", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("completed_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_telegram_operations_conversation_scope",
+    ),
+    CheckConstraint(
+        "operation_kind IN ('read','typing_start','typing_refresh','typing_stop')",
+        name="operation_kind_values",
+    ),
+    CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_32_bytes"),
+    CheckConstraint("state IN ('pending','succeeded','failed')", name="state_values"),
+    CheckConstraint(
+        "(operation_kind = 'read' AND max_telegram_message_id IS NOT NULL) OR "
+        "(operation_kind <> 'read' AND max_telegram_message_id IS NULL)",
+        name="read_has_message_id",
+    ),
+    UniqueConstraint("account_id", "idempotency_key", name="uq_telegram_operations_idempotency"),
+)
+
+M3_TABLES = tuple(
+    name for name in metadata.tables if name not in M1_TABLES and name not in M2_TABLES
+)

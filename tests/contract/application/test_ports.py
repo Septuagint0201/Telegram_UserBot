@@ -15,7 +15,12 @@ from telegram_userbot.application.ports import (
 )
 from telegram_userbot.application.ports.model import EmbeddingRequest, ModelRequest
 from telegram_userbot.application.ports.queue import JobEnvelope
-from telegram_userbot.application.ports.telegram import TelegramTextRequest
+from telegram_userbot.application.ports.telegram import (
+    TelegramReadRequest,
+    TelegramTextRequest,
+    TelegramTypingAction,
+    TelegramTypingRequest,
+)
 from telegram_userbot.domain.shared.ids import AccountId, ConversationId, JobId, RunId
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 from tests.support.fakes import (
@@ -72,17 +77,25 @@ async def test_external_gateway_fakes_satisfy_ports_without_network() -> None:
     assert isinstance(model, ModelGateway)
     assert isinstance(embedding, EmbeddingGateway)
     run_id = RunId.new()
+    account_id = AccountId.new()
+    conversation_id = ConversationId.new()
     receipt = await telegram.send_text(
         TelegramTextRequest(
-            AccountId.new(),
-            ConversationId.new(),
+            account_id,
+            conversation_id,
             run_id,
             1,
             SensitiveValue("SYNTHETIC_OUTPUT"),
         )
     )
+    read = await telegram.acknowledge_read(TelegramReadRequest(account_id, conversation_id, 4))
+    await telegram.set_typing(
+        TelegramTypingRequest(account_id, conversation_id, TelegramTypingAction.START)
+    )
     response = await model.generate(ModelRequest(run_id, "main_ai", "1" * 64))
     vector = await embedding.embed(EmbeddingRequest(run_id, "embedding", "2" * 64))
     assert receipt.telegram_message_id == 1
+    assert read.max_telegram_message_id == 4
+    assert telegram.typing_requests[-1].action is TelegramTypingAction.START
     assert response.text.reveal_for_use() == "SYNTHETIC_MODEL_OUTPUT"
     assert vector.vector == (0.0, 1.0)

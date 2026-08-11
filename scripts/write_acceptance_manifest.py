@@ -158,6 +158,60 @@ def _requirements_for(milestone: str) -> list[RequirementRecord]:
                 "docs/Implementation-Plan.md",
             ),
         ]
+    if milestone == "M3":
+        return [
+            _requirement(
+                "M3-001",
+                "src/telegram_userbot/application/ports/telegram.py",
+                "src/telegram_userbot/adapters/telegram_user/telethon.py",
+            ),
+            _requirement(
+                "M3-002",
+                "src/telegram_userbot/adapters/telegram_user/normalizer.py",
+                "tests/unit/adapters/telegram_user/test_normalizer_and_fake.py",
+            ),
+            _requirement(
+                "M3-003",
+                "src/telegram_userbot/adapters/persistence/telegram_repository.py",
+                "tests/integration/test_m3_telegram_lifecycle.py",
+            ),
+            _requirement(
+                "M3-004",
+                "src/telegram_userbot/domain/messaging/events.py",
+                "tests/integration/test_m3_telegram_lifecycle.py",
+            ),
+            _requirement(
+                "M3-005",
+                "alembic/versions/0003_m3_telegram_lifecycle.py",
+                "src/telegram_userbot/domain/messaging/outbound.py",
+            ),
+            _requirement(
+                "M3-006",
+                "src/telegram_userbot/adapters/persistence/telegram_repository.py",
+                ".artifacts/m3/replay-manifest.json",
+            ),
+            _requirement(
+                "M3-007",
+                "src/telegram_userbot/application/ports/telegram.py",
+                "tests/contract/application/test_ports.py",
+            ),
+            _requirement(
+                "M3-008",
+                "src/telegram_userbot/adapters/telegram_user/fake.py",
+                ".artifacts/m3/replay-manifest.json",
+            ),
+            _requirement(
+                "M3-009",
+                "src/telegram_userbot/adapters/persistence/telegram_delivery.py",
+                "tests/integration/test_m3_telegram_lifecycle.py",
+            ),
+            _requirement(
+                "M3-010",
+                "docs/compatibility/m3.md",
+                "TODO.md",
+                "docs/Implementation-Plan.md",
+            ),
+        ]
     raise ValueError("unsupported milestone")
 
 
@@ -179,7 +233,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
     )
     if missing_evidence:
         raise ValueError("acceptance evidence path is missing: " + missing_evidence[0])
-    uses_disposable_services = milestone in {"M1", "M2"}
+    uses_disposable_services = milestone in {"M1", "M2", "M3"}
     environment: dict[str, object] = {
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),
@@ -243,7 +297,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--milestone", choices=("M0", "M1", "M2"), default="M0")
+    parser.add_argument("--milestone", choices=("M0", "M1", "M2", "M3"), default="M0")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]

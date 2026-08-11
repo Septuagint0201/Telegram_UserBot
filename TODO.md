@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计、M0、M1与M2已经完成。M2模型配置、协议adapter、credential envelope、Control Bot持久化配置会话和key-only Web App已经通过Windows本地门禁，以及GitLab Linux PostgreSQL/Redis、Chromium和acceptance门禁。Telegram/provider live、应用容器、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`；下一阶段为M3 Telegram ingest与outbound intent。
+架构设计、M0、M1与M2已经完成。M3 Telegram ingest、Telethon边界、outbound intent/reconciliation与fake恢复矩阵已经实现为候选；Windows Ruff、strict mypy与unit/contract测试为`PASS`，本机无Docker，PostgreSQL migration/recovery为`NOT RUN`，正在等待签名候选的GitLab Linux门禁。真实Telegram/provider live、应用容器、自动回复、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -42,7 +42,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M0 | 工程脚手架与测试基础 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
 | M1 | PostgreSQL、Redis与 durable state | COMPLETE | WINDOWS STATIC/UNIT PASS; GITLAB SERVICE INTEGRATION PASS |
 | M2 | 模型配置、adapter与 key-only 控制面 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
-| M3 | Telegram ingest 与 outbound intent | READY | NOT RUN |
+| M3 | Telegram ingest 与 outbound intent | CANDIDATE | WINDOWS STATIC/UNIT PASS; LOCAL POSTGRES NOT RUN; GITLAB PENDING |
 | M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
 | M5 | Media 与 Context Contract | WAITING | NOT RUN |
 | M6 | Memory、Summary 与 Embedding Pipeline | WAITING | NOT RUN |
@@ -148,6 +148,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 ## 8. M3 — Telegram Ingest与 Outbound Intent
 
 目标：规范化 Telegram 事件，建立消息事实、来源核对和可恢复发送基础。
+
+候选实现已经覆盖M3-001—M3-009，但按本文件完成定义，在GitLab disposable PostgreSQL/Redis、migration、replay和acceptance证据实际`PASS`前保持未勾选。真实Telegram账号测试不属于M3关闭条件，并继续为`NOT RUN`。
 
 - [ ] **M3-001 实现 TelegramGateway port adapter boundary**（依赖：M1-012）— 隔离 Telethon entity/event 类型和 Session owner；只有 `app` process 能持有 Session。
 - [ ] **M3-002 实现 private one-to-one scope 与事件规范化**（依赖：M3-001）— 接收 incoming/outgoing/edit/delete/reaction/service；群组、频道和 unsupported peer 不保存正文且不触发模型。
@@ -336,4 +338,4 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 17. 下一步
 
-M0、M1与M2已经关闭。下一步进入M3 Telegram ingest与outbound intent；真实Telegram、真实provider、自动发送和生产部署仍禁止启用。
+M3候选等待GitLab Linux门禁；通过并绑定签名commit/tree后关闭M3并进入M4。真实Telegram、真实provider、AUTO生成、自动发送和生产部署仍禁止启用。

@@ -1,0 +1,302 @@
+from collections import deque
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from types import SimpleNamespace
+from typing import Any, cast
+from uuid import UUID
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from telegram_userbot.adapters.persistence.records import (
+    AttemptCompletionRecord,
+    NewDeliveryGroupRecord,
+    OutboundIntentRecord,
+    ReadHighWatermarkRecord,
+    TypingLeaseRecord,
+)
+from telegram_userbot.adapters.persistence.telegram_repository import (
+    TelegramLifecycleRepository,
+)
+from telegram_userbot.adapters.telegram_user import (
+    PeerAdmission,
+    RawTelegramUpdate,
+    normalize_update,
+)
+from telegram_userbot.domain.messaging import (
+    AttemptOutcome,
+    Direction,
+    EventKind,
+    NormalizedTelegramEvent,
+    OutboundChunk,
+    PeerKind,
+    payload_sha256,
+)
+
+NOW = datetime(2030, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+
+class ScriptedResult:
+    def __init__(
+        self,
+        row: dict[str, object] | None = None,
+        *,
+        scalar_rows: tuple[object, ...] = (),
+        rows: tuple[object, ...] = (),
+    ) -> None:
+        self.row = row
+        self.scalar_rows = scalar_rows
+        self.rows = rows
+
+    def mappings(self) -> ScriptedResult:
+        return self
+
+    def one_or_none(self) -> dict[str, object] | None:
+        return self.row
+
+    def one(self) -> dict[str, object]:
+        assert self.row is not None
+        return self.row
+
+    def scalars(self) -> tuple[object, ...]:
+        return self.scalar_rows
+
+    def all(self) -> tuple[object, ...]:
+        return self.rows
+
+
+class ScriptedSession:
+    def __init__(
+        self,
+        *,
+        scalar_values: tuple[object, ...] = (),
+        execute_results: tuple[ScriptedResult, ...] = (),
+    ) -> None:
+        self.scalar_values = deque(scalar_values)
+        self.execute_results = deque(execute_results)
+        self.statements: list[object] = []
+
+    async def scalar(self, statement: object) -> object | None:
+        self.statements.append(statement)
+        return self.scalar_values.popleft() if self.scalar_values else None
+
+    async def execute(self, statement: object) -> ScriptedResult:
+        self.statements.append(statement)
+        return self.execute_results.popleft() if self.execute_results else ScriptedResult()
+
+
+def session(value: ScriptedSession) -> AsyncSession:
+    return cast(AsyncSession, value)
+
+
+def event(
+    *, identity: str = "create:10", peer: PeerKind = PeerKind.PRIVATE_USER
+) -> NormalizedTelegramEvent:
+    conversation_id = UUID(int=2) if peer.supported else None
+    return normalize_update(
+        event_uuid=UUID(int=3),
+        admission=PeerAdmission(UUID(int=1), conversation_id, peer, 42),
+        raw=RawTelegramUpdate(
+            identity,
+            EventKind.MESSAGE_CREATED,
+            NOW,
+            telegram_event_at=NOW,
+            telegram_message_id=10,
+            direction=Direction.INCOMING,
+            text="synthetic private body",
+        ),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ingest_duplicate_unsupported_and_new_message_paths() -> None:
+    duplicate_session = ScriptedSession(scalar_values=(None, 7))
+    duplicate = await TelegramLifecycleRepository(session(duplicate_session)).ingest(event())
+    assert duplicate.duplicate
+    assert duplicate.event_id == 7
+
+    unsupported_session = ScriptedSession(scalar_values=(8,))
+    unsupported = await TelegramLifecycleRepository(session(unsupported_session)).ingest(
+        event(identity="group:10", peer=PeerKind.GROUP)
+    )
+    assert unsupported.projected
+    assert unsupported.message_id is None
+
+    ids = deque((UUID(int=10), UUID(int=11)))
+    created_session = ScriptedSession(
+        scalar_values=(9, UUID(int=11)),
+        execute_results=(ScriptedResult(None),),
+    )
+    created = await TelegramLifecycleRepository(
+        session(created_session), new_uuid=ids.popleft
+    ).ingest(event(identity="create:new"))
+    assert created.message_id == UUID(int=10)
+    assert created.revision_no == 1
+    assert created.source == "telegram_user"
+    assert len(created_session.statements) >= 7
+
+
+def group_record() -> tuple[NewDeliveryGroupRecord, OutboundChunk]:
+    chunk = OutboundChunk(
+        UUID(int=31), 0, 44, "synthetic output", payload_sha256("synthetic output")
+    )
+    group = NewDeliveryGroupRecord(
+        UUID(int=30),
+        UUID(int=1),
+        UUID(int=2),
+        UUID(int=29),
+        "ai",
+        sha256(b"group").digest(),
+        NOW,
+    )
+    return group, chunk
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_create_delivery_group_validates_and_is_idempotent() -> None:
+    group, chunk = group_record()
+    inserted_session = ScriptedSession(scalar_values=(group.id,))
+    repository = TelegramLifecycleRepository(session(inserted_session))
+    assert await repository.create_delivery_group(group=group, chunks=(chunk,)) == group.id
+
+    duplicate_session = ScriptedSession(scalar_values=(None, group.id))
+    assert (
+        await TelegramLifecycleRepository(session(duplicate_session)).create_delivery_group(
+            group=group, chunks=(chunk,)
+        )
+        == group.id
+    )
+    with pytest.raises(ValueError, match="at least one"):
+        await repository.create_delivery_group(group=group, chunks=())
+    invalid_sequence = OutboundChunk(UUID(int=32), 2, 45, "two", payload_sha256("two"))
+    with pytest.raises(ValueError, match="contiguous"):
+        await repository.create_delivery_group(group=group, chunks=(invalid_sequence,))
+    invalid_hash = OutboundChunk(UUID(int=33), 0, 46, "text", b"x" * 32)
+    hash_session = ScriptedSession(scalar_values=(group.id,))
+    with pytest.raises(ValueError, match="hash mismatch"):
+        await TelegramLifecycleRepository(session(hash_session)).create_delivery_group(
+            group=group, chunks=(invalid_hash,)
+        )
+
+
+def intent_row(*, state: str = "pending", attempt_count: int = 0) -> dict[str, object]:
+    return {
+        "id": UUID(int=31),
+        "delivery_group_id": UUID(int=30),
+        "account_id": UUID(int=1),
+        "conversation_id": UUID(int=2),
+        "model_run_id": UUID(int=29),
+        "sequence_no": 0,
+        "telegram_random_id": 44,
+        "text_content": "synthetic output",
+        "payload_sha256": payload_sha256("synthetic output"),
+        "state": state,
+        "telegram_message_id": None,
+        "attempt_count": attempt_count,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_claim_finish_recover_and_get_intent_state_paths() -> None:
+    claimed_row = intent_row(state="sending", attempt_count=1)
+    scripted = ScriptedSession(
+        execute_results=(
+            ScriptedResult(intent_row()),
+            ScriptedResult(claimed_row),
+            ScriptedResult(),
+            ScriptedResult(),
+            ScriptedResult(),
+            ScriptedResult(),
+            ScriptedResult(scalar_rows=("sent",)),
+            ScriptedResult(),
+            ScriptedResult(claimed_row),
+        )
+    )
+    repository = TelegramLifecycleRepository(session(scripted))
+    claimed = await repository.claim_intent(intent_id=UUID(int=31), now=NOW)
+    assert claimed is not None
+    assert claimed.attempt_count == 1
+    await repository.finish_attempt(
+        intent=claimed,
+        completion=AttemptCompletionRecord(AttemptOutcome.SUCCEEDED, NOW, telegram_message_id=700),
+    )
+    fetched = await repository.get_intent(UUID(int=31))
+    assert fetched is not None
+
+    missing = await TelegramLifecycleRepository(
+        session(ScriptedSession(execute_results=(ScriptedResult(None),)))
+    ).claim_intent(intent_id=UUID(int=99), now=NOW)
+    assert missing is None
+
+    recovery_session = ScriptedSession(
+        execute_results=(
+            ScriptedResult(
+                rows=(
+                    SimpleNamespace(id=UUID(int=31), delivery_group_id=UUID(int=30)),
+                    SimpleNamespace(id=UUID(int=32), delivery_group_id=UUID(int=30)),
+                )
+            ),
+            ScriptedResult(),
+            ScriptedResult(scalar_rows=("unknown",)),
+            ScriptedResult(),
+        )
+    )
+    recovered = await TelegramLifecycleRepository(session(recovery_session)).recover_stale_sending(
+        older_than=NOW - timedelta(seconds=5), now=NOW
+    )
+    assert recovered == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_attempt_validation_read_watermark_and_typing_paths() -> None:
+    intent = OutboundIntentRecord(
+        UUID(int=31),
+        UUID(int=30),
+        UUID(int=1),
+        UUID(int=2),
+        UUID(int=29),
+        0,
+        44,
+        "synthetic output",
+        payload_sha256("synthetic output"),
+        "sending",
+        None,
+        1,
+    )
+    repository = TelegramLifecycleRepository(session(ScriptedSession()))
+    with pytest.raises(ValueError, match="requires Telegram message id"):
+        await repository.finish_attempt(
+            intent=intent,
+            completion=AttemptCompletionRecord(AttemptOutcome.SUCCEEDED, NOW),
+        )
+
+    read_session = ScriptedSession(scalar_values=(UUID(int=50), None))
+    read_repository = TelegramLifecycleRepository(session(read_session))
+    read = ReadHighWatermarkRecord(
+        UUID(int=50), UUID(int=1), UUID(int=2), 90, sha256(b"read").digest(), NOW
+    )
+    assert await read_repository.record_read_high_watermark(record=read)
+    assert not await read_repository.record_read_high_watermark(record=read)
+
+    typing_repository = TelegramLifecycleRepository(session(ScriptedSession()))
+    await typing_repository.set_typing_lease(
+        record=TypingLeaseRecord(
+            UUID(int=1), UUID(int=2), UUID(int=60), NOW + timedelta(seconds=8), NOW
+        )
+    )
+    await typing_repository.set_typing_lease(
+        record=TypingLeaseRecord(UUID(int=1), UUID(int=2), None, None, NOW)
+    )
+    with pytest.raises(ValueError, match="set together"):
+        await typing_repository.set_typing_lease(
+            record=TypingLeaseRecord(UUID(int=1), UUID(int=2), UUID(int=60), None, NOW)
+        )
+
+
+@pytest.mark.unit
+def test_scripted_session_shape_is_intentionally_runtime_only() -> None:
+    assert cast(Any, ScriptedResult({"value": 1})).mappings().one()["value"] == 1

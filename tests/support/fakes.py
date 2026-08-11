@@ -14,7 +14,13 @@ from telegram_userbot.application.ports.model import (
     ModelResponse,
 )
 from telegram_userbot.application.ports.queue import JobEnvelope
-from telegram_userbot.application.ports.telegram import TelegramSendReceipt, TelegramTextRequest
+from telegram_userbot.application.ports.telegram import (
+    TelegramReadReceipt,
+    TelegramReadRequest,
+    TelegramSendReceipt,
+    TelegramTextRequest,
+    TelegramTypingRequest,
+)
 from telegram_userbot.domain.shared.ids import EntityId
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 from telegram_userbot.domain.shared.time import MonotonicInstant, UtcTimestamp
@@ -98,10 +104,19 @@ class FakeJobQueue:
 @dataclass(slots=True)
 class FakeTelegramGateway:
     requests: list[TelegramTextRequest] = field(default_factory=list)
+    read_requests: list[TelegramReadRequest] = field(default_factory=list)
+    typing_requests: list[TelegramTypingRequest] = field(default_factory=list)
 
     async def send_text(self, request: TelegramTextRequest) -> TelegramSendReceipt:
         self.requests.append(request)
         return TelegramSendReceipt(telegram_message_id=len(self.requests))
+
+    async def acknowledge_read(self, request: TelegramReadRequest) -> TelegramReadReceipt:
+        self.read_requests.append(request)
+        return TelegramReadReceipt(request.max_telegram_message_id)
+
+    async def set_typing(self, request: TelegramTypingRequest) -> None:
+        self.typing_requests.append(request)
 
 
 @dataclass(slots=True)

@@ -4,16 +4,16 @@
 
 ## 当前状态
 
-V1架构设计、M0、M1与M2已经完成。M2实现四个独立profile、三种generation wire adapter与embedding adapter、AES-256-GCM credential envelope、SSRF/TLS admission contract、durable Control Bot配置会话和只写API-key Web App；Windows本地门禁与GitLab Linux数据库、Chromium和acceptance门禁均已通过。
+V1架构设计、M0、M1与M2已经完成。M3候选已实现private 1:1 Telegram事件规范化、revision/tombstone、media metadata、outbound intent、stable random ID、source reconciliation与fake恢复矩阵；Windows static/unit/contract已通过，GitLab Linux migration/recovery/acceptance待执行。
 
 因此：
 
-- 可以运行本地安全校验、fake-only model contract、key-only ASGI测试和显式的disposable PostgreSQL/Redis/browser integration test，但不能连接真实Telegram/provider、启动完整业务服务或部署本项目；
+- 可以运行本地安全校验、fake-only Telegram/model contract、key-only ASGI测试和显式的disposable PostgreSQL/Redis/browser integration test，但不能连接真实Telegram/provider、启动完整业务服务或部署本项目；
 - 文档中的最终服务与业务命令仍是实现契约，不是已经存在的入口；
 - Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)和[M2 Compatibility Set](docs/compatibility/m2.md)。下一阶段是M3 Telegram ingest与outbound intent；真实Telegram/provider仍未接入。
+精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)和[M3 Compatibility Set](docs/compatibility/m3.md)。M3通过GitLab门禁后进入M4 Conversation Orchestrator；真实Telegram/provider仍未接入。
 
 ## 架构摘要
 
@@ -97,7 +97,7 @@ session-backup
 data-export
 ```
 
-M2已实现可嵌入`control`进程的model-control controller/backend与key-only ASGI app，但尚无Bot framework polling、Caddy或Compose wiring，因此它们不是可部署的完整业务入口。未来运行命令必须随实际Compose文件和runbook一起加入README，并经过Test Strategy与Disclosure审查。
+M2已实现可嵌入`control`进程的model-control组件，M3已实现由`app`注入已连接client后才能使用的Telethon gateway；默认入口既不创建Telegram client也不读取Session。当前仍无Bot polling、Conversation Orchestrator、Caddy或Compose wiring，因此不存在可部署的完整业务入口，也没有AUTO生成或主动发送能力。未来运行命令必须随实际Compose文件和runbook一起加入README，并经过Test Strategy与Disclosure审查。
 
 ## 测试与证据
 
@@ -108,6 +108,8 @@ M0在Windows/CPython 3.14.7的本地结果：56 tests `PASS`，line coverage 97.
 M1在Windows/CPython 3.14.7的本地结果：86 tests `PASS`、10个integration/recovery test因本机无Docker为`NOT RUN`，总coverage 98.08%；Ruff、strict mypy、import boundary、wheel/sdist Disclosure与secret/artifact扫描均`PASS`。签名提交`9c2dbf61c8b67e75182f47abbb419ae82773678a`对应的[GitLab Linux pipeline #9](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2747812423)为`PASS`，真实PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上的96个测试全部通过；acceptance manifest绑定相同commit/tree并将M1-001—M1-012全部记录为`PASS`。Windows真实服务、Ubuntu production、backup/restore和production load仍为`NOT RUN`。
 
 M2在Windows/CPython 3.14.7本地有143个默认测试通过，line coverage 92.11%、branch coverage 80.89%；本机Docker为`NOT RUN`且Chromium binary为`BLOCKED`。签名提交`def4ff1f846307a7ea428de3c048616601cab7a4`对应的[GitLab Linux pipeline #2748486868](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2748486868)全部通过：157个测试零失败/跳过，line coverage 92.11%、branch coverage 81.61%，四条migration路径、DB role、Chromium 151.0.7922.34和M2 acceptance均为`PASS`。真实Telegram/provider、Ubuntu production、backup/restore和production load仍为`NOT RUN`。
+
+M3候选在Windows/CPython 3.14.7已通过Ruff、strict mypy和新增unit/contract fake测试；本机没有Docker daemon，因此新增PostgreSQL migration、repository、role和recovery integration为`NOT RUN`。候选推送后由GitLab Linux生成migration、12项content-free replay和M3 acceptance证据。真实Telegram ingest/send与Session owner运行时保持`NOT RUN`。
 
 常用本地门禁：
 

@@ -35,6 +35,7 @@ def test_runtime_dependencies_and_python_are_pinned() -> None:
         "psycopg[binary]==3.3.4",
         "redis==5.3.1",
         "starlette==1.6.0",
+        "Telethon==1.44.0",
         "tzdata==2026.3",
         "uvicorn==0.52.1",
     ]

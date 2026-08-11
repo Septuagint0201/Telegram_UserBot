@@ -5,7 +5,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from telegram_userbot.adapters.persistence.engine import schema_is_ready
-from telegram_userbot.adapters.persistence.schema import M1_TABLES, M2_TABLES
+from telegram_userbot.adapters.persistence.schema import M1_TABLES, M2_TABLES, M3_TABLES
 
 ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 async def test_empty_base_round_trip_reaches_exact_head_and_vector(
     postgres_engine: AsyncEngine,
 ) -> None:
-    assert await schema_is_ready(postgres_engine, "0002_m2_model_control")
+    assert await schema_is_ready(postgres_engine, "0003_m3_telegram_lifecycle")
     async with postgres_engine.connect() as connection:
         tables = await connection.run_sync(lambda sync: set(inspect(sync).get_table_names()))
         version = await connection.scalar(text("SHOW server_version"))
@@ -24,6 +24,7 @@ async def test_empty_base_round_trip_reaches_exact_head_and_vector(
         )
     assert set(M1_TABLES) <= tables
     assert set(M2_TABLES) <= tables
+    assert set(M3_TABLES) <= tables
     assert str(version).startswith("17.")
     assert vector == "0.8.6"
 

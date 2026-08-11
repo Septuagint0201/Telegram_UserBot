@@ -907,6 +907,8 @@ UNIQUE (id, account_id, draft_id)
 
 ### 7.11 `outbound_delivery_groups`
 
+实现顺序说明：本节描述M4及后续应达到的最终wide-FK schema。`0003_m3_telegram_lifecycle`先建立不会丢失的outbound identity、ordered payload、stable `telegram_random_id`、attempt与恢复状态，并逐字保存nullable `model_run_id`；此时`model_runs`、turn、proactive decision和COPILOT draft表尚不存在，因此M3不能伪造这些FK或快照。M4 migration必须扩展M3表并补齐本节的composite/widest FK、authorization snapshot、splitter和终态约束。该阶段性边界只延后不存在目标表的referential constraint，不允许应用忽略已经存在的account/conversation/group/random-ID约束。
+
 一个完整 normalized logical output 对应一个 delivery group。短文本 group 也存在，只包含一个 intent；长文本按 Context Contract 的 versioned deterministic splitter 生成多个 intent。
 
 | 字段 | 类型 | 约束与语义 |
