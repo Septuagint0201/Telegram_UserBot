@@ -223,7 +223,7 @@ def _requirements_for(milestone: str, *, root: Path) -> list[RequirementRecord]:
             _requirement(
                 "M4-002",
                 "src/telegram_userbot/domain/conversation/turn.py",
-                "alembic/versions/0004_m4_conversation_orchestrator.py",
+                "alembic/versions/0004_m4_orchestrator.py",
             ),
             _requirement(
                 "M4-003",

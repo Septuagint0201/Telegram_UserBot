@@ -5,6 +5,8 @@ from typing import cast
 
 import jsonschema
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from telegram_userbot.platform.evidence.manifest import (
     ManifestSemanticError,
@@ -20,6 +22,15 @@ def valid_manifest() -> dict[str, object]:
         "source": {"commit": "a" * 40, "dirty": False},
         "requirements": [{"id": "M0-001", "status": "PASS", "evidence": ["test"]}],
     }
+
+
+@pytest.mark.unit
+def test_alembic_head_fits_default_version_column() -> None:
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    head = ScriptDirectory.from_config(config).get_current_head()
+    assert head == "0004_m4_orchestrator"
+    assert len(head) <= 32
 
 
 def first_requirement(document: dict[str, object]) -> dict[str, object]:

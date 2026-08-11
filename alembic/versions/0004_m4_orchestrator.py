@@ -1,7 +1,7 @@
 # ruff: noqa: E501 - SQL migration statements remain grep-friendly and executable verbatim.
 """M4 conversation orchestrator and Main AI lifecycle.
 
-Revision ID: 0004_m4_conversation_orchestrator
+Revision ID: 0004_m4_orchestrator
 Revises: 0003_m3_telegram_lifecycle
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 
 from telegram_userbot.adapters.persistence.schema import M4_TABLES, metadata
 
-revision: str = "0004_m4_conversation_orchestrator"
+revision: str = "0004_m4_orchestrator"
 down_revision: str | Sequence[str] | None = "0003_m3_telegram_lifecycle"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

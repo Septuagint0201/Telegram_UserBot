@@ -111,7 +111,7 @@ M2在Windows/CPython 3.14.7本地有143个默认测试通过，line coverage 92.
 
 M3在Windows/CPython 3.14.7本地有179个默认测试通过，line coverage 91.41%、branch coverage 81.13%；本机没有Docker daemon，因此PostgreSQL/Redis integration为`NOT RUN`。签名提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`对应的[GitLab Linux pipeline #2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)全部通过：`m3-telegram-fake`在PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上执行202个测试，1个browser测试按策略deselect，line coverage 93.22%、branch coverage 84.65%；4条migration路径、12项content-free replay和M3-001—M3-010 acceptance均为`PASS`。真实Telegram ingest/send与Session owner运行时保持`NOT RUN`。
 
-M4实现候选使用11张新增orchestration表和`0004_m4_conversation_orchestrator`迁移，测试覆盖mode/version、3/10秒收集、精确三秒grace、late-result discard、final RPC gate、generation/typing lease、human invalidation、COPILOT revision/token和显式`/reply_pending`边界。本机Docker integration与GitLab关闭pipeline尚未运行，因此M4-011和三项退出门禁暂不标记完成。
+M4实现候选使用11张新增orchestration表和`0004_m4_orchestrator`迁移，测试覆盖mode/version、3/10秒收集、精确三秒grace、late-result discard、final RPC gate、generation/typing lease、human invalidation、COPILOT revision/token和显式`/reply_pending`边界。本机Docker integration与GitLab关闭pipeline尚未运行，因此M4-011和三项退出门禁暂不标记完成。
 
 常用本地门禁：
 
