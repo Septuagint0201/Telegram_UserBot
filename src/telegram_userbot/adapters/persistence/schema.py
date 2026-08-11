@@ -164,6 +164,12 @@ conversations = Table(
         "id",
         "account_id",
         "contact_id",
+        name="uq_conversations_id_account_contact",
+    ),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "contact_id",
         "account_peer_id",
         name="uq_conversations_full_scope",
     ),

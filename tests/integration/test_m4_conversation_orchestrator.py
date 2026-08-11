@@ -668,7 +668,8 @@ async def test_m4_roles_and_wide_constraints_are_enforced(db_session: AsyncSessi
                     "'fk_outbound_groups_model_run_scope',"
                     "'fk_outbound_intents_turn_scope',"
                     "'fk_outbound_intents_model_run_scope',"
-                    "'fk_outbound_intents_group_m4_scope')"
+                    "'fk_outbound_intents_group_m4_scope',"
+                    "'uq_conversations_id_account_contact')"
                 )
             )
         ).scalars()
@@ -679,4 +680,5 @@ async def test_m4_roles_and_wide_constraints_are_enforced(db_session: AsyncSessi
         "fk_outbound_intents_turn_scope",
         "fk_outbound_intents_model_run_scope",
         "fk_outbound_intents_group_m4_scope",
+        "uq_conversations_id_account_contact",
     }

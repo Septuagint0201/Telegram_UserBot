@@ -20,6 +20,11 @@ depends_on: str | Sequence[str] | None = None
 def _upgrade_existing_tables() -> None:
     op.execute(
         """
+        ALTER TABLE conversations DROP CONSTRAINT IF EXISTS
+          uq_conversations_id_account_contact;
+        ALTER TABLE conversations ADD CONSTRAINT uq_conversations_id_account_contact
+          UNIQUE (id, account_id, contact_id);
+
         ALTER TABLE conversation_turns ADD COLUMN IF NOT EXISTS debounce_seconds integer
           NOT NULL DEFAULT 3;
         ALTER TABLE conversation_turns ADD COLUMN IF NOT EXISTS hard_cap_seconds integer
@@ -237,6 +242,9 @@ def downgrade() -> None:
     metadata.drop_all(bind=op.get_bind(), tables=m4_tables, checkfirst=False)
     op.execute(
         """
+        ALTER TABLE conversations DROP CONSTRAINT IF EXISTS
+          uq_conversations_id_account_contact;
+
         ALTER TABLE outbound_intents DROP COLUMN IF EXISTS chunk_count;
         ALTER TABLE outbound_intents DROP COLUMN IF EXISTS idempotency_key;
         ALTER TABLE outbound_intents DROP COLUMN IF EXISTS content_revision;
