@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M3已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭；M4实现候选正在执行关闭门禁，M5—M9尚未开始。Telegram/provider live、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M4已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭；M5—M9尚未开始。Telegram/provider live、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -459,4 +459,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0—M3已经关闭，M4实现候选正在验证；下一步只有在M4签名commit对应的GitLab Linux证据全部通过后才进入M5。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。
+M0—M4已经关闭，下一步进入M5 Media与Context Contract。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。

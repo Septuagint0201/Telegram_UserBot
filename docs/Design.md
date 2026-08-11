@@ -2585,9 +2585,9 @@ release/operations-sensitive -> live smoke + backup/restore + 2/4/40 24h soak
 
 每个验收项使用稳定requirement/test ID，并输出JUnit、coverage和content-free acceptance manifest。结果只能是`PASS`、`FAIL`、`NOT RUN`或`BLOCKED`；普通证据保留30天，release/restore/soak证据保留365天。
 
-当前仓库已经完成M0工程基线、M1 PostgreSQL/Redis durable state、M2模型配置/key-only控制组件和M3 Telegram lifecycle primitives；M3实现了注入client的Telethon gateway、private 1:1 event/revision/tombstone、media metadata、outbound intent/random ID、reconciliation与fake恢复矩阵。默认入口仍只执行安全配置检查，不创建Telegram client、不读取Session、不启动Control Web App或Orchestrator，也不产生自动消息。
+当前仓库已经完成M0工程基线、M1 PostgreSQL/Redis durable state、M2模型配置/key-only控制组件、M3 Telegram lifecycle primitives和M4 Conversation Orchestrator。M3实现了注入client的Telethon gateway、private 1:1 event/revision/tombstone、media metadata、outbound intent/random ID、reconciliation与fake恢复矩阵；M4实现了effective mode、turn/run lifecycle、精确三秒grace、final send gate、AUTO read/typing、human invalidation与COPILOT draft。默认入口仍只执行安全配置检查，不创建Telegram client、不读取Session、不启动Control Web App或Orchestrator，也不产生自动消息。
 
-M0—M3已有绑定签名commit/tree的GitLab Linux evidence。M3证据提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`对应的pipeline [#2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)已经通过migration、replay、PostgreSQL/Redis service integration与acceptance门禁；Windows本机PostgreSQL integration因无Docker为`NOT RUN`。真实Telegram/provider、完整runtime、Compose、Ubuntu production、backup/restore、live smoke与soak仍为`NOT RUN`；任何文档中的最终流程都不能被误述为当前已部署能力。
+M0—M4已有绑定签名commit/tree的GitLab Linux evidence。M4证据提交`6185c6ef0a33ca4d8fadc293b49a536a18d7e24a`对应的pipeline [#2752242512](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2752242512)已经通过migration、race、PostgreSQL/Redis service integration与候选acceptance作业，本次签名关闭更新完成M4-011；Windows本机PostgreSQL integration因无Docker为`NOT RUN`。真实Telegram/provider、完整runtime、Compose、Ubuntu production、backup/restore、live smoke与soak仍为`NOT RUN`；任何文档中的最终流程都不能被误述为当前已部署能力。
 
 ---
 
