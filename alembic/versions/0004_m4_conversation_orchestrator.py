@@ -151,8 +151,8 @@ def _add_wide_constraints() -> None:
           REFERENCES conversation_turns(id, account_id, conversation_id)
           DEFERRABLE INITIALLY DEFERRED;
         ALTER TABLE outbound_delivery_groups ADD CONSTRAINT fk_outbound_groups_model_run_scope
-          FOREIGN KEY (model_run_id, account_id, conversation_id, model_role)
-          REFERENCES model_runs(id, account_id, conversation_id, logical_role)
+          FOREIGN KEY (model_run_id, account_id, conversation_id, turn_id, model_role)
+          REFERENCES model_runs(id, account_id, conversation_id, turn_id, logical_role)
           DEFERRABLE INITIALLY DEFERRED;
         ALTER TABLE outbound_delivery_groups ADD CONSTRAINT fk_outbound_groups_copilot_draft_scope
           FOREIGN KEY (copilot_draft_id, account_id, conversation_id)
@@ -171,8 +171,8 @@ def _add_wide_constraints() -> None:
           REFERENCES conversation_turns(id, account_id, conversation_id)
           DEFERRABLE INITIALLY DEFERRED;
         ALTER TABLE outbound_intents ADD CONSTRAINT fk_outbound_intents_model_run_scope
-          FOREIGN KEY (model_run_id, account_id, conversation_id, model_role)
-          REFERENCES model_runs(id, account_id, conversation_id, logical_role)
+          FOREIGN KEY (model_run_id, account_id, conversation_id, turn_id, model_role)
+          REFERENCES model_runs(id, account_id, conversation_id, turn_id, logical_role)
           DEFERRABLE INITIALLY DEFERRED;
         ALTER TABLE outbound_intents ADD CONSTRAINT fk_outbound_intents_group_m4_scope
           FOREIGN KEY (delivery_group_id, account_id, conversation_id, model_run_id,

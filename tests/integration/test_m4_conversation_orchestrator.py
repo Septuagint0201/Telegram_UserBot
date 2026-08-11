@@ -682,3 +682,21 @@ async def test_m4_roles_and_wide_constraints_are_enforced(db_session: AsyncSessi
         "fk_outbound_intents_group_m4_scope",
         "uq_conversations_id_account_contact",
     }
+    model_scope_definitions = {
+        row.conname: row.definition
+        for row in (
+            await db_session.execute(
+                text(
+                    "SELECT conname, pg_get_constraintdef(oid) AS definition "
+                    "FROM pg_constraint WHERE conname IN ("
+                    "'fk_outbound_groups_model_run_scope',"
+                    "'fk_outbound_intents_model_run_scope')"
+                )
+            )
+        ).all()
+    }
+    for definition in model_scope_definitions.values():
+        assert (
+            "FOREIGN KEY (model_run_id, account_id, conversation_id, turn_id, model_role)"
+            in definition
+        )
