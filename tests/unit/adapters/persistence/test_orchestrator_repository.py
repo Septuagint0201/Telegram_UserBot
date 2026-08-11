@@ -25,6 +25,7 @@ from telegram_userbot.domain.conversation import (
     WorkSnapshot,
     resolve_mode,
 )
+from telegram_userbot.domain.messaging import EventKind
 
 NOW = datetime(2030, 2, 3, 4, 5, 6, tzinfo=UTC)
 ACCOUNT = UUID(int=1)
@@ -624,7 +625,11 @@ async def test_generation_grace_compensation_skips_stale_and_supersedes_exact_in
     exact._locked_scope = AsyncMock(return_value=scope(revision=8))  # type: ignore[method-assign]
     exact._new_revision_events = AsyncMock(  # type: ignore[method-assign]
         return_value=(
-            {"event_kind": "message_created", "direction": "incoming", "source": "telegram_user"},
+            {
+                "event_kind": EventKind.MESSAGE_CREATED.value,
+                "direction": "incoming",
+                "source": "telegram_user",
+            },
         )
     )
     exact._supersede = AsyncMock(  # type: ignore[method-assign]
@@ -651,7 +656,11 @@ async def test_generation_grace_compensation_skips_stale_and_supersedes_exact_in
     )
     non_incoming._new_revision_events = AsyncMock(  # type: ignore[method-assign]
         return_value=(
-            {"event_kind": "message_edited", "direction": "incoming", "source": "telegram_user"},
+            {
+                "event_kind": EventKind.MESSAGE_EDITED.value,
+                "direction": "incoming",
+                "source": "telegram_user",
+            },
         )
     )
     assert await non_incoming.expire_generation_grace(now=NOW) == 0

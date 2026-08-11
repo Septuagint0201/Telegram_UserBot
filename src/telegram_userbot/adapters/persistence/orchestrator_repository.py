@@ -70,6 +70,7 @@ from telegram_userbot.domain.conversation import (
     split_telegram_text,
 )
 from telegram_userbot.domain.messaging import (
+    EventKind,
     OutboundChunk,
     payload_sha256,
     stable_telegram_random_id,
@@ -775,7 +776,7 @@ class ConversationOrchestratorRepository:
                 continue
             new_events = await self._new_revision_events(run)
             only_new_incoming = bool(new_events) and all(
-                row["event_kind"] == "message_created"
+                row["event_kind"] == EventKind.MESSAGE_CREATED.value
                 and row["direction"] == "incoming"
                 and row["source"] == "telegram_user"
                 for row in new_events
@@ -1421,7 +1422,7 @@ class ConversationOrchestratorRepository:
             raise OrchestratorConflictError("RUN_SCOPE_CHANGED")
         new_events = await self._new_revision_events(run)
         only_new_incoming = bool(new_events) and all(
-            row["event_kind"] == "message_created"
+            row["event_kind"] == EventKind.MESSAGE_CREATED.value
             and row["direction"] == "incoming"
             and row["source"] == "telegram_user"
             for row in new_events
@@ -1777,7 +1778,7 @@ class ConversationOrchestratorRepository:
             bool(actual)
             and authorized_ids == frozenset(item["id"] for item in actual)
             and all(
-                item["event_kind"] == "message_created"
+                item["event_kind"] == EventKind.MESSAGE_CREATED.value
                 and item["direction"] == "incoming"
                 and item["source"] == "telegram_user"
                 for item in actual
