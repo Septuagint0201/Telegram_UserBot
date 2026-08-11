@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计、M0、M1与M2已经完成。M3 Telegram ingest、Telethon边界、outbound intent/reconciliation与fake恢复矩阵已经实现为候选；Windows Ruff、strict mypy与unit/contract测试为`PASS`，本机无Docker，PostgreSQL migration/recovery为`NOT RUN`，正在等待签名候选的GitLab Linux门禁。真实Telegram/provider live、应用容器、自动回复、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。
+架构设计与M0—M3已经完成。M3证据提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`对应的GitLab Linux pipeline [#2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)为`PASS`；Windows本机无Docker，真实Telegram/provider live、应用容器、自动回复、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。下一阶段是M4 Conversation Orchestrator与Main AI。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -42,7 +42,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M0 | 工程脚手架与测试基础 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
 | M1 | PostgreSQL、Redis与 durable state | COMPLETE | WINDOWS STATIC/UNIT PASS; GITLAB SERVICE INTEGRATION PASS |
 | M2 | 模型配置、adapter与 key-only 控制面 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
-| M3 | Telegram ingest 与 outbound intent | CANDIDATE | WINDOWS STATIC/UNIT PASS; LOCAL POSTGRES NOT RUN; GITLAB PENDING |
+| M3 | Telegram ingest 与 outbound intent | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
 | M5 | Media 与 Context Contract | WAITING | NOT RUN |
 | M6 | Memory、Summary 与 Embedding Pipeline | WAITING | NOT RUN |
@@ -149,24 +149,31 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 目标：规范化 Telegram 事件，建立消息事实、来源核对和可恢复发送基础。
 
-候选实现已经覆盖M3-001—M3-009，但按本文件完成定义，在GitLab disposable PostgreSQL/Redis、migration、replay和acceptance证据实际`PASS`前保持未勾选。真实Telegram账号测试不属于M3关闭条件，并继续为`NOT RUN`。
+M3-001—M3-010已经由签名证据提交、disposable PostgreSQL/Redis、migration、12项content-free replay与acceptance manifest关闭。真实Telegram账号测试不属于M3关闭条件，并继续为`NOT RUN`。
 
-- [ ] **M3-001 实现 TelegramGateway port adapter boundary**（依赖：M1-012）— 隔离 Telethon entity/event 类型和 Session owner；只有 `app` process 能持有 Session。
-- [ ] **M3-002 实现 private one-to-one scope 与事件规范化**（依赖：M3-001）— 接收 incoming/outgoing/edit/delete/reaction/service；群组、频道和 unsupported peer 不保存正文且不触发模型。
-- [ ] **M3-003 实现 message business key 与 revision/tombstone**（依赖：M1-004、M3-002）— 使用 `account_id + chat_id + telegram_message_id`，保留 fingerprint、编辑 revision 和删除 tombstone；测试重复/乱序事件。
-- [ ] **M3-004 实现 album 与 media metadata**（依赖：M3-003）— 记录 `grouped_id`、稳定排序、Telegram photo/image document 元数据；语音、音频、视频、video note、非图片文档和 sticker 不下载。
-- [ ] **M3-005 实现 outbound group/intent 与 stable random ID**（依赖：M1-005、M3-003）— 持久化分片顺序、`telegram_random_id`、payload hash、状态和 attempt；重试复用同一 ID。
-- [ ] **M3-006 实现消息来源 reconciliation**（依赖：M3-005）— 将 observed outgoing 与 human/system/AI intent 核对；未知来源保持显式状态，不能猜测归因。
-- [ ] **M3-007 实现 read acknowledgement 与 typing port**（依赖：M3-001）— 提供幂等开始/续租/停止接口；policy 决策留给 M4。
-- [ ] **M3-008 建立 Telegram fake、replay 与 event fixture**（依赖：M3-002—M3-007）— 可重放 album、edit/delete、重复 update、disconnect 和进程崩溃时间点。
-- [ ] **M3-009 验证发送失败与恢复**（依赖：M3-005—M3-008）— 覆盖 success、FloodWait、transient、permanent、send-unknown、partial group 和 crash-after-send-before-ack。
-- [ ] **M3-010 关闭 M3**（依赖：M3-001—M3-009）— 汇总 replay、幂等和 reconciliation 证据；真实账号 ingest/send 仍默认 `NOT RUN`。
+- [x] **M3-001 实现 TelegramGateway port adapter boundary**（依赖：M1-012）— 隔离 Telethon entity/event 类型和 Session owner；只有 `app` process 能持有 Session。
+- [x] **M3-002 实现 private one-to-one scope 与事件规范化**（依赖：M3-001）— 接收 incoming/outgoing/edit/delete/reaction/service；群组、频道和 unsupported peer 不保存正文且不触发模型。
+- [x] **M3-003 实现 message business key 与 revision/tombstone**（依赖：M1-004、M3-002）— 使用 `account_id + chat_id + telegram_message_id`，保留 fingerprint、编辑 revision 和删除 tombstone；测试重复/乱序事件。
+- [x] **M3-004 实现 album 与 media metadata**（依赖：M3-003）— 记录 `grouped_id`、稳定排序、Telegram photo/image document 元数据；语音、音频、视频、video note、非图片文档和 sticker 不下载。
+- [x] **M3-005 实现 outbound group/intent 与 stable random ID**（依赖：M1-005、M3-003）— 持久化分片顺序、`telegram_random_id`、payload hash、状态和 attempt；重试复用同一 ID。
+- [x] **M3-006 实现消息来源 reconciliation**（依赖：M3-005）— 将 observed outgoing 与 human/system/AI intent 核对；未知来源保持显式状态，不能猜测归因。
+- [x] **M3-007 实现 read acknowledgement 与 typing port**（依赖：M3-001）— 提供幂等开始/续租/停止接口；policy 决策留给 M4。
+- [x] **M3-008 建立 Telegram fake、replay 与 event fixture**（依赖：M3-002—M3-007）— 可重放 album、edit/delete、重复 update、disconnect 和进程崩溃时间点。
+- [x] **M3-009 验证发送失败与恢复**（依赖：M3-005—M3-008）— 覆盖 success、FloodWait、transient、permanent、send-unknown、partial group 和 crash-after-send-before-ack。
+- [x] **M3-010 关闭 M3**（依赖：M3-001—M3-009）— 汇总 replay、幂等和 reconciliation 证据；真实账号 ingest/send 仍默认 `NOT RUN`。
 
 ### M3 退出门禁
 
-- [ ] 重放相同 Telegram update 不产生重复 message fact 或 outbound send。
-- [ ] send-unknown 与 crash-after-send 不会盲目生成新 random ID 重发。
-- [ ] unsupported peer 和非图片媒体不落正文/二进制，不调用模型。
+- [x] 重放相同 Telegram update 不产生重复 message fact 或 outbound send。
+- [x] send-unknown 与 crash-after-send 不会盲目生成新 random ID 重发。
+- [x] unsupported peer 和非图片媒体不落正文/二进制，不调用模型。
+
+### M3 完成证据
+
+- 签名提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`、tree `768633185cc5f8362e18d7dc149868c7b1796bdb`对应的pipeline [#2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)及全部7个作业为`PASS`。
+- `m3-telegram-fake`在Linux/CPython 3.14.7、PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上运行202个测试，1个browser测试按策略deselect；line coverage 93.22%，branch coverage 84.65%。
+- Migration manifest记录Alembic head `0003_m3_telegram_lifecycle`、40张表、零匿名约束和4条migration路径全部`PASS`；12项replay matrix与M3-001—M3-010 acceptance manifest全部`PASS`。
+- Windows本地179个默认测试为`PASS`，24个非默认测试按marker deselect；line coverage 91.41%，branch coverage 81.13%。本机PostgreSQL/Redis因无Docker为`NOT RUN`，真实Telegram ingest/send与Session owner runtime仍为`NOT RUN`。
 
 ## 9. M4 — Conversation Orchestrator与 Main AI
 
@@ -338,4 +345,4 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 
 ## 17. 下一步
 
-M3候选等待GitLab Linux门禁；通过并绑定签名commit/tree后关闭M3并进入M4。真实Telegram、真实provider、AUTO生成、自动发送和生产部署仍禁止启用。
+M3已经关闭，下一步进入M4 Conversation Orchestrator与Main AI。真实Telegram、真实provider、AUTO生成、自动发送和生产部署仍禁止启用。

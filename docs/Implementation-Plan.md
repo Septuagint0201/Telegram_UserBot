@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0、M1与M2已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭。M3已形成实现候选，Windows static/unit/contract为`PASS`，本机PostgreSQL因无Docker为`NOT RUN`，GitLab Linux门禁待执行；M4—M9尚未开始，Telegram/provider live、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M3已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭；M4—M9尚未开始，Telegram/provider live、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -68,7 +68,7 @@ deploy/
 | M0 | 工程脚手架与测试基础 | 无 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M2 | 模型配置、adapter与key-only控制面 | 仅local fake | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | CANDIDATE — GITLAB PENDING |
+| M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | NOT STARTED |
 | M5 | Media与Context Contract | fake provider；测试图片 | NOT STARTED |
 | M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | NOT STARTED |
@@ -230,12 +230,13 @@ deploy/
 - 若执行真实Telegram smoke，只允许隔离测试账号/peer并单独记录。
 - 仍没有AUTO生成或主动消息能力。
 
-### 8.5 候选实现状态
+### 8.5 完成状态
 
 - 已固定Telethon 1.44.0并实现注入client的gateway；默认入口不创建client、不读取Session、不访问Telegram。
 - 已实现private 1:1事件规范化、fingerprint去重、revision/tombstone、album/media metadata、outbound group/intent/attempt、稳定random ID、来源核对、read high-watermark和typing lease。
 - deterministic fake覆盖success、FloodWait、transient、permanent、unknown-before/after-accept与同random ID去重；disposable PostgreSQL测试覆盖重复/乱序/delete-first、partial、crash-after-send、role和M4 staged FK边界。
-- Windows Ruff、strict mypy与unit/contract为`PASS`；本机没有Docker daemon，PostgreSQL integration为`NOT RUN`。M3只有在GitLab migration/replay/acceptance全部`PASS`后关闭。
+- Windows Ruff、strict mypy与179个默认测试为`PASS`，line coverage 91.41%、branch coverage 81.13%；本机没有Docker daemon，PostgreSQL/Redis integration为`NOT RUN`。
+- 签名提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`对应的GitLab pipeline [#2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)全部通过；Linux服务集成执行202个测试，4条migration路径、12项replay与M3 acceptance全部`PASS`。真实Telegram仍为`NOT RUN`。
 
 ## 9. M4 — Conversation Orchestrator与Main AI
 
@@ -456,4 +457,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0、M1与M2已经关闭。下一步进入M3 Telegram ingest/outbound intent；真实provider smoke继续保持`NOT RUN`，Telegram adapter、应用容器、自动发送和生产部署仍不存在。
+M0—M3已经关闭。下一步进入M4 Conversation Orchestrator与Main AI；真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、自动发送和生产部署仍不存在。
