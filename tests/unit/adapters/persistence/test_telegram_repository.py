@@ -25,10 +25,12 @@ from telegram_userbot.adapters.telegram_user import (
 )
 from telegram_userbot.domain.messaging import (
     AttemptOutcome,
+    DeliveryGroupState,
     Direction,
     EventKind,
     NormalizedTelegramEvent,
     OutboundChunk,
+    OutboundIntentState,
     PeerKind,
     payload_sha256,
 )
@@ -108,6 +110,39 @@ def event(
     )
 
 
+def reaction_event(*, identity: str, actor_peer_id: int | None = None) -> NormalizedTelegramEvent:
+    return normalize_update(
+        event_uuid=UUID(int=4),
+        admission=PeerAdmission(UUID(int=1), UUID(int=2), PeerKind.PRIVATE_USER, 42),
+        raw=RawTelegramUpdate(
+            identity,
+            EventKind.REACTION_CHANGED,
+            NOW,
+            telegram_message_id=10,
+            reaction_key="emoji:wave",
+            reaction_actor_telegram_peer_id=actor_peer_id,
+        ),
+    )
+
+
+def outgoing_event(
+    *, identity: str, kind: EventKind = EventKind.MESSAGE_CREATED
+) -> NormalizedTelegramEvent:
+    return normalize_update(
+        event_uuid=UUID(int=5),
+        admission=PeerAdmission(UUID(int=1), UUID(int=2), PeerKind.PRIVATE_USER, 42),
+        raw=RawTelegramUpdate(
+            identity,
+            kind,
+            NOW,
+            telegram_message_id=10 if kind is not EventKind.SERVICE else None,
+            direction=Direction.OUTGOING,
+            outbound_random_id=44 if kind is not EventKind.SERVICE else None,
+            text="synthetic output" if kind is not EventKind.SERVICE else None,
+        ),
+    )
+
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_ingest_duplicate_unsupported_and_new_message_paths() -> None:
@@ -135,6 +170,65 @@ async def test_ingest_duplicate_unsupported_and_new_message_paths() -> None:
     assert created.revision_no == 1
     assert created.source == "telegram_user"
     assert len(created_session.statements) >= 7
+
+    with pytest.raises(RuntimeError, match="event disappeared"):
+        await TelegramLifecycleRepository(
+            session(ScriptedSession(scalar_values=(None, None)))
+        ).ingest(event(identity="duplicate:vanished"))
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_reaction_projection_handles_missing_inserted_and_existing_rows() -> None:
+    missing = await TelegramLifecycleRepository(
+        session(ScriptedSession(scalar_values=(20, None)))
+    ).ingest(reaction_event(identity="reaction:missing-message"))
+    assert missing.message_id is None
+
+    inserted = await TelegramLifecycleRepository(
+        session(ScriptedSession(scalar_values=(21, UUID(int=10), None))),
+        new_uuid=lambda: UUID(int=11),
+    ).ingest(reaction_event(identity="reaction:insert"))
+    assert inserted.message_id == UUID(int=10)
+
+    updated_session = ScriptedSession(scalar_values=(22, UUID(int=10), UUID(int=12), UUID(int=13)))
+    updated = await TelegramLifecycleRepository(session(updated_session)).ingest(
+        reaction_event(identity="reaction:update", actor_peer_id=700)
+    )
+    assert updated.message_id == UUID(int=10)
+    assert len(updated_session.statements) == 6
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_outgoing_source_classification_covers_resolved_pending_and_human_paths() -> None:
+    resolved_session = ScriptedSession(
+        execute_results=(ScriptedResult({"source": "ai", "id": UUID(int=31)}),)
+    )
+    resolved = await TelegramLifecycleRepository(session(resolved_session))._classify_source(
+        outgoing_event(identity="outgoing:resolved")
+    )
+    assert resolved == ("ai", "resolved", UUID(int=31))
+
+    pending_session = ScriptedSession(
+        scalar_values=(UUID(int=32),), execute_results=(ScriptedResult(None),)
+    )
+    pending = await TelegramLifecycleRepository(session(pending_session))._classify_source(
+        outgoing_event(identity="outgoing:pending")
+    )
+    assert pending == ("system_pending", "pending", None)
+
+    human_session = ScriptedSession(scalar_values=(None,), execute_results=(ScriptedResult(None),))
+    human = await TelegramLifecycleRepository(session(human_session))._classify_source(
+        outgoing_event(identity="outgoing:human")
+    )
+    assert human == ("human", "resolved", None)
+
+    no_identity_session = ScriptedSession(scalar_values=(UUID(int=33),))
+    no_identity = await TelegramLifecycleRepository(session(no_identity_session))._classify_source(
+        outgoing_event(identity="service:pending", kind=EventKind.SERVICE)
+    )
+    assert no_identity == ("system_pending", "pending", None)
 
 
 def group_record() -> tuple[NewDeliveryGroupRecord, OutboundChunk]:
@@ -179,6 +273,10 @@ async def test_create_delivery_group_validates_and_is_idempotent() -> None:
         await TelegramLifecycleRepository(session(hash_session)).create_delivery_group(
             group=group, chunks=(invalid_hash,)
         )
+    with pytest.raises(RuntimeError, match="group disappeared"):
+        await TelegramLifecycleRepository(
+            session(ScriptedSession(scalar_values=(None, None)))
+        ).create_delivery_group(group=group, chunks=(chunk,))
 
 
 def intent_row(*, state: str = "pending", attempt_count: int = 0) -> dict[str, object]:
@@ -248,6 +346,39 @@ async def test_claim_finish_recover_and_get_intent_state_paths() -> None:
         older_than=NOW - timedelta(seconds=5), now=NOW
     )
     assert recovered == 2
+
+    assert (
+        await TelegramLifecycleRepository(
+            session(ScriptedSession(execute_results=(ScriptedResult(rows=()),)))
+        ).recover_stale_sending(older_than=NOW - timedelta(seconds=5), now=NOW)
+        == 0
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("states", "expected"),
+    [
+        ((OutboundIntentState.UNKNOWN,), DeliveryGroupState.UNKNOWN),
+        (
+            (OutboundIntentState.SENT, OutboundIntentState.FAILED),
+            DeliveryGroupState.PARTIAL,
+        ),
+        ((OutboundIntentState.FAILED,), DeliveryGroupState.FAILED),
+        (
+            (OutboundIntentState.SENT, OutboundIntentState.PENDING),
+            DeliveryGroupState.PARTIAL,
+        ),
+        ((OutboundIntentState.PENDING,), DeliveryGroupState.SENDING),
+    ],
+)
+async def test_delivery_group_state_reflects_all_intent_outcomes(
+    states: tuple[OutboundIntentState, ...], expected: DeliveryGroupState
+) -> None:
+    scripted = ScriptedSession(execute_results=(ScriptedResult(scalar_rows=states),))
+    await TelegramLifecycleRepository(session(scripted))._refresh_group(UUID(int=30), NOW)
+    assert cast(Any, scripted.statements[-1]).compile().params["state"] is expected
 
 
 @pytest.mark.unit

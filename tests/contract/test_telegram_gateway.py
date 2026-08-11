@@ -4,11 +4,15 @@ from uuid import UUID
 import pytest
 from telethon import functions, types  # type: ignore[import-untyped]
 
-from telegram_userbot.adapters.telegram_user.telethon import TelethonTelegramGateway
+from telegram_userbot.adapters.telegram_user.telethon import (
+    TelethonTelegramGateway,
+    assert_injected_client,
+)
 from telegram_userbot.application.ports.telegram import (
     TelegramReadRequest,
     TelegramSendUnknownError,
     TelegramTextRequest,
+    TelegramTransientError,
     TelegramTypingAction,
     TelegramTypingRequest,
 )
@@ -25,13 +29,14 @@ class Response:
 class InjectedClient:
     requests: list[object] = field(default_factory=list)
     failure: BaseException | None = None
+    send_response: object = field(default_factory=lambda: Response(700))
 
     async def __call__(self, request: object) -> object:
         self.requests.append(request)
         if self.failure is not None:
             raise self.failure
         if isinstance(request, functions.messages.SendMessageRequest):
-            return Response(700)
+            return self.send_response
         return object()
 
 
@@ -95,3 +100,27 @@ async def test_telethon_send_transport_failure_is_unknown_not_retryable() -> Non
                 SensitiveValue("synthetic output"),
             )
         )
+
+
+@pytest.mark.contract
+@pytest.mark.asyncio
+async def test_telethon_send_requires_message_id_in_response() -> None:
+    gateway = TelethonTelegramGateway(InjectedClient(send_response=object()), resolve_peer)
+    with pytest.raises(TelegramTransientError, match="missing_message_id"):
+        await gateway.send_text(
+            TelegramTextRequest(
+                AccountId(UUID(int=1)),
+                ConversationId(UUID(int=2)),
+                RunId(UUID(int=3)),
+                123,
+                SensitiveValue("synthetic output"),
+            )
+        )
+
+
+@pytest.mark.contract
+def test_telethon_client_must_be_injected_as_a_callable() -> None:
+    client = InjectedClient()
+    assert assert_injected_client(client) is client
+    with pytest.raises(TypeError, match="must be callable"):
+        assert_injected_client(object())
