@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0—M3已经完成。M3已实现private 1:1 Telegram事件规范化、revision/tombstone、media metadata、outbound intent、stable random ID、source reconciliation与fake恢复矩阵；Windows门禁和GitLab Linux disposable PostgreSQL/Redis、migration、replay、acceptance均已通过。
+V1架构设计与M0—M3已经完成。M4实现候选已加入effective mode、turn/debounce、Main AI run、精确三秒grace、final send gate、AUTO read/typing续租和COPILOT draft；Windows与GitLab关闭证据仍在本阶段收尾。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
@@ -13,7 +13,7 @@ V1架构设计与M0—M3已经完成。M3已实现private 1:1 Telegram事件规�
 - Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)和[M3 Compatibility Set](docs/compatibility/m3.md)。下一阶段是M4 Conversation Orchestrator；真实Telegram/provider仍未接入。
+精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)、[M3 Compatibility Set](docs/compatibility/m3.md)和[M4 Compatibility Set](docs/compatibility/m4.md)。M4当前是等待GitLab证据的实现候选；真实Telegram/provider仍未接入。
 
 ## 架构摘要
 
@@ -97,7 +97,7 @@ session-backup
 data-export
 ```
 
-M2已实现可嵌入`control`进程的model-control组件，M3已实现由`app`注入已连接client后才能使用的Telethon gateway；默认入口既不创建Telegram client也不读取Session。当前仍无Bot polling、Conversation Orchestrator、Caddy或Compose wiring，因此不存在可部署的完整业务入口，也没有AUTO生成或主动发送能力。未来运行命令必须随实际Compose文件和runbook一起加入README，并经过Test Strategy与Disclosure审查。
+M2已实现可嵌入`control`进程的model-control组件，M3已实现由`app`注入已连接client后才能使用的Telethon gateway，M4实现候选提供可注入的Conversation Orchestrator/runtime与Control Bot命令边界。默认入口既不创建Telegram client、读取Session或解密provider key，也不启动Bot polling、scheduler、Caddy或Compose wiring，因此仍不存在可部署的完整业务入口和真实AUTO发送路径。未来运行命令必须随实际Compose文件和runbook一起加入README，并经过Test Strategy与Disclosure审查。
 
 ## 测试与证据
 
@@ -110,6 +110,8 @@ M1在Windows/CPython 3.14.7的本地结果：86 tests `PASS`、10个integration/
 M2在Windows/CPython 3.14.7本地有143个默认测试通过，line coverage 92.11%、branch coverage 80.89%；本机Docker为`NOT RUN`且Chromium binary为`BLOCKED`。签名提交`def4ff1f846307a7ea428de3c048616601cab7a4`对应的[GitLab Linux pipeline #2748486868](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2748486868)全部通过：157个测试零失败/跳过，line coverage 92.11%、branch coverage 81.61%，四条migration路径、DB role、Chromium 151.0.7922.34和M2 acceptance均为`PASS`。真实Telegram/provider、Ubuntu production、backup/restore和production load仍为`NOT RUN`。
 
 M3在Windows/CPython 3.14.7本地有179个默认测试通过，line coverage 91.41%、branch coverage 81.13%；本机没有Docker daemon，因此PostgreSQL/Redis integration为`NOT RUN`。签名提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`对应的[GitLab Linux pipeline #2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)全部通过：`m3-telegram-fake`在PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上执行202个测试，1个browser测试按策略deselect，line coverage 93.22%、branch coverage 84.65%；4条migration路径、12项content-free replay和M3-001—M3-010 acceptance均为`PASS`。真实Telegram ingest/send与Session owner运行时保持`NOT RUN`。
+
+M4实现候选使用11张新增orchestration表和`0004_m4_conversation_orchestrator`迁移，测试覆盖mode/version、3/10秒收集、精确三秒grace、late-result discard、final RPC gate、generation/typing lease、human invalidation、COPILOT revision/token和显式`/reply_pending`边界。本机Docker integration与GitLab关闭pipeline尚未运行，因此M4-011和三项退出门禁暂不标记完成。
 
 常用本地门禁：
 

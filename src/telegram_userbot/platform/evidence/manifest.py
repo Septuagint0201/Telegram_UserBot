@@ -10,7 +10,7 @@ class ManifestSemanticError(ValueError):
 
 
 def requirement_ids_for_milestone(milestone: object) -> frozenset[str]:
-    requirement_counts = {"M0": 12, "M1": 12, "M2": 11, "M3": 10}
+    requirement_counts = {"M0": 12, "M1": 12, "M2": 11, "M3": 10, "M4": 11}
     if milestone not in requirement_counts:
         raise ManifestSemanticError("unsupported evidence milestone")
     count = requirement_counts[milestone]

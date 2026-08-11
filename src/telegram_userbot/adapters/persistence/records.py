@@ -189,8 +189,19 @@ class NewDeliveryGroupRecord:
     source: str
     idempotency_key: bytes
     created_at: datetime
-    mode_version: int | None = None
-    content_revision: int | None = None
+    mode_version: int = 1
+    content_revision: int = 0
+    turn_id: UUID | None = None
+    model_role: str | None = "main_ai"
+    generation_no: int = 1
+    account_control_version: int = 1
+    copilot_draft_id: UUID | None = None
+    approved_draft_revision_id: UUID | None = None
+    logical_content_sha256: bytes | None = None
+    normalizer_version: str = "normalized-text-v1"
+    splitter_version: str = "telegram-text-v1"
+    max_delivery_chunks: int = 16
+    send_authorized_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

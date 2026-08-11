@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M3已经完成。M3证据提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`对应的GitLab Linux pipeline [#2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)为`PASS`；Windows本机无Docker，真实Telegram/provider live、应用容器、自动回复、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。下一阶段是M4 Conversation Orchestrator与Main AI。
+架构设计与M0—M3已经完成。M4 Conversation Orchestrator与Main AI代码、migration、fake和候选文档已经实现，正在执行Windows门禁并等待GitLab disposable PostgreSQL/Redis关闭证据；因此M4复选框和退出门禁暂不提前标记。Windows本机无Docker，真实Telegram/provider live、应用容器、真实AUTO、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -43,7 +43,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M1 | PostgreSQL、Redis与 durable state | COMPLETE | WINDOWS STATIC/UNIT PASS; GITLAB SERVICE INTEGRATION PASS |
 | M2 | 模型配置、adapter与 key-only 控制面 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
 | M3 | Telegram ingest 与 outbound intent | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M4 | Conversation Orchestrator 与 Main AI | WAITING | NOT RUN |
+| M4 | Conversation Orchestrator 与 Main AI | IMPLEMENTED CANDIDATE | WINDOWS/CI GATES IN PROGRESS |
 | M5 | Media 与 Context Contract | WAITING | NOT RUN |
 | M6 | Memory、Summary 与 Embedding Pipeline | WAITING | NOT RUN |
 | M7 | Proactive Pipeline | WAITING | NOT RUN |
@@ -345,4 +345,4 @@ M3-001—M3-010已经由签名证据提交、disposable PostgreSQL/Redis、migra
 
 ## 17. 下一步
 
-M3已经关闭，下一步进入M4 Conversation Orchestrator与Main AI。真实Telegram、真实provider、AUTO生成、自动发送和生产部署仍禁止启用。
+M4实现候选正在关闭验证。只有签名commit对应的GitLab migration、role、race和acceptance作业全部`PASS`后才勾选M4-001—M4-011并进入M5；真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用。

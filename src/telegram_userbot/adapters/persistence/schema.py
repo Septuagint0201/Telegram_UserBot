@@ -566,7 +566,16 @@ conversation_turns = Table(
     Column("content_revision_snapshot", BigInteger),
     Column("resume_floor_event_id_snapshot", BigInteger),
     Column("coverage_event_id_snapshot", BigInteger),
+    Column("debounce_seconds", Integer, nullable=False, server_default=text("3")),
+    Column("hard_cap_seconds", Integer, nullable=False, server_default=text("10")),
+    Column("collect_started_at", UTC_TIMESTAMP),
     Column("quiet_deadline_at", UTC_TIMESTAMP),
+    Column("hard_deadline_at", UTC_TIMESTAMP),
+    Column("sealed_at", UTC_TIMESTAMP),
+    Column("lease_owner", UUID_TYPE),
+    Column("lease_expires_at", UTC_TIMESTAMP),
+    Column("fencing_token", BigInteger, nullable=False, server_default=text("0")),
+    Column("terminal_reason", Text),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     Column("completed_at", UTC_TIMESTAMP),
     ForeignKeyConstraint(
@@ -575,16 +584,24 @@ conversation_turns = Table(
         name="fk_conversation_turns_scope",
     ),
     CheckConstraint(
-        "state IN ('collecting','sealed','generating','superseded','completed',"
-        "'cancelled','failed')",
+        "state IN ('collecting','ready','generating','output_ready','superseded',"
+        "'completed','cancelled','failed')",
         name="state_values",
     ),
     CheckConstraint(
-        "trigger_kind IN ('incoming','replacement','copilot','proactive')",
+        "trigger_kind IN ('incoming','replacement','manual_pending_reply','copilot','proactive')",
         name="trigger_kind_values",
     ),
     CheckConstraint("collection_sequence >= 1", name="collection_sequence_positive"),
     CheckConstraint("active_generation_no >= 0", name="generation_nonnegative"),
+    CheckConstraint("debounce_seconds > 0", name="debounce_seconds_positive"),
+    CheckConstraint("hard_cap_seconds >= debounce_seconds", name="hard_cap_not_before_debounce"),
+    CheckConstraint("fencing_token >= 0", name="fencing_token_nonnegative"),
+    CheckConstraint(
+        "(lease_owner IS NULL AND lease_expires_at IS NULL) OR "
+        "(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)",
+        name="lease_fields_match",
+    ),
     UniqueConstraint(
         "conversation_id", "collection_sequence", name="uq_conversation_turns_sequence"
     ),
@@ -598,6 +615,18 @@ Index(
     conversation_turns.c.conversation_id,
     conversation_turns.c.state,
     conversation_turns.c.quiet_deadline_at,
+)
+Index(
+    "uq_conversation_turns_collecting",
+    conversation_turns.c.conversation_id,
+    unique=True,
+    postgresql_where=conversation_turns.c.state == "collecting",
+)
+Index(
+    "uq_conversation_turns_processing",
+    conversation_turns.c.conversation_id,
+    unique=True,
+    postgresql_where=conversation_turns.c.state.in_(("ready", "generating", "output_ready")),
 )
 
 background_jobs = Table(
@@ -1247,14 +1276,26 @@ outbound_delivery_groups = Table(
     Column("id", UUID_TYPE, primary_key=True),
     Column("account_id", UUID_TYPE, nullable=False),
     Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("turn_id", UUID_TYPE),
     Column("model_run_id", UUID_TYPE),
+    Column("model_role", Text),
+    Column("copilot_draft_id", UUID_TYPE),
+    Column("approved_draft_revision_id", UUID_TYPE),
     Column("source", Text, nullable=False),
+    Column("generation_no", Integer, nullable=False, server_default=text("1")),
     Column("state", Text, nullable=False, server_default=text("'planned'")),
     Column("intent_count", Integer, nullable=False),
     Column("sent_count", Integer, nullable=False, server_default=text("0")),
     Column("idempotency_key", LargeBinary, nullable=False),
     Column("mode_version", BigInteger),
     Column("content_revision", BigInteger),
+    Column("account_control_version", BigInteger, nullable=False, server_default=text("1")),
+    Column("logical_content_sha256", LargeBinary),
+    Column("normalizer_version", Text, nullable=False, server_default=text("'normalized-text-v1'")),
+    Column("splitter_version", Text, nullable=False, server_default=text("'telegram-text-v1'")),
+    Column("max_delivery_chunks", Integer, nullable=False, server_default=text("16")),
+    Column("send_authorized_at", UTC_TIMESTAMP),
+    Column("first_side_effect_at", UTC_TIMESTAMP),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     Column("completed_at", UTC_TIMESTAMP),
@@ -1272,6 +1313,13 @@ outbound_delivery_groups = Table(
         name="state_values",
     ),
     CheckConstraint("intent_count > 0", name="intent_count_positive"),
+    CheckConstraint("generation_no > 0", name="generation_no_positive"),
+    CheckConstraint("account_control_version > 0", name="control_version_positive"),
+    CheckConstraint("max_delivery_chunks > 0", name="max_delivery_chunks_positive"),
+    CheckConstraint(
+        "logical_content_sha256 IS NULL OR octet_length(logical_content_sha256) = 32",
+        name="logical_content_hash_32_bytes",
+    ),
     CheckConstraint("sent_count >= 0 AND sent_count <= intent_count", name="sent_count_range"),
     CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_32_bytes"),
     CheckConstraint("mode_version IS NULL OR mode_version >= 1", name="mode_version_positive"),
@@ -1303,8 +1351,17 @@ outbound_intents = Table(
     Column("delivery_group_id", UUID_TYPE, nullable=False),
     Column("account_id", UUID_TYPE, nullable=False),
     Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("turn_id", UUID_TYPE),
     Column("model_run_id", UUID_TYPE),
+    Column("model_role", Text),
+    Column("source", Text),
+    Column("generation_no", Integer, nullable=False, server_default=text("1")),
+    Column("account_control_version", BigInteger, nullable=False, server_default=text("1")),
+    Column("mode_version", BigInteger),
+    Column("content_revision", BigInteger),
+    Column("idempotency_key", LargeBinary),
     Column("sequence_no", Integer, nullable=False),
+    Column("chunk_count", Integer, nullable=False, server_default=text("1")),
     Column("telegram_random_id", BigInteger, nullable=False),
     Column("payload_kind", Text, nullable=False, server_default=text("'text'")),
     Column("text_content", Text, nullable=False),
@@ -1328,6 +1385,13 @@ outbound_intents = Table(
         name="fk_outbound_intents_delivery_group_scope",
     ),
     CheckConstraint("sequence_no >= 0", name="sequence_nonnegative"),
+    CheckConstraint("generation_no > 0", name="generation_no_positive"),
+    CheckConstraint("account_control_version > 0", name="control_version_positive"),
+    CheckConstraint("chunk_count > 0 AND sequence_no < chunk_count", name="chunk_position_valid"),
+    CheckConstraint(
+        "idempotency_key IS NULL OR octet_length(idempotency_key) = 32",
+        name="idempotency_32_bytes",
+    ),
     CheckConstraint("telegram_random_id > 0", name="random_id_positive"),
     CheckConstraint("payload_kind = 'text'", name="payload_kind_v1"),
     CheckConstraint("octet_length(payload_sha256) = 32", name="payload_hash_32_bytes"),
@@ -1471,4 +1535,496 @@ telegram_operations = Table(
 
 M3_TABLES = tuple(
     name for name in metadata.tables if name not in M1_TABLES and name not in M2_TABLES
+)
+
+
+# M4 owns orchestration runs, immutable turn membership, grace authorization,
+# reactive COPILOT drafts, and durable control command identity.
+turn_messages = Table(
+    "turn_messages",
+    metadata,
+    Column("turn_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("message_id", UUID_TYPE, nullable=False),
+    Column("message_revision_no", Integer, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("inclusion_kind", Text, nullable=False, server_default=text("'incoming'")),
+    Column("source_event_id", BigInteger, nullable=False),
+    ForeignKeyConstraint(
+        ["turn_id", "account_id", "conversation_id"],
+        [
+            "conversation_turns.id",
+            "conversation_turns.account_id",
+            "conversation_turns.conversation_id",
+        ],
+        name="fk_turn_messages_turn_scope",
+    ),
+    ForeignKeyConstraint(
+        ["message_id", "account_id", "conversation_id"],
+        ["messages.id", "messages.account_id", "messages.conversation_id"],
+        name="fk_turn_messages_message_scope",
+    ),
+    ForeignKeyConstraint(
+        ["message_id", "account_id", "message_revision_no"],
+        [
+            "message_revisions.message_id",
+            "message_revisions.account_id",
+            "message_revisions.revision_no",
+        ],
+        name="fk_turn_messages_revision_scope",
+    ),
+    ForeignKeyConstraint(
+        ["source_event_id"], ["message_events.id"], name="fk_turn_messages_source_event"
+    ),
+    PrimaryKeyConstraint("turn_id", "message_id", name="pk_turn_messages"),
+    CheckConstraint("message_revision_no > 0", name="message_revision_positive"),
+    CheckConstraint("ordinal > 0", name="ordinal_positive"),
+    CheckConstraint("inclusion_kind IN ('incoming','album_member')", name="inclusion_kind_values"),
+    UniqueConstraint("turn_id", "ordinal", name="uq_turn_messages_ordinal"),
+)
+
+model_runs = Table(
+    "model_runs",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE),
+    Column("turn_id", UUID_TYPE),
+    Column("logical_role", Text, nullable=False),
+    Column("model_profile_id", UUID_TYPE, nullable=False),
+    Column("purpose", Text, nullable=False),
+    Column("generation_no", Integer, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("account_control_version_snapshot", BigInteger),
+    Column("mode_version_snapshot", BigInteger),
+    Column("content_revision_snapshot", BigInteger),
+    Column("config_version_id", UUID_TYPE, nullable=False),
+    Column("credential_version_id", UUID_TYPE, nullable=False),
+    Column("context_manifest_id", UUID_TYPE),
+    Column("prompt_version", Text, nullable=False),
+    Column("prompt_bundle_sha256", LargeBinary, nullable=False),
+    Column("capability_snapshot_sha256", LargeBinary, nullable=False),
+    Column("input_fingerprint", LargeBinary, nullable=False),
+    Column("output_fingerprint", LargeBinary),
+    Column("adapter_version", Text, nullable=False),
+    Column("request_schema_version", SmallInteger, nullable=False),
+    Column("output_schema_version", SmallInteger, nullable=False),
+    Column("normalizer_version", Text, nullable=False),
+    Column("finish_reason", Text),
+    Column("result_kind", Text),
+    Column("is_complete", Boolean),
+    Column("provider_request_id", Text),
+    Column("input_tokens", Integer),
+    Column("output_tokens", Integer),
+    Column("started_at", UTC_TIMESTAMP),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("cancel_requested_at", UTC_TIMESTAMP),
+    Column("error_code", Text),
+    Column("error_detail_redacted", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_model_runs_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_model_runs_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["turn_id", "account_id", "conversation_id"],
+        [
+            "conversation_turns.id",
+            "conversation_turns.account_id",
+            "conversation_turns.conversation_id",
+        ],
+        name="fk_model_runs_turn_scope",
+    ),
+    ForeignKeyConstraint(
+        ["model_profile_id", "logical_role"],
+        ["model_profiles.id", "model_profiles.logical_role"],
+        name="fk_model_runs_profile_role",
+    ),
+    ForeignKeyConstraint(
+        ["config_version_id"], ["model_config_versions.id"], name="fk_model_runs_config_version"
+    ),
+    ForeignKeyConstraint(
+        ["credential_version_id"],
+        ["model_credential_versions.id"],
+        name="fk_model_runs_credential_version",
+    ),
+    CheckConstraint(
+        "logical_role IN ('main_ai','memory_agent','proactive_agent','embedding')",
+        name="logical_role_values",
+    ),
+    CheckConstraint(
+        "state IN ('created','running','output_ready','succeeded','retry_wait','superseded',"
+        "'cancelled','failed')",
+        name="state_values",
+    ),
+    CheckConstraint("generation_no > 0", name="generation_positive"),
+    CheckConstraint(
+        "octet_length(prompt_bundle_sha256) = 32 AND "
+        "octet_length(capability_snapshot_sha256) = 32 AND "
+        "octet_length(input_fingerprint) = 32 AND "
+        "(output_fingerprint IS NULL OR octet_length(output_fingerprint) = 32)",
+        name="fingerprints_32_bytes",
+    ),
+    CheckConstraint("input_tokens IS NULL OR input_tokens >= 0", name="input_tokens_nonnegative"),
+    CheckConstraint(
+        "output_tokens IS NULL OR output_tokens >= 0", name="output_tokens_nonnegative"
+    ),
+    UniqueConstraint("id", "account_id", name="uq_model_runs_id_account"),
+    UniqueConstraint(
+        "id", "account_id", "conversation_id", name="uq_model_runs_conversation_scope"
+    ),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "turn_id",
+        "logical_role",
+        name="uq_model_runs_turn_role_scope",
+    ),
+)
+Index(
+    "uq_model_runs_turn_generation",
+    model_runs.c.turn_id,
+    model_runs.c.logical_role,
+    model_runs.c.generation_no,
+    unique=True,
+    postgresql_where=model_runs.c.turn_id.is_not(None),
+)
+
+model_run_attempts = Table(
+    "model_run_attempts",
+    metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("model_run_id", UUID_TYPE, nullable=False),
+    Column("attempt_no", Integer, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("provider_request_id", Text),
+    Column("started_at", UTC_TIMESTAMP, nullable=False),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("http_status", Integer),
+    Column("error_code", Text),
+    Column("retry_after_seconds", Integer),
+    Column("input_tokens", Integer),
+    Column("output_tokens", Integer),
+    ForeignKeyConstraint(["model_run_id"], ["model_runs.id"], name="fk_model_run_attempts_run"),
+    CheckConstraint("attempt_no > 0", name="attempt_no_positive"),
+    CheckConstraint(
+        "state IN ('started','succeeded','retryable_failed','terminal_failed',"
+        "'cancelled','unknown')",
+        name="state_values",
+    ),
+    CheckConstraint(
+        "retry_after_seconds IS NULL OR retry_after_seconds >= 0", name="retry_nonnegative"
+    ),
+    UniqueConstraint("model_run_id", "attempt_no", name="uq_model_run_attempts_run_no"),
+)
+
+turn_grace_authorizations = Table(
+    "turn_grace_authorizations",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("turn_id", UUID_TYPE, nullable=False),
+    Column("model_run_id", UUID_TYPE, nullable=False, unique=True),
+    Column("model_role", Text, nullable=False, server_default=text("'main_ai'")),
+    Column("run_started_at", UTC_TIMESTAMP, nullable=False),
+    Column("grace_deadline_at", UTC_TIMESTAMP, nullable=False),
+    Column("model_completed_at", UTC_TIMESTAMP, nullable=False),
+    Column("authorized_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["model_run_id", "account_id", "conversation_id", "turn_id", "model_role"],
+        [
+            "model_runs.id",
+            "model_runs.account_id",
+            "model_runs.conversation_id",
+            "model_runs.turn_id",
+            "model_runs.logical_role",
+        ],
+        name="fk_turn_grace_authorizations_run_scope",
+    ),
+    CheckConstraint("model_role = 'main_ai'", name="model_role_main_ai"),
+    CheckConstraint("model_completed_at <= grace_deadline_at", name="completed_within_grace"),
+)
+
+turn_grace_events = Table(
+    "turn_grace_events",
+    metadata,
+    Column("authorization_id", UUID_TYPE, nullable=False),
+    Column("message_event_id", BigInteger, nullable=False),
+    ForeignKeyConstraint(
+        ["authorization_id"],
+        ["turn_grace_authorizations.id"],
+        name="fk_turn_grace_events_authorization",
+    ),
+    ForeignKeyConstraint(
+        ["message_event_id"], ["message_events.id"], name="fk_turn_grace_events_message_event"
+    ),
+    PrimaryKeyConstraint("authorization_id", "message_event_id", name="pk_turn_grace_events"),
+)
+
+operational_blocks = Table(
+    "operational_blocks",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE),
+    Column("model_profile_id", UUID_TYPE),
+    Column("reason_code", Text, nullable=False),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("active", Boolean, nullable=False, server_default=text("true")),
+    Column("retry_after", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("cleared_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_operational_blocks_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_operational_blocks_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["model_profile_id"], ["model_profiles.id"], name="fk_operational_blocks_profile"
+    ),
+    CheckConstraint("version > 0", name="version_positive"),
+    CheckConstraint("active = (cleared_at IS NULL)", name="active_matches_cleared"),
+)
+Index(
+    "ix_operational_blocks_active",
+    operational_blocks.c.account_id,
+    operational_blocks.c.conversation_id,
+    unique=False,
+    postgresql_where=operational_blocks.c.active.is_(True),
+)
+
+copilot_drafts = Table(
+    "copilot_drafts",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("turn_id", UUID_TYPE, nullable=False),
+    Column("model_run_id", UUID_TYPE),
+    Column("model_role", Text),
+    Column("draft_kind", Text, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("current_revision_no", Integer),
+    Column("account_control_version_snapshot", BigInteger, nullable=False),
+    Column("mode_version_snapshot", BigInteger, nullable=False),
+    Column("content_revision_snapshot", BigInteger, nullable=False),
+    Column("requested_by", Text, nullable=False),
+    Column("approved_by", Text),
+    Column("requested_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("ready_at", UTC_TIMESTAMP),
+    Column("approved_at", UTC_TIMESTAMP),
+    Column("expires_at", UTC_TIMESTAMP),
+    Column("terminal_at", UTC_TIMESTAMP),
+    Column("terminal_reason", Text),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id", "contact_id"],
+        ["conversations.id", "conversations.account_id", "conversations.contact_id"],
+        name="fk_copilot_drafts_conversation_contact_scope",
+    ),
+    ForeignKeyConstraint(
+        ["turn_id", "account_id", "conversation_id"],
+        [
+            "conversation_turns.id",
+            "conversation_turns.account_id",
+            "conversation_turns.conversation_id",
+        ],
+        name="fk_copilot_drafts_turn_scope",
+    ),
+    ForeignKeyConstraint(
+        ["model_run_id", "account_id", "conversation_id", "turn_id", "model_role"],
+        [
+            "model_runs.id",
+            "model_runs.account_id",
+            "model_runs.conversation_id",
+            "model_runs.turn_id",
+            "model_runs.logical_role",
+        ],
+        name="fk_copilot_drafts_model_run_scope",
+    ),
+    CheckConstraint("draft_kind = 'reactive'", name="draft_kind_v1"),
+    CheckConstraint(
+        "state IN ('requested','collecting','generating','ready','editing','approved',"
+        "'send_queued','send_unknown','sent','ignored','expired','invalidated','failed')",
+        name="state_values",
+    ),
+    CheckConstraint(
+        "(model_run_id IS NULL AND model_role IS NULL) OR "
+        "(model_run_id IS NOT NULL AND model_role = 'main_ai')",
+        name="model_run_role_match",
+    ),
+    CheckConstraint(
+        "current_revision_no IS NULL OR current_revision_no > 0", name="revision_positive"
+    ),
+    UniqueConstraint("id", "account_id", "conversation_id", name="uq_copilot_drafts_scope"),
+)
+Index(
+    "uq_copilot_drafts_active_conversation",
+    copilot_drafts.c.conversation_id,
+    unique=True,
+    postgresql_where=copilot_drafts.c.state.in_(
+        (
+            "requested",
+            "collecting",
+            "generating",
+            "ready",
+            "editing",
+            "approved",
+            "send_queued",
+            "send_unknown",
+        )
+    ),
+)
+Index(
+    "ix_copilot_drafts_expiry",
+    copilot_drafts.c.expires_at,
+    postgresql_where=copilot_drafts.c.state.in_(("ready", "editing")),
+)
+
+copilot_draft_revisions = Table(
+    "copilot_draft_revisions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("draft_id", UUID_TYPE, nullable=False),
+    Column("revision_no", Integer, nullable=False),
+    Column("author_type", Text, nullable=False),
+    Column("content_text", Text),
+    Column("content_sha256", LargeBinary),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("redacted_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["draft_id", "account_id", "conversation_id"],
+        ["copilot_drafts.id", "copilot_drafts.account_id", "copilot_drafts.conversation_id"],
+        name="fk_copilot_draft_revisions_draft_scope",
+    ),
+    CheckConstraint("revision_no > 0", name="revision_no_positive"),
+    CheckConstraint("author_type IN ('model','admin_edit')", name="author_type_values"),
+    CheckConstraint(
+        "(redacted_at IS NULL AND content_text IS NOT NULL AND "
+        "octet_length(content_sha256) = 32) OR "
+        "(redacted_at IS NOT NULL AND content_text IS NULL AND content_sha256 IS NULL)",
+        name="redaction_matches_content",
+    ),
+    UniqueConstraint("draft_id", "revision_no", name="uq_copilot_draft_revisions_no"),
+    UniqueConstraint(
+        "draft_id",
+        "account_id",
+        "revision_no",
+        name="uq_copilot_draft_revisions_account_no",
+    ),
+    UniqueConstraint("id", "account_id", "draft_id", name="uq_copilot_draft_revisions_scope"),
+)
+
+copilot_drafts.append_constraint(
+    ForeignKeyConstraint(
+        [copilot_drafts.c.id, copilot_drafts.c.account_id, copilot_drafts.c.current_revision_no],
+        [
+            copilot_draft_revisions.c.draft_id,
+            copilot_draft_revisions.c.account_id,
+            copilot_draft_revisions.c.revision_no,
+        ],
+        name="fk_copilot_drafts_current_revision",
+        deferrable=True,
+        initially="DEFERRED",
+        use_alter=True,
+    )
+)
+
+copilot_action_tokens = Table(
+    "copilot_action_tokens",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("token_sha256", LargeBinary, nullable=False, unique=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("draft_id", UUID_TYPE, nullable=False),
+    Column("draft_revision_no", Integer, nullable=False),
+    Column("admin_telegram_user_id", BigInteger, nullable=False),
+    Column("bot_chat_id", BigInteger, nullable=False),
+    Column("purpose", Text, nullable=False),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("used_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["draft_id", "account_id", "conversation_id"],
+        ["copilot_drafts.id", "copilot_drafts.account_id", "copilot_drafts.conversation_id"],
+        name="fk_copilot_action_tokens_draft_scope",
+    ),
+    CheckConstraint("octet_length(token_sha256) = 32", name="token_hash_32_bytes"),
+    CheckConstraint("draft_revision_no > 0", name="draft_revision_positive"),
+    CheckConstraint("purpose IN ('send','edit','ignore')", name="purpose_values"),
+)
+Index(
+    "ix_copilot_action_tokens_expiry",
+    copilot_action_tokens.c.expires_at,
+    postgresql_where=copilot_action_tokens.c.used_at.is_(None),
+)
+
+copilot_edit_sessions = Table(
+    "copilot_edit_sessions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("draft_id", UUID_TYPE, nullable=False),
+    Column("admin_telegram_user_id", BigInteger, nullable=False),
+    Column("bot_chat_id", BigInteger, nullable=False),
+    Column("force_reply_message_id", BigInteger, nullable=False),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["draft_id", "account_id", "conversation_id"],
+        ["copilot_drafts.id", "copilot_drafts.account_id", "copilot_drafts.conversation_id"],
+        name="fk_copilot_edit_sessions_draft_scope",
+    ),
+    UniqueConstraint(
+        "bot_chat_id",
+        "admin_telegram_user_id",
+        "force_reply_message_id",
+        name="uq_copilot_edit_sessions_reply",
+    ),
+)
+
+control_commands = Table(
+    "control_commands",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE),
+    Column("bot_identity", Text, nullable=False),
+    Column("telegram_update_id", BigInteger, nullable=False),
+    Column("admin_telegram_user_id", BigInteger, nullable=False),
+    Column("command_kind", Text, nullable=False),
+    Column("idempotency_key", LargeBinary, nullable=False),
+    Column("expected_control_version", BigInteger),
+    Column("expected_mode_version", BigInteger),
+    Column("state", Text, nullable=False),
+    Column("result_code", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("completed_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_control_commands_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_control_commands_conversation_scope",
+    ),
+    CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_key_32_bytes"),
+    CheckConstraint("state IN ('pending','applied','rejected')", name="state_values"),
+    UniqueConstraint("bot_identity", "telegram_update_id", name="uq_control_commands_bot_update"),
+    UniqueConstraint("account_id", "idempotency_key", name="uq_control_commands_idempotency"),
+)
+
+M4_TABLES = tuple(
+    name
+    for name in metadata.tables
+    if name not in M1_TABLES and name not in M2_TABLES and name not in M3_TABLES
 )

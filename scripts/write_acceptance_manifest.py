@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from telegram_userbot.platform.evidence.manifest import (
     requirement_ids_for_milestone,
@@ -20,6 +20,7 @@ class RequirementRecord(TypedDict):
     id: str
     status: str
     evidence: list[str]
+    reason: NotRequired[str]
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -49,7 +50,7 @@ def _requirement(requirement_id: str, *evidence: str) -> RequirementRecord:
     return {"id": requirement_id, "status": "PASS", "evidence": list(evidence)}
 
 
-def _requirements_for(milestone: str) -> list[RequirementRecord]:
+def _requirements_for(milestone: str, *, root: Path) -> list[RequirementRecord]:
     if milestone == "M0":
         return [
             _requirement(
@@ -212,6 +213,74 @@ def _requirements_for(milestone: str) -> list[RequirementRecord]:
                 "docs/Implementation-Plan.md",
             ),
         ]
+    if milestone == "M4":
+        return [
+            _requirement(
+                "M4-001",
+                "src/telegram_userbot/domain/conversation/mode.py",
+                "tests/unit/domain/test_conversation.py",
+            ),
+            _requirement(
+                "M4-002",
+                "src/telegram_userbot/domain/conversation/turn.py",
+                "alembic/versions/0004_m4_conversation_orchestrator.py",
+            ),
+            _requirement(
+                "M4-003",
+                "src/telegram_userbot/adapters/persistence/orchestrator_repository.py",
+                "tests/integration/test_m4_conversation_orchestrator.py",
+            ),
+            _requirement(
+                "M4-004",
+                "tests/integration/test_m4_conversation_orchestrator.py",
+                ".artifacts/m4/race-manifest.json",
+            ),
+            _requirement(
+                "M4-005",
+                "src/telegram_userbot/processes/conversation_runtime.py",
+                "tests/unit/adapters/persistence/test_orchestrator_repository.py",
+            ),
+            _requirement(
+                "M4-006",
+                "src/telegram_userbot/processes/conversation_runtime.py",
+                "tests/unit/platform/test_conversation_runtime.py",
+            ),
+            _requirement(
+                "M4-007",
+                "src/telegram_userbot/adapters/persistence/orchestrator_repository.py",
+                "src/telegram_userbot/adapters/telegram_bot/conversation_control.py",
+            ),
+            _requirement(
+                "M4-008",
+                "src/telegram_userbot/domain/conversation/draft.py",
+                "tests/integration/test_m4_conversation_orchestrator.py",
+            ),
+            _requirement(
+                "M4-009",
+                "src/telegram_userbot/adapters/telegram_bot/conversation_control.py",
+                "tests/unit/adapters/test_conversation_control.py",
+            ),
+            _requirement(
+                "M4-010",
+                ".artifacts/m4/junit.xml",
+                ".artifacts/m4/race-manifest.json",
+            ),
+            (
+                _requirement(
+                    "M4-011",
+                    "docs/compatibility/m4.md",
+                    "TODO.md",
+                    "docs/Implementation-Plan.md",
+                )
+                if "- [x] **M4-011" in (root / "TODO.md").read_text(encoding="utf-8")
+                else {
+                    "id": "M4-011",
+                    "status": "NOT RUN",
+                    "evidence": [],
+                    "reason": "M4 awaits its signed GitLab Linux evidence before closeout",
+                }
+            ),
+        ]
     raise ValueError("unsupported milestone")
 
 
@@ -224,7 +293,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
     if not _commit_signed(root, commit):
         raise ValueError("acceptance evidence requires a signed commit")
 
-    requirements = _requirements_for(milestone)
+    requirements = _requirements_for(milestone, root=root)
     missing_evidence = sorted(
         evidence
         for requirement in requirements
@@ -233,7 +302,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
     )
     if missing_evidence:
         raise ValueError("acceptance evidence path is missing: " + missing_evidence[0])
-    uses_disposable_services = milestone in {"M1", "M2", "M3"}
+    uses_disposable_services = milestone in {"M1", "M2", "M3", "M4"}
     environment: dict[str, object] = {
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),
@@ -297,7 +366,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--milestone", choices=("M0", "M1", "M2", "M3"), default="M0")
+    parser.add_argument("--milestone", choices=("M0", "M1", "M2", "M3", "M4"), default="M0")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]

@@ -675,7 +675,7 @@ async def test_unknown_outgoing_with_active_intent_stays_system_pending(
 
 
 @pytest.mark.integration
-async def test_m3_model_run_columns_exist_without_premature_foreign_key(
+async def test_m4_closes_staged_model_run_foreign_keys(
     db_session: AsyncSession,
 ) -> None:
     foreign_keys = tuple(
@@ -695,7 +695,8 @@ async def test_m3_model_run_columns_exist_without_premature_foreign_key(
             )
         ).scalars()
     )
-    assert all("model_run" not in name for name in foreign_keys)
+    assert "fk_outbound_groups_model_run_scope" in foreign_keys
+    assert "fk_outbound_intents_model_run_scope" in foreign_keys
     assert (
         await db_session.scalar(
             text(
