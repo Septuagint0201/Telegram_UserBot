@@ -1,6 +1,7 @@
 import asyncio
 import base64
 from collections.abc import Mapping
+from dataclasses import replace
 from uuid import uuid7
 
 import pytest
@@ -197,6 +198,61 @@ def test_image_wire_fails_closed_without_capability_or_messages_auto_equivalence
 
 
 @pytest.mark.contract
+def test_canonical_request_and_image_capability_boundaries_fail_closed() -> None:
+    text = CanonicalContent(ContentKind.TEXT, SensitiveValue("SYNTHETIC_INPUT"))
+    text_only = CanonicalGenerationRequest((CanonicalMessage("user", (text,)),))
+
+    with pytest.raises(ProviderProtocolError, match="MODEL_INPUT_INVALID"):
+        CanonicalContent(ContentKind.TEXT, SensitiveValue(""))
+    with pytest.raises(ProviderProtocolError, match="TEXT_DETAIL_FORBIDDEN"):
+        CanonicalContent(ContentKind.TEXT, SensitiveValue("SYNTHETIC_INPUT"), "auto")
+    with pytest.raises(ProviderProtocolError, match="IMAGE_PAYLOAD_INVALID"):
+        CanonicalContent(
+            ContentKind.IMAGE,
+            SensitiveValue("media-object:synthetic"),
+            "auto",
+            None,
+            "image/png",
+        )
+    with pytest.raises(ProviderProtocolError, match="MODEL_MESSAGE_INVALID"):
+        CanonicalMessage("tool", (text,))
+    with pytest.raises(ProviderProtocolError, match="MODEL_MESSAGE_INVALID"):
+        CanonicalMessage("user", ())
+    with pytest.raises(ProviderProtocolError, match="MODEL_INPUT_EMPTY"):
+        CanonicalGenerationRequest(())
+    with pytest.raises(ProviderProtocolError, match="EMBEDDING_INPUT_INVALID"):
+        CanonicalEmbeddingRequest(())
+
+    without_images = build_generation_request(
+        config(ModelProtocol.OPENAI_RESPONSES),
+        text_only,
+        SensitiveValue("SYNTHETIC_KEY"),
+    )
+    assert without_images.path == "/responses"
+    with pytest.raises(ProviderProtocolError, match="MODEL_CREDENTIAL_MISSING"):
+        build_generation_request(
+            config(ModelProtocol.OPENAI_RESPONSES), text_only, SensitiveValue("")
+        )
+    with pytest.raises(ProviderProtocolError, match="IMAGE_CAPABILITY_UNSUPPORTED"):
+        build_generation_request(
+            config(ModelProtocol.OPENAI_RESPONSES),
+            generation(),
+            SensitiveValue("SYNTHETIC_KEY"),
+            replace(image_capabilities(ModelProtocol.OPENAI_RESPONSES), supports_images=False),
+        )
+    with pytest.raises(ProviderProtocolError, match="IMAGE_REQUEST_TOO_LARGE"):
+        build_generation_request(
+            config(ModelProtocol.OPENAI_RESPONSES),
+            generation(),
+            SensitiveValue("SYNTHETIC_KEY"),
+            replace(
+                image_capabilities(ModelProtocol.OPENAI_RESPONSES),
+                max_image_bytes_per_request=1,
+            ),
+        )
+
+
+@pytest.mark.contract
 @pytest.mark.parametrize(
     ("protocol", "body", "expected"),
     [
@@ -299,6 +355,96 @@ def test_embedding_wire_and_response_contract() -> None:
         )
     )
     assert normalized.vectors == ((1.0, 0.0), (0.0, 1.0))
+
+
+@pytest.mark.contract
+def test_stream_usage_and_embedding_error_boundaries_fail_closed() -> None:
+    chat_stream = ProviderWireResponse(
+        200,
+        SensitiveValue(
+            {
+                "choices": [{"finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        ),
+        (SensitiveValue({"choices": [{"delta": {"content": "SYNTHETIC_CHAT"}}]}),),
+    )
+    assert (
+        normalize_generation_response(
+            ModelProtocol.OPENAI_CHAT_COMPLETIONS, chat_stream
+        ).text.reveal_for_use()
+        == "SYNTHETIC_CHAT"
+    )
+    messages_stream = ProviderWireResponse(
+        200,
+        SensitiveValue(
+            {
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        ),
+        (SensitiveValue({"type": "content_block_delta", "delta": {"text": "SYNTHETIC_MESSAGES"}}),),
+    )
+    assert (
+        normalize_generation_response(
+            ModelProtocol.ANTHROPIC_MESSAGES, messages_stream
+        ).text.reveal_for_use()
+        == "SYNTHETIC_MESSAGES"
+    )
+
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_USAGE_MALFORMED"):
+        normalize_generation_response(
+            ModelProtocol.OPENAI_RESPONSES,
+            ProviderWireResponse(
+                200,
+                SensitiveValue(
+                    {
+                        "output_text": "SYNTHETIC_OUTPUT",
+                        "usage": {"input_tokens": -1, "output_tokens": 1},
+                    }
+                ),
+            ),
+        )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_RESPONSE_MALFORMED"):
+        normalize_generation_response(
+            ModelProtocol.OPENAI_RESPONSES,
+            ProviderWireResponse(
+                200,
+                SensitiveValue(
+                    {
+                        "output": [],
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    }
+                ),
+            ),
+        )
+    with pytest.raises(ProviderProtocolError, match="EMBEDDING_PROTOCOL_REQUIRED"):
+        build_embedding_request(
+            config(ModelProtocol.OPENAI_RESPONSES),
+            CanonicalEmbeddingRequest((SensitiveValue("SYNTHETIC_INPUT"),)),
+            SensitiveValue("SYNTHETIC_KEY"),
+        )
+    embedding_without_dimensions = replace(
+        config(ModelProtocol.EMBEDDING),
+        protocol_options={"dimensions": None, "encoding_format": "float"},
+    )
+    assert (
+        "dimensions"
+        not in build_embedding_request(
+            embedding_without_dimensions,
+            CanonicalEmbeddingRequest((SensitiveValue("SYNTHETIC_INPUT"),)),
+            SensitiveValue("SYNTHETIC_KEY"),
+        ).body.reveal_for_use()
+    )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_TRANSIENT"):
+        normalize_embedding_response(ProviderWireResponse(503, SensitiveValue({})))
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_RESPONSE_MALFORMED"):
+        normalize_embedding_response(
+            ProviderWireResponse(
+                200,
+                SensitiveValue({"data": [], "usage": {"input_tokens": 1, "output_tokens": 0}}),
+            )
+        )
 
 
 class BlockingTransport:

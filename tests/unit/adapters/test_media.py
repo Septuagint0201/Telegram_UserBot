@@ -14,7 +14,9 @@ from telegram_userbot.adapters.media import (
     ImageIngestor,
     ImageLimits,
     PrivateMediaStore,
+    ValidatedImage,
 )
+from telegram_userbot.domain.shared.redaction import SensitiveValue
 
 
 def image_bytes(
@@ -92,6 +94,14 @@ async def test_image_ingestion_fails_closed_for_size_dimension_pixel_and_timeout
         await ImageIngestor().ingest(chunks(b""), declared_mime="image/png")
     with pytest.raises(ImageIngestionError, match="image_empty"):
         await ImageIngestor().ingest(chunks(), declared_mime="image/png")
+    with pytest.raises(ImageIngestionError, match="image_empty"):
+        ImageIngestor().validate_bytes(b"", declared_mime="image/png")
+    with pytest.raises(ImageIngestionError, match="image_byte_limit"):
+        ImageIngestor(ImageLimits(max_bytes=1)).validate_bytes(payload, declared_mime="image/png")
+    with pytest.raises(ValueError, match="invalid validated image metadata"):
+        ValidatedImage(SensitiveValue(payload), b"short", "image/png", 8, 6, len(payload))
+    with pytest.raises(ValueError, match="invalid validated image metadata"):
+        ValidatedImage(SensitiveValue(payload), b"x" * 32, "image/gif", 8, 6, len(payload))
 
     gif = image_bytes("GIF")
     with pytest.raises(ImageIngestionError, match="image_format_unsupported"):
@@ -138,6 +148,22 @@ def test_private_store_is_atomic_hash_verified_and_provider_copy_clears_exif(
     for key in ("../escape.png", "/absolute.png", "folder\\escape.png"):
         with pytest.raises(ValueError, match="storage_key"):
             store.resolve_key(key, must_exist=False)
+
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside")
+    escape = tmp_path / "media-data" / "escape.png"
+    try:
+        escape.symlink_to(outside)
+    except OSError:
+        pass
+    else:
+        with pytest.raises(ValueError, match="outside_root"):
+            store.resolve_key("escape.png")
+
+    directory = tmp_path / "media-data" / "not-a-file"
+    directory.mkdir()
+    with pytest.raises(ValueError, match="object_invalid"):
+        store.resolve_key("not-a-file")
 
 
 @pytest.mark.unit
