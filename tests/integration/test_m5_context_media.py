@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid7
 
 import pytest
-from sqlalchemy import insert, select, text
+from sqlalchemy import insert, null, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -349,7 +349,7 @@ async def test_m5_manifest_persists_content_free_and_preview_is_one_time(
         .where(message_revisions.c.id == revision_id)
         .values(
             text_content=None,
-            entities=None,
+            entities=null(),
             content_sha256=None,
             redacted_at=NOW,
             redaction_reason="telegram_delete",
