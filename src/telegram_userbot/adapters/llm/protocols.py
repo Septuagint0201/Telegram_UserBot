@@ -1,12 +1,17 @@
 """Canonical-to-wire model protocol adapters with secret-safe request wrappers."""
 
+import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Protocol, cast
 
-from telegram_userbot.domain.model_config import CanonicalModelConfig, ModelProtocol
+from telegram_userbot.domain.model_config import (
+    CanonicalModelConfig,
+    ModelCapabilities,
+    ModelProtocol,
+)
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 
 
@@ -19,7 +24,7 @@ class ProviderProtocolError(RuntimeError):
 
 class ContentKind(StrEnum):
     TEXT = "text"
-    IMAGE_URL = "image_url"
+    IMAGE = "image"
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,15 +32,33 @@ class CanonicalContent:
     kind: ContentKind
     value: SensitiveValue[str]
     image_detail: str | None = None
+    image_bytes: SensitiveValue[bytes] | None = field(default=None, repr=False)
+    image_mime: str | None = None
 
     def __post_init__(self) -> None:
         value = self.value.reveal_for_use()
         if not value or len(value) > 2_000_000:
             raise ProviderProtocolError("MODEL_INPUT_INVALID")
-        if self.kind is ContentKind.IMAGE_URL and self.image_detail != "auto":
+        if self.kind is ContentKind.TEXT:
+            if (
+                self.image_detail is not None
+                or self.image_bytes is not None
+                or self.image_mime is not None
+            ):
+                raise ProviderProtocolError("TEXT_DETAIL_FORBIDDEN")
+            return
+        if self.image_detail != "auto":
             raise ProviderProtocolError("IMAGE_DETAIL_MUST_BE_AUTO")
-        if self.kind is ContentKind.TEXT and self.image_detail is not None:
-            raise ProviderProtocolError("TEXT_DETAIL_FORBIDDEN")
+        if self.kind is ContentKind.IMAGE and (
+            self.image_bytes is None
+            or self.image_mime
+            not in {
+                "image/jpeg",
+                "image/png",
+                "image/webp",
+            }
+        ):
+            raise ProviderProtocolError("IMAGE_PAYLOAD_INVALID")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,10 +140,26 @@ def _text(value: CanonicalContent) -> str:
     return value.value.reveal_for_use()
 
 
+def _image_base64(content: CanonicalContent) -> str:
+    if content.image_bytes is None:
+        raise ProviderProtocolError("IMAGE_PAYLOAD_INVALID")
+    return base64.b64encode(content.image_bytes.reveal_for_use()).decode("ascii")
+
+
+def _image_data_url(content: CanonicalContent) -> str:
+    return f"data:{content.image_mime};base64,{_image_base64(content)}"
+
+
+def _image_mime(content: CanonicalContent) -> str:
+    if content.image_mime is not None:
+        return content.image_mime
+    raise ProviderProtocolError("IMAGE_PAYLOAD_INVALID")
+
+
 def _responses_content(content: CanonicalContent) -> dict[str, object]:
     if content.kind is ContentKind.TEXT:
         return {"type": "input_text", "text": _text(content)}
-    return {"type": "input_image", "image_url": _text(content), "detail": "auto"}
+    return {"type": "input_image", "image_url": _image_data_url(content), "detail": "auto"}
 
 
 def _chat_content(content: CanonicalContent) -> dict[str, object]:
@@ -128,14 +167,44 @@ def _chat_content(content: CanonicalContent) -> dict[str, object]:
         return {"type": "text", "text": _text(content)}
     return {
         "type": "image_url",
-        "image_url": {"url": _text(content), "detail": "auto"},
+        "image_url": {"url": _image_data_url(content), "detail": "auto"},
     }
 
 
 def _messages_content(content: CanonicalContent) -> dict[str, object]:
     if content.kind is ContentKind.TEXT:
         return {"type": "text", "text": _text(content)}
-    return {"type": "image", "source": {"type": "url", "url": _text(content)}}
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": _image_mime(content),
+            "data": _image_base64(content),
+        },
+    }
+
+
+def _validate_image_capability(
+    request: CanonicalGenerationRequest, capabilities: ModelCapabilities | None
+) -> None:
+    images = [
+        part
+        for message in request.messages
+        for part in message.content
+        if part.kind is ContentKind.IMAGE
+    ]
+    if not images:
+        return
+    if capabilities is None:
+        raise ProviderProtocolError("IMAGE_CAPABILITY_REQUIRED")
+    if not capabilities.supports_images or len(images) > capabilities.max_images_per_request:
+        raise ProviderProtocolError("IMAGE_CAPABILITY_UNSUPPORTED")
+    total_bytes = sum(
+        len(part.image_bytes.reveal_for_use()) if part.image_bytes is not None else len(_text(part))
+        for part in images
+    )
+    if total_bytes > capabilities.max_image_bytes_per_request:
+        raise ProviderProtocolError("IMAGE_REQUEST_TOO_LARGE")
 
 
 def _generation_headers(
@@ -172,9 +241,22 @@ def build_generation_request(
     config: CanonicalModelConfig,
     request: CanonicalGenerationRequest,
     api_key: SensitiveValue[str],
+    capabilities: ModelCapabilities | None = None,
 ) -> ProviderWireRequest:
     if config.protocol is ModelProtocol.EMBEDDING:
         raise ProviderProtocolError("GENERATION_PROTOCOL_REQUIRED")
+    _validate_image_capability(request, capabilities)
+    if (
+        config.protocol is ModelProtocol.ANTHROPIC_MESSAGES
+        and any(
+            part.kind is ContentKind.IMAGE
+            for message in request.messages
+            for part in message.content
+        )
+        and capabilities is not None
+        and not capabilities.messages_auto_detail_equivalent
+    ):
+        raise ProviderProtocolError("IMAGE_AUTO_DETAIL_UNSUPPORTED")
     if config.protocol is ModelProtocol.OPENAI_RESPONSES:
         body: dict[str, Any] = {
             "model": config.model_name,
@@ -407,8 +489,9 @@ class CanonicalProtocolClient:
         config: CanonicalModelConfig,
         request: CanonicalGenerationRequest,
         api_key: SensitiveValue[str],
+        capabilities: ModelCapabilities | None = None,
     ) -> NormalizedGeneration:
-        wire = build_generation_request(config, request, api_key)
+        wire = build_generation_request(config, request, api_key, capabilities)
         return normalize_generation_response(config.protocol, await self._transport.send(wire))
 
     async def embed(

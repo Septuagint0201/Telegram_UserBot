@@ -2,6 +2,10 @@
 
 from telegram_userbot.application.ports.clock import Clock, MonotonicClock
 from telegram_userbot.application.ports.ids import IdFactory
+from telegram_userbot.application.ports.media import (
+    TelegramImageDownloadRequest,
+    TelegramImageSource,
+)
 from telegram_userbot.application.ports.model import EmbeddingGateway, ModelGateway
 from telegram_userbot.application.ports.queue import JobQueue
 from telegram_userbot.application.ports.random import RandomSource
@@ -23,6 +27,8 @@ __all__ = [
     "MonotonicClock",
     "RandomSource",
     "TelegramGateway",
+    "TelegramImageDownloadRequest",
+    "TelegramImageSource",
     "TelegramReadRequest",
     "TelegramTextRequest",
     "TelegramTypingRequest",

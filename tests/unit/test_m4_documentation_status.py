@@ -14,17 +14,16 @@ def test_m4_status_documents_are_consistent() -> None:
 
     assert "M4 | Conversation Orchestrator 与 Main AI | COMPLETE" in todo
     assert "- [x] **M4-011" in todo
-    assert "M5 | Media 与 Context Contract | IN PROGRESS" in todo
+    assert "M5 | Media 与 Context Contract | COMPLETE" in todo
     assert "M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | COMPLETE" in plan
     assert "M5 | Media与Context Contract |" in plan
-    assert "| IN PROGRESS |" in plan
-    assert "V1架构设计与M0—M4已经完成" in readme
+    assert "| COMPLETE |" in plan
+    assert "V1架构设计与M0—M5已经完成" in readme
     assert "M4当前为`COMPLETE — WINDOWS/GITLAB LINUX PASS`" in compatibility
     assert "2758187631" in todo
     assert "2758187631" in plan
     assert "2758187631" in readme
     assert "2758187631" in compatibility
-    assert "command/outbox→app executor权限边界" in todo
     assert "Control Bot只写command/outbox" in (ROOT / "docs/Design.md").read_text(encoding="utf-8")
     for document in (todo, plan, readme, compatibility):
         assert "REOPENED — CI PENDING" not in document

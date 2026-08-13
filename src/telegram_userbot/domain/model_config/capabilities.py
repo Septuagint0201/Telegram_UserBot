@@ -27,6 +27,10 @@ class ModelCapabilities:
     chat_token_limit_field: str | None = None
     embedding_dimensions: frozenset[int] = frozenset()
     supports_reasoning_effort: bool = False
+    max_images_per_request: int = 10
+    max_image_bytes_per_request: int = 20 * 1024 * 1024
+    auto_image_tokens: int = 2_048
+    messages_auto_detail_equivalent: bool = False
 
     def __post_init__(self) -> None:
         if not self.supported_protocols or self.max_context_tokens <= 0:
@@ -38,6 +42,15 @@ class ModelCapabilities:
             raise ModelConfigurationError("embedding capability has generation output limit")
         if self.chat_token_limit_field not in {None, "max_completion_tokens", "max_tokens"}:
             raise ModelConfigurationError("invalid resolved Chat token field")
+        if (
+            min(
+                self.max_images_per_request,
+                self.max_image_bytes_per_request,
+                self.auto_image_tokens,
+            )
+            <= 0
+        ):
+            raise ModelConfigurationError("image capability limits are incomplete")
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -54,6 +67,10 @@ class ModelCapabilities:
             "supported_input_roles": sorted(self.supported_input_roles),
             "chat_token_limit_field": self.chat_token_limit_field,
             "embedding_dimensions": sorted(self.embedding_dimensions),
+            "max_images_per_request": self.max_images_per_request,
+            "max_image_bytes_per_request": self.max_image_bytes_per_request,
+            "auto_image_tokens": self.auto_image_tokens,
+            "messages_auto_detail_equivalent": self.messages_auto_detail_equivalent,
         }
 
 

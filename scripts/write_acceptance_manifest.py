@@ -381,6 +381,140 @@ def _requirements_for(milestone: str, *, root: Path) -> list[RequirementRecord]:
                 }
             ),
         ]
+    if milestone == "M5":
+        junit_results = load_junit_results(root / ".artifacts/m5/junit.xml")
+        mapping: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+            (
+                "M5-001",
+                (
+                    "src/telegram_userbot/adapters/media/validation.py",
+                    "tests/unit/adapters/test_media.py",
+                ),
+                (
+                    "tests.unit.adapters.test_media::test_image_ingestion_validates_magic_decode_limits_and_hash",
+                    "tests.unit.adapters.test_media::test_image_ingestion_fails_closed_for_size_dimension_pixel_and_timeout",
+                ),
+            ),
+            (
+                "M5-002",
+                (
+                    "src/telegram_userbot/adapters/media/storage.py",
+                    "tests/unit/adapters/test_media.py",
+                ),
+                (
+                    "tests.unit.adapters.test_media::test_private_store_is_atomic_hash_verified_and_provider_copy_clears_exif",
+                    "tests.unit.adapters.test_media::test_media_cleanup_respects_expiry_references_and_missing_files",
+                ),
+            ),
+            (
+                "M5-003",
+                (
+                    "src/telegram_userbot/domain/context/policy.py",
+                    "tests/property/test_m5_context_budget.py",
+                ),
+                (
+                    "tests.property.test_m5_context_budget::test_effective_context_budget_never_exceeds_policy_or_model_window",
+                    "tests.property.test_m5_context_budget::test_current_turn_is_never_partially_truncated",
+                    "tests.unit.domain.test_context::test_context_soft_quotas_borrow_deterministically_and_image_reserve_must_match",
+                ),
+            ),
+            (
+                "M5-004",
+                (
+                    "src/telegram_userbot/domain/context/selection.py",
+                    "tests/unit/domain/test_context.py",
+                ),
+                (
+                    "tests.unit.domain.test_context::test_structured_and_semantic_selection_are_stable_exact_and_single_space",
+                    "tests.unit.domain.test_context::test_dedup_prefers_recent_then_structured_summary_and_semantic",
+                ),
+            ),
+            (
+                "M5-005",
+                (
+                    "src/telegram_userbot/domain/context/manifest.py",
+                    "tests/unit/domain/test_context.py",
+                ),
+                (
+                    "tests.unit.domain.test_context::test_prompt_injection_stays_in_data_boundary_and_manifest_rebuilds",
+                ),
+            ),
+            (
+                "M5-006",
+                (
+                    "src/telegram_userbot/domain/context/manifest.py",
+                    "src/telegram_userbot/adapters/persistence/context_repository.py",
+                    "tests/integration/test_m5_context_media.py",
+                ),
+                (
+                    "tests.unit.domain.test_context::test_prompt_injection_stays_in_data_boundary_and_manifest_rebuilds",
+                    "tests.unit.domain.test_context::test_memory_and_summary_sources_keep_typed_manifest_identity",
+                    "tests.integration.test_m5_context_media::test_m5_manifest_persists_content_free_and_preview_is_one_time",
+                ),
+            ),
+            (
+                "M5-007",
+                (
+                    "src/telegram_userbot/adapters/llm/protocols.py",
+                    "tests/contract/test_model_protocols.py",
+                ),
+                (
+                    "tests.contract.test_model_protocols::test_generation_wire_contracts_are_protocol_specific_and_secret_safe[openai_responses-/responses-max_output_tokens]",
+                    "tests.contract.test_model_protocols::test_generation_wire_contracts_are_protocol_specific_and_secret_safe[openai_chat_completions-/chat/completions-max_completion_tokens]",
+                    "tests.contract.test_model_protocols::test_generation_wire_contracts_are_protocol_specific_and_secret_safe[anthropic_messages-/messages-max_tokens]",
+                    "tests.contract.test_model_protocols::test_image_wire_fails_closed_without_capability_or_messages_auto_equivalence",
+                ),
+            ),
+            (
+                "M5-008",
+                (
+                    "src/telegram_userbot/adapters/telegram_bot/context_control.py",
+                    "tests/unit/adapters/test_context_control.py",
+                ),
+                (
+                    "tests.unit.adapters.test_context_control::test_context_command_returns_metadata_only",
+                ),
+            ),
+            (
+                "M5-009",
+                (
+                    "src/telegram_userbot/adapters/telegram_bot/context_control_backend.py",
+                    "tests/unit/adapters/test_context_control.py",
+                    "tests/integration/test_m5_context_media.py",
+                ),
+                (
+                    "tests.unit.adapters.test_context_control::test_context_preview_requires_private_admin_and_one_time_confirmation",
+                    "tests.unit.adapters.test_context_control::test_preview_send_unknown_is_explicit_and_not_retried",
+                    "tests.unit.adapters.test_context_control_backend::test_exact_manifest_rebuilder_checks_vector_content_render_and_eligibility",
+                    "tests.unit.adapters.persistence.test_context_repository::test_context_preview_consume_delivery_and_deletion_state_branches",
+                    "tests.integration.test_m5_context_media::test_m5_manifest_persists_content_free_and_preview_is_one_time",
+                    "tests.integration.test_m5_context_media::test_m5_control_role_executes_preview_function_without_direct_content_access",
+                ),
+            ),
+            (
+                "M5-010",
+                ("src/telegram_userbot/adapters/media/storage.py", "deploy/postgres/m5_roles.sql"),
+                (
+                    "tests.unit.adapters.test_media::test_media_cleanup_respects_expiry_references_and_missing_files",
+                ),
+            ),
+            (
+                "M5-011",
+                ("docs/compatibility/m5.md", "TODO.md", "docs/Implementation-Plan.md"),
+                (
+                    "tests.unit.test_m5_documentation_status::test_m5_status_documents_are_consistent",
+                ),
+            ),
+        )
+        return [
+            _tested_requirement(
+                requirement_id,
+                *evidence,
+                test_ids=test_ids,
+                junit_results=junit_results,
+            )
+            for requirement_id, evidence, test_ids in mapping
+        ]
     raise ValueError("unsupported milestone")
 
 
@@ -402,7 +536,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
     )
     if missing_evidence:
         raise ValueError("acceptance evidence path is missing: " + missing_evidence[0])
-    uses_disposable_services = milestone in {"M1", "M2", "M3", "M4"}
+    uses_disposable_services = milestone in {"M1", "M2", "M3", "M4", "M5"}
     environment: dict[str, object] = {
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),
@@ -466,7 +600,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--milestone", choices=("M0", "M1", "M2", "M3", "M4"), default="M0")
+    parser.add_argument("--milestone", choices=("M0", "M1", "M2", "M3", "M4", "M5"), default="M0")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]

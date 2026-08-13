@@ -1010,6 +1010,17 @@ model_capability_snapshots = Table(
     Column("chat_token_limit_field", Text),
     Column("max_context_tokens", Integer, nullable=False),
     Column("max_output_tokens_limit", Integer),
+    Column("max_images_per_request", Integer, nullable=False, server_default=text("10")),
+    Column(
+        "max_image_bytes_per_request",
+        BigInteger,
+        nullable=False,
+        server_default=text("20971520"),
+    ),
+    Column("auto_image_tokens", Integer, nullable=False, server_default=text("2048")),
+    Column(
+        "messages_auto_detail_equivalent", Boolean, nullable=False, server_default=text("false")
+    ),
     Column("supported_input_roles", JSONB, nullable=False),
     Column("embedding_dimensions", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("status", Text, nullable=False),
@@ -1028,6 +1039,10 @@ model_capability_snapshots = Table(
     CheckConstraint(
         "max_output_tokens_limit IS NULL OR max_output_tokens_limit > 0",
         name="max_output_tokens_limit_positive",
+    ),
+    CheckConstraint(
+        "max_images_per_request > 0 AND max_image_bytes_per_request > 0 AND auto_image_tokens > 0",
+        name="image_limits_positive",
     ),
     CheckConstraint(
         "chat_token_limit_field IS NULL OR chat_token_limit_field IN "
@@ -2051,4 +2066,525 @@ M4_TABLES = tuple(
     name
     for name in metadata.tables
     if name not in M1_TABLES and name not in M2_TABLES and name not in M3_TABLES
+)
+
+
+# M5 owns immutable context policy/version registries, provider-independent
+# manifests, and metadata-only Control Bot preview lifecycle records.
+context_policies = Table(
+    "context_policies",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("logical_role", Text, nullable=False),
+    Column("purpose", Text, nullable=False),
+    Column("active_version_id", UUID_TYPE),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    CheckConstraint(
+        "logical_role IN ('main_ai','memory_agent','proactive_agent')",
+        name="logical_role_values",
+    ),
+    CheckConstraint("version > 0", name="version_positive"),
+    UniqueConstraint("logical_role", "purpose", name="uq_context_policies_role_purpose"),
+    UniqueConstraint("id", "active_version_id", name="uq_context_policies_active_scope"),
+)
+
+context_policy_versions = Table(
+    "context_policy_versions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("policy_id", UUID_TYPE, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("max_input_tokens", Integer, nullable=False),
+    Column("safety_reserve_basis_points", Integer, nullable=False),
+    Column("minimum_safety_reserve_tokens", Integer, nullable=False),
+    Column("current_budget_basis_points", Integer, nullable=False),
+    Column("recent_budget_basis_points", Integer, nullable=False),
+    Column("profile_budget_basis_points", Integer, nullable=False),
+    Column("structured_budget_basis_points", Integer, nullable=False),
+    Column("semantic_budget_basis_points", Integer, nullable=False),
+    Column("summary_budget_basis_points", Integer, nullable=False),
+    Column("structured_limit", Integer, nullable=False),
+    Column("semantic_limit", Integer, nullable=False),
+    Column("ann_candidate_limit", Integer, nullable=False),
+    Column("current_image_limit", Integer, nullable=False),
+    Column("fallback_auto_image_tokens", Integer, nullable=False),
+    Column("token_estimator_policy", Text, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("activated_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["policy_id"], ["context_policies.id"], name="fk_context_policy_versions_policy"
+    ),
+    CheckConstraint("version_no > 0", name="version_no_positive"),
+    CheckConstraint("status IN ('validated','active','retired')", name="status_values"),
+    CheckConstraint(
+        "max_input_tokens > 0 AND minimum_safety_reserve_tokens > 0 "
+        "AND structured_limit > 0 AND semantic_limit > 0 AND ann_candidate_limit > 0 "
+        "AND current_image_limit > 0 AND fallback_auto_image_tokens > 0",
+        name="limits_positive",
+    ),
+    CheckConstraint(
+        "safety_reserve_basis_points BETWEEN 0 AND 10000",
+        name="safety_reserve_range",
+    ),
+    CheckConstraint(
+        "current_budget_basis_points + recent_budget_basis_points + "
+        "profile_budget_basis_points + structured_budget_basis_points + "
+        "semantic_budget_basis_points + summary_budget_basis_points = 10000",
+        name="budget_sum",
+    ),
+    UniqueConstraint("policy_id", "version_no", name="uq_context_policy_versions_no"),
+    UniqueConstraint("id", "policy_id", name="uq_context_policy_versions_scope"),
+)
+Index(
+    "uq_context_policy_versions_active",
+    context_policy_versions.c.policy_id,
+    unique=True,
+    postgresql_where=context_policy_versions.c.status == "active",
+)
+context_policies.append_constraint(
+    ForeignKeyConstraint(
+        [context_policies.c.active_version_id, context_policies.c.id],
+        [context_policy_versions.c.id, context_policy_versions.c.policy_id],
+        name="fk_context_policies_active_version",
+        deferrable=True,
+        initially="DEFERRED",
+        use_alter=True,
+    )
+)
+
+retrieval_policies = Table(
+    "retrieval_policies",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("policy_name", Text, nullable=False, unique=True),
+    Column("active_version_id", UUID_TYPE),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    CheckConstraint("version > 0", name="version_positive"),
+)
+
+retrieval_policy_versions = Table(
+    "retrieval_policy_versions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("policy_id", UUID_TYPE, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("structured_weights", JSONB, nullable=False),
+    Column("semantic_weights", JSONB, nullable=False),
+    Column("half_life_schema_version", SmallInteger, nullable=False),
+    Column("half_life_policy", JSONB, nullable=False),
+    Column("tie_break_version", Text, nullable=False),
+    Column("source_default_schema_version", SmallInteger, nullable=False),
+    Column("source_defaults", JSONB, nullable=False),
+    Column("content_sha256", LargeBinary, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("activated_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["policy_id"], ["retrieval_policies.id"], name="fk_retrieval_policy_versions_policy"
+    ),
+    CheckConstraint("version_no > 0", name="version_no_positive"),
+    CheckConstraint("status IN ('validated','active','retired')", name="status_values"),
+    CheckConstraint("octet_length(content_sha256) = 32", name="content_hash_32_bytes"),
+    UniqueConstraint("policy_id", "version_no", name="uq_retrieval_policy_versions_no"),
+    UniqueConstraint("id", "policy_id", name="uq_retrieval_policy_versions_scope"),
+)
+Index(
+    "uq_retrieval_policy_versions_active",
+    retrieval_policy_versions.c.policy_id,
+    unique=True,
+    postgresql_where=retrieval_policy_versions.c.status == "active",
+)
+retrieval_policies.append_constraint(
+    ForeignKeyConstraint(
+        [retrieval_policies.c.active_version_id, retrieval_policies.c.id],
+        [retrieval_policy_versions.c.id, retrieval_policy_versions.c.policy_id],
+        name="fk_retrieval_policies_active_version",
+        deferrable=True,
+        initially="DEFERRED",
+        use_alter=True,
+    )
+)
+
+context_manifests = Table(
+    "context_manifests",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE),
+    Column("owner_kind", Text, nullable=False),
+    Column("turn_id", UUID_TYPE),
+    Column("background_job_id", UUID_TYPE),
+    Column("purpose", Text, nullable=False),
+    Column("logical_role", Text, nullable=False),
+    Column("builder_version", Text, nullable=False),
+    Column("prompt_version", Text, nullable=False),
+    Column("prompt_bundle_sha256", LargeBinary, nullable=False),
+    Column("context_policy_version_id", UUID_TYPE, nullable=False),
+    Column("retrieval_policy_version_id", UUID_TYPE, nullable=False),
+    Column("retrieval_policy_version", Text, nullable=False),
+    Column("token_policy_version", Text, nullable=False),
+    Column("token_estimator_version", Text, nullable=False),
+    Column("capability_snapshot_sha256", LargeBinary, nullable=False),
+    Column("embedding_space_id", UUID_TYPE),
+    Column("memory_freshness", Text, nullable=False),
+    Column("effective_input_budget", Integer, nullable=False),
+    Column("safety_reserve_tokens", Integer, nullable=False),
+    Column("estimated_instruction_tokens", Integer, nullable=False),
+    Column("estimated_text_tokens", Integer, nullable=False),
+    Column("estimated_image_tokens", Integer, nullable=False),
+    Column("estimated_structural_tokens", Integer, nullable=False),
+    Column("input_token_estimate", Integer, nullable=False),
+    Column("image_count", Integer, nullable=False),
+    Column("omission_count", Integer, nullable=False),
+    Column("source_revision_vector_sha256", LargeBinary, nullable=False),
+    Column("manifest_sha256", LargeBinary, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_context_manifests_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_context_manifests_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["turn_id", "account_id", "conversation_id"],
+        [
+            "conversation_turns.id",
+            "conversation_turns.account_id",
+            "conversation_turns.conversation_id",
+        ],
+        name="fk_context_manifests_turn_scope",
+    ),
+    ForeignKeyConstraint(
+        ["background_job_id"], ["background_jobs.id"], name="fk_context_manifests_job"
+    ),
+    ForeignKeyConstraint(
+        ["context_policy_version_id"],
+        ["context_policy_versions.id"],
+        name="fk_context_manifests_context_policy",
+    ),
+    ForeignKeyConstraint(
+        ["retrieval_policy_version_id"],
+        ["retrieval_policy_versions.id"],
+        name="fk_context_manifests_retrieval_policy",
+    ),
+    CheckConstraint("owner_kind IN ('turn','background_job')", name="owner_kind_values"),
+    CheckConstraint(
+        "(owner_kind = 'turn' AND turn_id IS NOT NULL AND background_job_id IS NULL "
+        "AND conversation_id IS NOT NULL) OR "
+        "(owner_kind = 'background_job' AND turn_id IS NULL AND background_job_id IS NOT NULL)",
+        name="owner_fields_match",
+    ),
+    CheckConstraint(
+        "logical_role IN ('main_ai','memory_agent','proactive_agent')",
+        name="logical_role_values",
+    ),
+    CheckConstraint("memory_freshness IN ('fresh','degraded','stale')", name="freshness_values"),
+    CheckConstraint(
+        "effective_input_budget > 0 AND safety_reserve_tokens >= 0 "
+        "AND estimated_instruction_tokens >= 0 AND estimated_text_tokens >= 0 "
+        "AND estimated_image_tokens >= 0 AND estimated_structural_tokens >= 0 "
+        "AND image_count >= 0 AND omission_count >= 0",
+        name="budget_values",
+    ),
+    CheckConstraint(
+        "input_token_estimate = estimated_instruction_tokens + estimated_text_tokens + "
+        "estimated_image_tokens + estimated_structural_tokens",
+        name="token_estimate_sum",
+    ),
+    CheckConstraint(
+        "octet_length(prompt_bundle_sha256) = 32 AND "
+        "octet_length(capability_snapshot_sha256) = 32 AND "
+        "octet_length(source_revision_vector_sha256) = 32 AND "
+        "octet_length(manifest_sha256) = 32",
+        name="hashes_32_bytes",
+    ),
+    UniqueConstraint("id", "account_id", name="uq_context_manifests_id_account"),
+)
+Index(
+    "uq_context_manifests_turn_build",
+    context_manifests.c.turn_id,
+    context_manifests.c.logical_role,
+    context_manifests.c.builder_version,
+    context_manifests.c.manifest_sha256,
+    unique=True,
+    postgresql_where=context_manifests.c.turn_id.is_not(None),
+)
+Index(
+    "uq_context_manifests_job_build",
+    context_manifests.c.background_job_id,
+    context_manifests.c.logical_role,
+    context_manifests.c.builder_version,
+    context_manifests.c.manifest_sha256,
+    unique=True,
+    postgresql_where=context_manifests.c.background_job_id.is_not(None),
+)
+
+context_manifest_items = Table(
+    "context_manifest_items",
+    metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("manifest_id", UUID_TYPE, ForeignKey("context_manifests.id"), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("layer", Text, nullable=False),
+    Column("canonical_role", Text, nullable=False),
+    Column("source_actor", Text, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("source_id", UUID_TYPE, nullable=False),
+    Column("source_revision", Text, nullable=False),
+    Column("prompt_version_id", UUID_TYPE, ForeignKey("prompt_versions.id")),
+    Column("message_revision_id", UUID_TYPE, ForeignKey("message_revisions.id")),
+    Column("media_object_id", UUID_TYPE, ForeignKey("media_objects.id")),
+    # M6 adds the foreign keys after the derived-source tables exist.
+    Column("memory_version_id", UUID_TYPE),
+    Column("summary_version_id", UUID_TYPE),
+    Column("trust_level", Text, nullable=False),
+    Column("rank_position", Integer),
+    Column("base_score", Numeric(8, 7)),
+    Column("final_score", Numeric(8, 7)),
+    Column("score_features_schema_version", SmallInteger),
+    Column("score_features", JSONB),
+    Column("source_slice_start", Integer),
+    Column("source_slice_end", Integer),
+    Column("image_detail", Text),
+    Column("token_estimate", Integer, nullable=False),
+    Column("estimated_image_tokens", Integer, nullable=False),
+    Column("content_sha256", LargeBinary, nullable=False),
+    Column("rendered_part_sha256", LargeBinary, nullable=False),
+    CheckConstraint("ordinal > 0", name="ordinal_positive"),
+    CheckConstraint(
+        "layer IN ('instruction','identity','personality','relationship_time',"
+        "'structured_memory','semantic_memory','summary','recent','current')",
+        name="layer_values",
+    ),
+    CheckConstraint(
+        "canonical_role IN ('system','developer','user','assistant')",
+        name="canonical_role_values",
+    ),
+    CheckConstraint(
+        "source_type IN ('trusted_instruction','message_revision','media_object',"
+        "'memory_version','summary_version')",
+        name="source_type_values",
+    ),
+    CheckConstraint(
+        "(source_type = 'trusted_instruction' AND layer = 'instruction') OR "
+        "(source_type = 'message_revision' AND layer IN "
+        "('relationship_time','recent','current')) OR "
+        "(source_type = 'media_object' AND layer = 'current') OR "
+        "(source_type = 'memory_version' AND layer IN "
+        "('identity','personality','relationship_time','structured_memory','semantic_memory')) OR "
+        "(source_type = 'summary_version' AND layer = 'summary')",
+        name="source_type_layer_matches",
+    ),
+    CheckConstraint(
+        "(source_type = 'trusted_instruction' AND prompt_version_id IS NOT NULL "
+        "AND message_revision_id IS NULL AND media_object_id IS NULL "
+        "AND memory_version_id IS NULL AND summary_version_id IS NULL "
+        "AND source_id = prompt_version_id) OR "
+        "(source_type = 'message_revision' AND prompt_version_id IS NULL "
+        "AND message_revision_id IS NOT NULL AND media_object_id IS NULL "
+        "AND memory_version_id IS NULL AND summary_version_id IS NULL "
+        "AND source_id = message_revision_id) OR "
+        "(source_type = 'media_object' AND prompt_version_id IS NULL "
+        "AND media_object_id IS NOT NULL AND message_revision_id IS NULL "
+        "AND memory_version_id IS NULL AND summary_version_id IS NULL "
+        "AND source_id = media_object_id) OR "
+        "(source_type = 'memory_version' AND prompt_version_id IS NULL "
+        "AND message_revision_id IS NULL AND media_object_id IS NULL "
+        "AND memory_version_id IS NOT NULL AND summary_version_id IS NULL "
+        "AND source_id = memory_version_id) OR "
+        "(source_type = 'summary_version' AND prompt_version_id IS NULL "
+        "AND message_revision_id IS NULL AND media_object_id IS NULL "
+        "AND memory_version_id IS NULL AND summary_version_id IS NOT NULL "
+        "AND source_id = summary_version_id)",
+        name="typed_source_matches",
+    ),
+    CheckConstraint("rank_position IS NULL OR rank_position > 0", name="rank_positive"),
+    CheckConstraint("base_score IS NULL OR base_score BETWEEN 0 AND 1", name="base_score_range"),
+    CheckConstraint("final_score IS NULL OR final_score BETWEEN 0 AND 1", name="final_score_range"),
+    CheckConstraint(
+        "(source_slice_start IS NULL AND source_slice_end IS NULL) OR "
+        "(source_slice_start >= 0 AND source_slice_end > source_slice_start)",
+        name="slice_range",
+    ),
+    CheckConstraint("image_detail IS NULL OR image_detail = 'auto'", name="image_detail_auto"),
+    CheckConstraint(
+        "token_estimate >= 0 AND estimated_image_tokens >= 0",
+        name="token_estimates_nonnegative",
+    ),
+    CheckConstraint(
+        "octet_length(content_sha256) = 32 AND octet_length(rendered_part_sha256) = 32",
+        name="content_hashes_32_bytes",
+    ),
+    UniqueConstraint("manifest_id", "ordinal", name="uq_context_manifest_items_ordinal"),
+)
+
+context_manifest_item_reasons = Table(
+    "context_manifest_item_reasons",
+    metadata,
+    Column("manifest_item_id", BigInteger, ForeignKey("context_manifest_items.id"), nullable=False),
+    Column("reason_ordinal", SmallInteger, nullable=False),
+    Column("reason_code", Text, nullable=False),
+    Column("related_source_type", Text),
+    Column("related_source_id", UUID_TYPE),
+    PrimaryKeyConstraint("manifest_item_id", "reason_ordinal", name="pk_context_item_reasons"),
+    CheckConstraint("reason_ordinal > 0", name="reason_ordinal_positive"),
+)
+
+context_manifest_omissions = Table(
+    "context_manifest_omissions",
+    metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("manifest_id", UUID_TYPE, ForeignKey("context_manifests.id"), nullable=False),
+    Column("layer", Text, nullable=False),
+    Column("reason_code", Text, nullable=False),
+    Column("source_type", Text),
+    Column("source_id", UUID_TYPE),
+    Column("range_start_event_id", BigInteger),
+    Column("range_end_event_id", BigInteger),
+    Column("omitted_count", Integer),
+    Column("estimated_tokens", Integer),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    CheckConstraint(
+        "omitted_count IS NULL OR omitted_count >= 0", name="omitted_count_nonnegative"
+    ),
+    CheckConstraint("estimated_tokens IS NULL OR estimated_tokens >= 0", name="tokens_nonnegative"),
+)
+
+context_preview_requests = Table(
+    "context_preview_requests",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("control_command_id", UUID_TYPE, ForeignKey("control_commands.id"), unique=True),
+    Column("bot_identity", Text, nullable=False),
+    Column("admin_user_id", BigInteger, nullable=False),
+    Column("bot_chat_id", BigInteger, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("context_manifest_id", UUID_TYPE, ForeignKey("context_manifests.id"), nullable=False),
+    Column("manifest_sha256", LargeBinary, nullable=False),
+    Column("source_revision_vector_sha256", LargeBinary, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("chunk_count", Integer),
+    Column("delivered_chunk_count", Integer, nullable=False, server_default=text("0")),
+    Column("token_expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("confirmed_at", UTC_TIMESTAMP),
+    Column("delivered_at", UTC_TIMESTAMP),
+    Column("delete_after", UTC_TIMESTAMP),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("last_error_code", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["account_id"], ["accounts.id"], name="fk_context_preview_requests_account"
+    ),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_context_preview_requests_conversation_scope",
+    ),
+    CheckConstraint(
+        "state IN ('pending_confirmation','confirmed','delivering','delivered','send_unknown',"
+        "'delete_pending','deleted','delete_partial','expired','cancelled','failed')",
+        name="state_values",
+    ),
+    CheckConstraint(
+        "delivered_chunk_count >= 0 AND (chunk_count IS NULL OR "
+        "(chunk_count >= 0 AND delivered_chunk_count <= chunk_count))",
+        name="chunk_counts_valid",
+    ),
+    CheckConstraint(
+        "octet_length(manifest_sha256) = 32 AND octet_length(source_revision_vector_sha256) = 32",
+        name="hashes_32_bytes",
+    ),
+    UniqueConstraint("id", "admin_user_id", "bot_chat_id", name="uq_context_preview_admin_scope"),
+    UniqueConstraint("id", "bot_identity", "bot_chat_id", name="uq_context_preview_bot_scope"),
+)
+
+context_preview_tokens = Table(
+    "context_preview_tokens",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("request_id", UUID_TYPE, nullable=False, unique=True),
+    Column("admin_user_id", BigInteger, nullable=False),
+    Column("bot_chat_id", BigInteger, nullable=False),
+    Column("purpose", Text, nullable=False),
+    Column("token_hash", LargeBinary, nullable=False, unique=True),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("used_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["request_id", "admin_user_id", "bot_chat_id"],
+        [
+            "context_preview_requests.id",
+            "context_preview_requests.admin_user_id",
+            "context_preview_requests.bot_chat_id",
+        ],
+        name="fk_context_preview_tokens_request_scope",
+    ),
+    CheckConstraint("purpose = 'context_preview_confirm'", name="purpose_v1"),
+    CheckConstraint("octet_length(token_hash) = 32", name="token_hash_32_bytes"),
+)
+
+context_preview_deliveries = Table(
+    "context_preview_deliveries",
+    metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("request_id", UUID_TYPE, nullable=False),
+    Column("bot_identity", Text, nullable=False),
+    Column("bot_chat_id", BigInteger, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("bot_message_id", BigInteger),
+    Column("sent_at", UTC_TIMESTAMP),
+    Column("delete_after", UTC_TIMESTAMP),
+    Column("deleted_at", UTC_TIMESTAMP),
+    Column("last_error_code", Text),
+    ForeignKeyConstraint(
+        ["request_id", "bot_identity", "bot_chat_id"],
+        [
+            "context_preview_requests.id",
+            "context_preview_requests.bot_identity",
+            "context_preview_requests.bot_chat_id",
+        ],
+        name="fk_context_preview_deliveries_request_scope",
+    ),
+    CheckConstraint("ordinal > 0", name="ordinal_positive"),
+    CheckConstraint(
+        "state IN ('pending','sending','sent','send_unknown','delete_pending',"
+        "'deleted','delete_failed')",
+        name="state_values",
+    ),
+    UniqueConstraint("request_id", "ordinal", name="uq_context_preview_deliveries_ordinal"),
+)
+Index(
+    "uq_context_preview_deliveries_bot_message",
+    context_preview_deliveries.c.bot_identity,
+    context_preview_deliveries.c.bot_chat_id,
+    context_preview_deliveries.c.bot_message_id,
+    unique=True,
+    postgresql_where=context_preview_deliveries.c.bot_message_id.is_not(None),
+)
+
+model_runs.append_constraint(
+    ForeignKeyConstraint(
+        [model_runs.c.context_manifest_id, model_runs.c.account_id],
+        [context_manifests.c.id, context_manifests.c.account_id],
+        name="fk_model_runs_context_manifest_scope",
+        deferrable=True,
+        initially="DEFERRED",
+        use_alter=True,
+    )
+)
+
+M5_TABLES = tuple(
+    name
+    for name in metadata.tables
+    if name not in M1_TABLES
+    and name not in M2_TABLES
+    and name not in M3_TABLES
+    and name not in M4_TABLES
 )

@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import pytest
 
+from telegram_userbot.adapters.telegram_user import ReplayImageSource
 from telegram_userbot.application.ports import (
     AsyncUnitOfWork,
     Clock,
@@ -12,7 +13,9 @@ from telegram_userbot.application.ports import (
     MonotonicClock,
     RandomSource,
     TelegramGateway,
+    TelegramImageSource,
 )
+from telegram_userbot.application.ports.media import TelegramImageDownloadRequest
 from telegram_userbot.application.ports.model import EmbeddingRequest, ModelRequest
 from telegram_userbot.application.ports.queue import JobEnvelope
 from telegram_userbot.application.ports.telegram import (
@@ -21,7 +24,7 @@ from telegram_userbot.application.ports.telegram import (
     TelegramTypingAction,
     TelegramTypingRequest,
 )
-from telegram_userbot.domain.shared.ids import AccountId, ConversationId, JobId, RunId
+from telegram_userbot.domain.shared.ids import AccountId, ConversationId, JobId, MessageId, RunId
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 from tests.support.fakes import (
     DeterministicIdFactory,
@@ -76,6 +79,13 @@ async def test_external_gateway_fakes_satisfy_ports_without_network() -> None:
     assert isinstance(telegram, TelegramGateway)
     assert isinstance(model, ModelGateway)
     assert isinstance(embedding, EmbeddingGateway)
+    image_request = TelegramImageDownloadRequest(
+        AccountId.new(), ConversationId.new(), MessageId.new(), 1, 0
+    )
+    image_source = ReplayImageSource({(str(image_request.message_id), 1, 0): b"SYNTHETIC_IMAGE"})
+    assert isinstance(image_source, TelegramImageSource)
+    downloaded = b"".join([chunk async for chunk in image_source.iter_image(image_request)])
+    assert downloaded == b"SYNTHETIC_IMAGE"
     run_id = RunId.new()
     account_id = AccountId.new()
     conversation_id = ConversationId.new()

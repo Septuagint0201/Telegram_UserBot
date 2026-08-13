@@ -534,7 +534,7 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 /context_preview <contact>
 ```
 
-完整预览是高敏感操作。命令先展示精确manifest、联系人、内容范围和“正文将复制到管理员Telegram会话”的警告；管理员使用绑定本人、Bot chat、manifest hash和短期deadline的一次性token二次确认后，Control Bot才重建并发送完整canonical文本。图片只显示media reference、hash、尺寸和`detail=auto`，不向Bot重传二进制。
+完整预览是高敏感操作。命令先展示精确manifest、联系人、内容范围和“正文将复制到管理员Telegram会话”的警告；管理员通过私聊内的Confirm按钮回调提交绑定本人、Bot chat、manifest hash和短期deadline的一次性token，token不进入Bot消息正文或可手输命令参数，Control Bot随后才重建并发送完整canonical文本。图片只显示media reference、hash、尺寸和`detail=auto`，不向Bot重传二进制。
 
 确认token默认5分钟过期且只能使用一次；preview消息默认10分钟后尽力删除，并持久化Bot message ID和删除结果。Telegram消息删除不能保证清除通知、客户端缓存、转发、截图或平台副本，删除失败必须告警，不能宣称已经可靠擦除。Preview不调用模型、不创建Telegram真人账号outbound intent，也不能恢复已经delete/forget/purge/redact的正文。
 
@@ -2585,9 +2585,9 @@ release/operations-sensitive -> live smoke + backup/restore + 2/4/40 24h soak
 
 每个验收项使用稳定requirement/test ID，并输出JUnit、coverage和content-free acceptance manifest。结果只能是`PASS`、`FAIL`、`NOT RUN`或`BLOCKED`；普通证据保留30天，release/restore/soak证据保留365天。
 
-当前仓库已经完成M0工程基线、M1 PostgreSQL/Redis durable state、M2模型配置/key-only控制组件、M3 Telegram lifecycle primitives和M4 Conversation Orchestrator，当前进入M5 Media与Context Contract。M3实现了注入client的Telethon gateway、private 1:1 event/revision/tombstone、media metadata、outbound intent/random ID、reconciliation与fake恢复矩阵；M4实现了effective mode、turn/run lifecycle、精确三秒grace、final send gate、AUTO read/typing、human invalidation、COPILOT draft和durable Control Bot backend。多分片continuation在首项后允许本group outgoing与新incoming推进revision，但仍逐段校验原source、human outgoing、mode/control、lease及ordinal；Control Bot命令的持久化/重放已实现，但Control Bot只写command/outbox，app role执行编排状态变更并回写终态。默认入口仍只执行安全配置检查，不创建Telegram client、不读取Session、不启动Control Web App或Orchestrator，也不产生自动消息。
+当前仓库已经完成M0工程基线、M1 PostgreSQL/Redis durable state、M2模型配置/key-only控制组件、M3 Telegram lifecycle primitives、M4 Conversation Orchestrator和M5 Media与Context Contract，当前进入M6 Memory、Summary与Embedding Pipeline。M5实现安全图片流式校验与私有存储、动态预算与确定性选择、instruction/data隔离、content-free manifest、三协议图片映射及metadata-only `/context`和按钮回调确认的受控preview。M4的多分片continuation仍逐段校验原source、human outgoing、mode/control、lease及ordinal；Control Bot只写command/outbox，app role执行编排状态变更并回写终态。默认入口仍只执行安全配置检查，不创建Telegram client、不读取Session、不启动Control Web App或Orchestrator，也不产生自动消息。
 
-M0—M4已有绑定签名commit/tree的GitLab Linux evidence。M4最终补强提交`2b1ba2974d44bbd323d329f0421012dbe651638f`与pipeline [#2758187631](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758187631)通过九个作业；M4 service job执行258个测试、1个deselect，line/branch coverage为92.52%/84.50%，JUnit-derived race/acceptance、PostgreSQL/Redis service integration、migration与artifact scan均为`PASS`，因此M4-011关闭并进入M5。真实Telegram/provider、完整runtime、Compose、Ubuntu production、backup/restore、live smoke与soak仍为`NOT RUN`；任何文档中的最终流程都不能被误述为当前已部署能力。
+M0—M4已有绑定签名commit/tree的GitLab Linux evidence。M4最终补强提交`2b1ba2974d44bbd323d329f0421012dbe651638f`与pipeline [#2758187631](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758187631)通过九个作业。M5 Windows static/unit/property/contract与synthetic image门禁已经`PASS`；本机无Docker，M5 PostgreSQL/Redis migration/role integration为`NOT RUN`，精确签名提交的GitLab证据将在本阶段推送后补齐。真实Telegram/provider、完整runtime、Compose、Ubuntu production、backup/restore、live smoke与soak仍为`NOT RUN`；任何文档中的最终流程都不能被误述为当前已部署能力。
 
 ---
 

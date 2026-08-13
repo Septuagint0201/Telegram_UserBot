@@ -32,6 +32,7 @@ def test_runtime_dependencies_and_python_are_pinned() -> None:
         "arq==0.28.0",
         "cryptography==50.0.0",
         "httpx==0.28.1",
+        "Pillow==12.3.0",
         "psycopg[binary]==3.3.4",
         "redis==5.3.1",
         "starlette==1.6.0",

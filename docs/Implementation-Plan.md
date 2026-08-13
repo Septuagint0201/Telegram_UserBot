@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M4已经关闭；M4补强由签名提交`2b1ba2974d44bbd323d329f0421012dbe651638f`及GitLab pipeline [#2758187631](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758187631)验证。当前进入M5 Media与Context Contract，M6—M9尚未开始。Telegram/provider live、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M5已经关闭；M4补强由签名提交`2b1ba2974d44bbd323d329f0421012dbe651638f`及GitLab pipeline [#2758187631](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758187631)验证。M5的Windows static/unit/property/contract与synthetic image门禁已经通过，精确签名提交的GitLab disposable-service/migration/acceptance证据将在本阶段推送后补齐。当前进入M6 Memory、Summary与Embedding Pipeline。Telegram/provider live、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -70,8 +70,8 @@ deploy/
 | M2 | 模型配置、adapter与key-only控制面 | 仅local fake | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M5 | Media与Context Contract | fake provider；测试图片 | IN PROGRESS |
-| M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | NOT STARTED |
+| M5 | Media与Context Contract | fake provider；测试图片 | COMPLETE |
+| M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | IN PROGRESS |
 | M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | NOT STARTED |
 | M8 | Production Compose、backup与运维加固 | 测试backup/alert targets | NOT STARTED |
 | M9 | Release candidate验证 | 受保护live smoke与授权测试peer | NOT STARTED |
@@ -301,6 +301,8 @@ deploy/
 - 被删source不进入context；模型无能力时fail closed。
 - Context同输入/版本可重建，全部item有source/trust。
 
+当前状态：COMPLETE。实现覆盖20 MiB/40 MP/16384 px图片校验、private 0700/0600 media storage、10 GiB quota与TTL cleanup、动态context预算、稳定selection、instruction/data隔离、content-free manifest、Responses/Chat Completions/Messages图片映射，以及metadata-only `/context`和按钮回调二次确认的`/context_preview`。Windows本地static/unit/property/contract与synthetic image证据为`PASS`；本机无Docker，PostgreSQL/Redis migration/role integration为`NOT RUN`，精确签名提交的GitLab证据待推送后记录。
+
 ## 11. M6 — Memory、Summary与Embedding
 
 ### 11.1 目标
@@ -459,4 +461,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0—M4已经关闭，当前进入M5 Media与Context Contract。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。
+M0—M5已经关闭，当前进入M6 Memory、Summary与Embedding Pipeline。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。

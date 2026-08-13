@@ -609,14 +609,14 @@ Canonical request 和 manifest 不保存 base64。Adapter 在可信进程内按�
 | `openai_chat_completions` | `{"type":"image_url","image_url":{"url":...,"detail":"auto"}}` | 显式发送 |
 | `anthropic_messages` | `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}` | 协议没有相同 wire 字段；只在 capability 声明 provider-native automatic processing 等价时省略 |
 
-`image_url` 可以由 adapter 使用受支持的 data URL 或先上传得到的 provider file reference。V1 不把 Telegram CDN URL 或任意消息 URL直接交给 provider，避免 provider 侧 SSRF、过期和权限差异。
+`image_url` 只由 adapter 从本地已验证字节构造受支持的 data URL；Messages adapter 则从同一份本地字节构造 base64 source。V1 不上传或复用 provider file reference，也不把 Telegram CDN URL 或任意消息 URL 直接交给 provider，避免 provider 侧 SSRF、过期和权限差异。
 
 对 Messages 的“等价”只表示由 provider 自动决定图片处理预算，不声称不同 provider token 成本或视觉质量相等。Manifest 记录：
 
 ```text
 canonical_detail = auto
 wire_detail_mode = explicit_auto | provider_default_equivalent
-image_transport = data_url | base64 | provider_file
+image_transport = data_url | base64
 adapter_version
 ```
 

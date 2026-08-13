@@ -9,7 +9,7 @@ from telegram_userbot.adapters.persistence.engine import (
     create_postgres_engine,
     schema_is_ready,
 )
-from telegram_userbot.adapters.persistence.schema import M1_TABLES, metadata
+from telegram_userbot.adapters.persistence.schema import M1_TABLES, M5_TABLES, metadata
 
 
 class FakeConnection:
@@ -69,6 +69,19 @@ def test_m1_schema_inventory_and_constraint_names() -> None:
         "migration_progress",
     }
     assert set(M1_TABLES) == expected
+    assert set(M5_TABLES) == {
+        "context_policies",
+        "context_policy_versions",
+        "retrieval_policies",
+        "retrieval_policy_versions",
+        "context_manifests",
+        "context_manifest_items",
+        "context_manifest_item_reasons",
+        "context_manifest_omissions",
+        "context_preview_requests",
+        "context_preview_tokens",
+        "context_preview_deliveries",
+    }
     for table in metadata.tables.values():
         assert all(constraint.name for constraint in table.constraints)
         assert all(index.name for index in table.indexes)

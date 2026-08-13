@@ -45,6 +45,7 @@ class IssuedKeyLaunch:
 class BotReply:
     text: str
     web_app_url: SensitiveValue[str] | None = field(default=None, repr=False)
+    callback_token: SensitiveValue[str] | None = field(default=None, repr=False)
 
 
 class ModelControlBackend(Protocol):

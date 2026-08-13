@@ -1,6 +1,7 @@
 """Telegram user-client adapters."""
 
 from telegram_userbot.adapters.telegram_user.fake import FakeSendOutcome, ReplayTelegramGateway
+from telegram_userbot.adapters.telegram_user.media import ReplayImageSource, TelethonImageSource
 from telegram_userbot.adapters.telegram_user.normalizer import (
     PeerAdmission,
     RawMedia,
@@ -14,7 +15,9 @@ __all__ = [
     "PeerAdmission",
     "RawMedia",
     "RawTelegramUpdate",
+    "ReplayImageSource",
     "ReplayTelegramGateway",
+    "TelethonImageSource",
     "TelethonTelegramGateway",
     "normalize_update",
 ]

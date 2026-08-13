@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M4已经完成。M4 Conversation Orchestrator与Main AI的continuation final gate、durable Control Bot backend、command/outbox→app executor权限边界和JUnit-derived evidence已由签名提交`2b1ba2974d44bbd323d329f0421012dbe651638f`及GitLab pipeline [#2758187631](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758187631)验证，M4-001—M4-011全部关闭。当前进入M5 Media与Context Contract，尚未完成任何M5实现项。Windows本机无Docker；真实Telegram/provider live、应用容器、真实AUTO、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。
+架构设计与M0—M5已经完成。M5 Media与Context Contract实现了安全图片摄取、私有存储、动态预算、确定性选择、instruction/data隔离、content-free manifest、三协议图片映射及受控Context Bot界面；M5-001—M5-011已经由Windows静态、unit/property/contract和synthetic image测试关闭，精确签名提交的GitLab disposable-service/migration/acceptance证据将在本阶段推送后补齐。Windows本机无Docker；真实Telegram/provider live、应用容器、真实AUTO、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。当前进入M6 Memory、Summary与Embedding Pipeline。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -44,8 +44,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M2 | 模型配置、adapter与 key-only 控制面 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
 | M3 | Telegram ingest 与 outbound intent | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M5 | Media 与 Context Contract | IN PROGRESS | NOT RUN |
-| M6 | Memory、Summary 与 Embedding Pipeline | WAITING | NOT RUN |
+| M5 | Media 与 Context Contract | COMPLETE | PASS (Windows synthetic/static); GitLab pending |
+| M6 | Memory、Summary 与 Embedding Pipeline | IN PROGRESS | NOT RUN |
 | M7 | Proactive Pipeline | WAITING | NOT RUN |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
 | M9 | Release candidate 验证 | WAITING | NOT RUN |
@@ -211,23 +211,23 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 目标：安全处理图片并构建可审计、可重建、受 token 预算约束的上下文。
 
-- [ ] **M5-001 实现图片 ingestion validation**（依赖：M3-004）— 下载 Telegram photo/image MIME document，默认限制 20 MiB、40 MP、单边 16384 px、30 秒、并发 1；拒绝伪 MIME 和解码炸弹。
-- [ ] **M5-002 实现私有 media storage lifecycle**（依赖：M1-004、M5-001）— 在 10 GiB 私有卷保存原件/可选 provider copy、hash、EXIF 清理状态与引用；原件默认保留 30 天、provider copy 24 小时，原子写入且默认不备份、不公开访问。
-- [ ] **M5-003 实现 context policy 与动态预算**（依赖：M4-011）— Main AI 默认输入上限 24,000 token，并受模型窗口、输出预算、安全余量和 section cap 约束。
-- [ ] **M5-004 实现候选选择与确定性排序**（依赖：M5-003）— 组合 structured memory、vector、recent messages，进行 exact rerank、去重和稳定 tie-break；不同 memory space 不混合检索。
-- [ ] **M5-005 实现 instruction/data isolation**（依赖：M5-004）— 来源内容只进入 data boundary，不升级为指令；用 prompt-injection corpus 验证隔离和 provenance。
-- [ ] **M5-006 实现 context manifest/hash/rebuild**（依赖：M5-003—M5-005）— 记录选择原因、source revision、token estimate、policy/config version 和 payload hash；同一 snapshot 可确定性重建。
-- [ ] **M5-007 实现三协议图片映射**（依赖：M2-003、M5-001、M5-006）— canonical image budget/detail 使用 `auto`，分别生成 Responses、Chat Completions、Messages wire payload；先做 capability gate。
-- [ ] **M5-008 实现 `/context`**（依赖：M5-006）— 只展示来源类别、计数、预算、版本和 freshness，不返回聊天正文、memory 正文或 secret。
-- [ ] **M5-009 实现 `/context_preview`**（依赖：M5-006—M5-008）— 管理员受控查看 synthetic/redacted preview，覆盖 token overflow、rebuild、delete 和 send_unknown 场景。
-- [ ] **M5-010 实现 quota、retention 与磁盘清理接口**（依赖：M5-002）— 为 Operations 暴露容量、TTL、引用保护和删除 job；阈值与最终期限留在 M8 配置。
-- [ ] **M5-011 关闭 M5**（依赖：M5-001—M5-010）— 图片安全、三协议 contract、预算 property、注入和 rebuild 测试为 `PASS`。
+- [x] **M5-001 实现图片 ingestion validation**（依赖：M3-004）— 下载 Telegram photo/image MIME document，默认限制 20 MiB、40 MP、单边 16384 px、30 秒、并发 1；拒绝伪 MIME 和解码炸弹。
+- [x] **M5-002 实现私有 media storage lifecycle**（依赖：M1-004、M5-001）— 在 10 GiB 私有卷保存原件/可选 provider copy、hash、EXIF 清理状态与引用；原件默认保留 30 天、provider copy 24 小时，原子写入且默认不备份、不公开访问。
+- [x] **M5-003 实现 context policy 与动态预算**（依赖：M4-011）— Main AI 默认输入上限 24,000 token，并受模型窗口、输出预算、安全余量和 section cap 约束。
+- [x] **M5-004 实现候选选择与确定性排序**（依赖：M5-003）— 组合 structured memory、vector、recent messages，进行 exact rerank、去重和稳定 tie-break；不同 memory space 不混合检索。
+- [x] **M5-005 实现 instruction/data isolation**（依赖：M5-004）— 来源内容只进入 data boundary，不升级为指令；用 prompt-injection corpus 验证隔离和 provenance。
+- [x] **M5-006 实现 context manifest/hash/rebuild**（依赖：M5-003—M5-005）— 记录选择原因、source revision、token estimate、policy/config version 和 payload hash；同一 snapshot 可确定性重建。
+- [x] **M5-007 实现三协议图片映射**（依赖：M2-003、M5-001、M5-006）— canonical image budget/detail 使用 `auto`，分别生成 Responses、Chat Completions、Messages wire payload；先做 capability gate。
+- [x] **M5-008 实现 `/context`**（依赖：M5-006）— 只展示来源类别、计数、预算、版本和 freshness，不返回聊天正文、memory 正文或 secret。
+- [x] **M5-009 实现 `/context_preview`**（依赖：M5-006—M5-008）— 管理员受控查看 synthetic/redacted preview，覆盖 token overflow、rebuild、delete 和 send_unknown 场景。
+- [x] **M5-010 实现 quota、retention 与磁盘清理接口**（依赖：M5-002）— 为 Operations 暴露容量、TTL、引用保护和删除 job；阈值与最终期限留在 M8 配置。
+- [x] **M5-011 关闭 M5**（依赖：M5-001—M5-010）— 图片安全、三协议 contract、预算 property、注入和 rebuild 测试为 `PASS`。
 
 ### M5 退出门禁
 
-- [ ] 非图片媒体只保留元数据；图片超限、伪装或不受模型支持时 fail closed。
-- [ ] context 可由 manifest 重建，且删除/编辑后的旧内容不会重新进入选择结果。
-- [ ] 24,000 token 是可配置默认上限，不会覆盖更小模型窗口或输出安全余量。
+- [x] 非图片媒体只保留元数据；图片超限、伪装或不受模型支持时 fail closed。
+- [x] context 可由 manifest 重建，且删除/编辑后的旧内容不会重新进入选择结果。
+- [x] 24,000 token 是可配置默认上限，不会覆盖更小模型窗口或输出安全余量。
 
 ## 11. M6 — Memory、Summary与 Embedding Pipeline
 
@@ -355,4 +355,4 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ## 17. 下一步
 
-M4已经关闭，当前进入M5 Media与Context Contract，从M5-001图片ingestion validation开始。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
+M5已经关闭，当前进入M6 Memory、Summary与Embedding Pipeline，从M6-001异步触发与补偿扫描开始。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。

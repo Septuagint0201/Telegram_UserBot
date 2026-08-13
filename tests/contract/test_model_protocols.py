@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from collections.abc import Mapping
 from uuid import uuid7
 
@@ -22,7 +23,9 @@ from telegram_userbot.adapters.llm import (
 from telegram_userbot.domain.model_config import (
     CanonicalModelConfig,
     LogicalRole,
+    ModelCapabilities,
     ModelProtocol,
+    ProfileKind,
 )
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 
@@ -65,15 +68,33 @@ def generation(*, stream: bool = False) -> CanonicalGenerationRequest:
                 (
                     CanonicalContent(ContentKind.TEXT, SensitiveValue("SYNTHETIC_INPUT")),
                     CanonicalContent(
-                        ContentKind.IMAGE_URL,
-                        SensitiveValue("https://media.invalid/synthetic.png"),
+                        ContentKind.IMAGE,
+                        SensitiveValue("media-object:synthetic"),
                         "auto",
+                        SensitiveValue(b"SYNTHETIC_IMAGE_BYTES"),
+                        "image/png",
                     ),
                 ),
             ),
         ),
         stream=stream,
         response_schema={"type": "object", "properties": {"answer": {"type": "string"}}},
+    )
+
+
+def image_capabilities(protocol: ModelProtocol) -> ModelCapabilities:
+    return ModelCapabilities(
+        ProfileKind.GENERATION,
+        frozenset({protocol}),
+        True,
+        True,
+        True,
+        True,
+        True,
+        32_000,
+        4096,
+        frozenset({"system", "developer", "user", "assistant"}),
+        messages_auto_detail_equivalent=protocol is ModelProtocol.ANTHROPIC_MESSAGES,
     )
 
 
@@ -94,7 +115,10 @@ def test_generation_wire_contracts_are_protocol_specific_and_secret_safe(
     protocol: ModelProtocol, path: str, limit_field: str
 ) -> None:
     wire = build_generation_request(
-        config(protocol), generation(), SensitiveValue("SYNTHETIC_API_KEY")
+        config(protocol),
+        generation(),
+        SensitiveValue("SYNTHETIC_API_KEY"),
+        image_capabilities(protocol),
     )
     body = wire.body.reveal_for_use()
     assert wire.path == path
@@ -104,7 +128,7 @@ def test_generation_wire_contracts_are_protocol_specific_and_secret_safe(
     assert "SYNTHETIC_API_KEY" not in repr(wire)
     assert not path.endswith("/completions") or path == "/chat/completions"
     serialized = str(body)
-    assert "synthetic.png" in serialized
+    assert base64.b64encode(b"SYNTHETIC_IMAGE_BYTES").decode() in serialized
     if protocol is ModelProtocol.ANTHROPIC_MESSAGES:
         assert "system" in body
         assert "output_config" in body
@@ -132,16 +156,43 @@ def test_generation_wire_rejects_legacy_or_unresolved_contracts() -> None:
         {"token_limit_field": "auto"},
     )
     with pytest.raises(ProviderProtocolError, match="UNRESOLVED"):
-        build_generation_request(chat, generation(), SensitiveValue("SYNTHETIC_KEY"))
+        build_generation_request(
+            chat,
+            generation(),
+            SensitiveValue("SYNTHETIC_KEY"),
+            image_capabilities(ModelProtocol.OPENAI_CHAT_COMPLETIONS),
+        )
     with pytest.raises(ProviderProtocolError, match="DETAIL"):
         CanonicalContent(
-            ContentKind.IMAGE_URL,
-            SensitiveValue("https://media.invalid/image.png"),
+            ContentKind.IMAGE,
+            SensitiveValue("media-object:synthetic"),
             "high",
+            SensitiveValue(b"SYNTHETIC_IMAGE_BYTES"),
+            "image/png",
         )
     with pytest.raises(ProviderProtocolError, match="GENERATION_PROTOCOL"):
         build_generation_request(
-            config(ModelProtocol.EMBEDDING), generation(), SensitiveValue("SYNTHETIC_KEY")
+            config(ModelProtocol.EMBEDDING),
+            generation(),
+            SensitiveValue("SYNTHETIC_KEY"),
+            image_capabilities(ModelProtocol.OPENAI_RESPONSES),
+        )
+
+
+@pytest.mark.contract
+def test_image_wire_fails_closed_without_capability_or_messages_auto_equivalence() -> None:
+    with pytest.raises(ProviderProtocolError, match="CAPABILITY_REQUIRED"):
+        build_generation_request(
+            config(ModelProtocol.OPENAI_RESPONSES),
+            generation(),
+            SensitiveValue("SYNTHETIC_KEY"),
+        )
+    with pytest.raises(ProviderProtocolError, match="AUTO_DETAIL_UNSUPPORTED"):
+        build_generation_request(
+            config(ModelProtocol.ANTHROPIC_MESSAGES),
+            generation(),
+            SensitiveValue("SYNTHETIC_KEY"),
+            image_capabilities(ModelProtocol.OPENAI_RESPONSES),
         )
 
 
@@ -275,6 +326,7 @@ async def test_canonical_client_propagates_best_effort_cancellation() -> None:
             config=config(ModelProtocol.OPENAI_RESPONSES),
             request=generation(),
             api_key=SensitiveValue("SYNTHETIC_KEY"),
+            capabilities=image_capabilities(ModelProtocol.OPENAI_RESPONSES),
         )
     )
     await transport.started.wait()

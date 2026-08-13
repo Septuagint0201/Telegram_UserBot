@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0—M4已经完成。M4已实现并验证effective mode、turn/debounce、Main AI run、精确三秒grace、final send gate、AUTO read/typing续租、COPILOT draft和durable Control Bot backend；当前进入M5 Media与Context Contract。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+V1架构设计与M0—M5已经完成。M5已实现安全图片摄取与私有存储、动态context预算、确定性选择、instruction/data隔离、content-free manifest、三协议图片映射及受控Context Bot界面；当前进入M6 Memory、Summary与Embedding Pipeline。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
@@ -13,7 +13,7 @@ V1架构设计与M0—M4已经完成。M4已实现并验证effective mode、turn
 - Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)、[M3 Compatibility Set](docs/compatibility/m3.md)和[M4 Compatibility Set](docs/compatibility/m4.md)。真实Telegram/provider仍未接入。
+精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)、[M3 Compatibility Set](docs/compatibility/m3.md)、[M4 Compatibility Set](docs/compatibility/m4.md)和[M5 Compatibility Set](docs/compatibility/m5.md)。真实Telegram/provider仍未接入。
 
 ## 架构摘要
 
