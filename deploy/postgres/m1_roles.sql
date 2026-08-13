@@ -61,9 +61,8 @@ GRANT SELECT, INSERT, UPDATE ON
   message_reactions, conversation_turns, transactional_outbox
 TO telegram_userbot_app_runtime;
 
-GRANT SELECT, INSERT, UPDATE ON
-  account_orchestrator_states, conversation_mode_history, account_control_history,
-  transactional_outbox
+-- Control may enqueue durable work, but app remains the owner of orchestrator state.
+GRANT INSERT ON transactional_outbox
 TO telegram_userbot_control_runtime;
 
 GRANT SELECT, INSERT, UPDATE ON

@@ -1,3 +1,5 @@
+# ruff: noqa: PLR0913 - protocol fakes mirror explicit actor/chat/update bindings.
+
 from datetime import UTC, datetime
 
 import pytest
@@ -22,60 +24,75 @@ class BackendFake:
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         target_token: str | None,
         mode: BaseMode | None,
         now: datetime,
     ) -> ConversationCommandResult:
-        self.calls.append(("mode", admin_id, telegram_update_id, target_token, mode, now))
+        self.calls.append(
+            ("mode", admin_id, bot_chat_id, telegram_update_id, target_token, mode, now)
+        )
         return ConversationCommandResult("MODE_CHANGED", True)
 
     async def set_pause(
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         target_token: str | None,
         paused: bool,
         now: datetime,
     ) -> ConversationCommandResult:
-        self.calls.append(("pause", admin_id, telegram_update_id, target_token, paused, now))
+        self.calls.append(
+            ("pause", admin_id, bot_chat_id, telegram_update_id, target_token, paused, now)
+        )
         return ConversationCommandResult("PAUSED" if paused else "RESUMED", True)
 
     async def execute(
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         command: str,
         target_token: str,
         now: datetime,
     ) -> ConversationCommandResult:
-        self.calls.append(("execute", admin_id, telegram_update_id, command, target_token, now))
+        self.calls.append(
+            ("execute", admin_id, bot_chat_id, telegram_update_id, command, target_token, now)
+        )
         return ConversationCommandResult(command.upper(), True)
 
     async def status(
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
+        telegram_update_id: int,
         target_token: str | None,
         now: datetime,
-    ) -> ConversationStatusSummary:
-        self.calls.append(("status", admin_id, target_token, now))
-        return ConversationStatusSummary(
-            "Synthetic contact",
-            BaseMode.AUTO,
-            "conversation_override",
-            "AUTO",
-            "READY",
-            None,
-            None,
-            2,
-            3,
-            4,
-            1,
-            "collecting",
-            None,
+    ) -> ConversationCommandResult:
+        self.calls.append(("status", admin_id, bot_chat_id, telegram_update_id, target_token, now))
+        return ConversationCommandResult(
+            "STATUS",
+            False,
+            ConversationStatusSummary(
+                "Synthetic contact",
+                BaseMode.AUTO,
+                "conversation_override",
+                "AUTO",
+                "READY",
+                None,
+                None,
+                2,
+                3,
+                4,
+                1,
+                "collecting",
+                None,
+            ),
         )
 
 
@@ -84,6 +101,7 @@ class StatusBackendFake(BackendFake):
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         target_token: str | None,
         mode: BaseMode | None,
@@ -112,6 +130,7 @@ class NoChangeBackendFake(BackendFake):
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         target_token: str | None,
         paused: bool,
@@ -125,12 +144,27 @@ class ErrorBackendFake(BackendFake):
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         target_token: str | None,
         mode: BaseMode | None,
         now: datetime,
     ) -> ConversationCommandResult:
         raise RuntimeError("synthetic conflict")
+
+
+class RejectedBackendFake(BackendFake):
+    async def set_pause(
+        self,
+        *,
+        admin_id: int,
+        bot_chat_id: int,
+        telegram_update_id: int,
+        target_token: str | None,
+        paused: bool,
+        now: datetime,
+    ) -> ConversationCommandResult:
+        return ConversationCommandResult("MODE_VERSION_CONFLICT", False, accepted=False)
 
 
 @pytest.mark.unit
@@ -155,15 +189,16 @@ async def test_conversation_commands_route_account_and_opaque_contact_scope() ->
     for update_id, command in enumerate(commands, start=1):
         reply = await controller.handle(
             admin_id=ADMIN_ID,
+            bot_chat_id=ADMIN_ID,
             telegram_update_id=update_id,
             message_text=command,
             now=NOW,
         )
         assert reply.text.startswith("Completed:")
-    assert backend.calls[0][3] is None
-    assert backend.calls[1][3] == TARGET
-    assert backend.calls[3][4] is None
-    assert {call[3] for call in backend.calls[6:]} == {
+    assert backend.calls[0][4] is None
+    assert backend.calls[1][4] == TARGET
+    assert backend.calls[3][5] is None
+    assert {call[4] for call in backend.calls[6:]} == {
         "draft",
         "reply_pending",
         "cancel",
@@ -180,6 +215,7 @@ async def test_status_is_content_free_and_does_not_mutate_backend() -> None:
     )
     reply = await controller.handle(
         admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
         telegram_update_id=11,
         message_text=f"/status {TARGET}",
         now=NOW,
@@ -187,7 +223,7 @@ async def test_status_is_content_free_and_does_not_mutate_backend() -> None:
     assert "Synthetic contact" in reply.text
     assert "Versions: account=2; mode=3; content=4" in reply.text
     assert "Unanswered: 1" in reply.text
-    assert backend.calls == [("status", ADMIN_ID, TARGET, NOW)]
+    assert backend.calls == [("status", ADMIN_ID, ADMIN_ID, 11, TARGET, NOW)]
 
 
 @pytest.mark.unit
@@ -208,11 +244,20 @@ async def test_controller_rejects_display_name_invalid_shape_and_non_admin() -> 
     for update_id, (admin_id, command) in enumerate(rejected, start=20):
         reply = await controller.handle(
             admin_id=admin_id,
+            bot_chat_id=admin_id,
             telegram_update_id=update_id,
             message_text=command,
             now=NOW,
         )
         assert "Completed:" not in reply.text
+    group_reply = await controller.handle(
+        admin_id=ADMIN_ID,
+        bot_chat_id=-100123,
+        telegram_update_id=99,
+        message_text="/pause",
+        now=NOW,
+    )
+    assert "private chat" in group_reply.text
     assert backend.calls == []
 
 
@@ -227,6 +272,7 @@ async def test_controller_handles_constructor_syntax_results_and_backend_conflic
     )
     invalid = await controller.handle(
         admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
         telegram_update_id=30,
         message_text="/ai '",
         now=NOW,
@@ -234,6 +280,7 @@ async def test_controller_handles_constructor_syntax_results_and_backend_conflic
     assert invalid.text == "Invalid command syntax."
     unknown = await controller.handle(
         admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
         telegram_update_id=31,
         message_text="/unknown",
         now=NOW,
@@ -245,6 +292,7 @@ async def test_controller_handles_constructor_syntax_results_and_backend_conflic
     )
     status = await status_controller.handle(
         admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
         telegram_update_id=32,
         message_text=f"/ai {TARGET}",
         now=NOW,
@@ -259,18 +307,31 @@ async def test_controller_handles_constructor_syntax_results_and_backend_conflic
     )
     no_change = await no_change_controller.handle(
         admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
         telegram_update_id=33,
         message_text="/pause",
         now=NOW,
     )
     assert no_change.text == "No change: ALREADY_PAUSED."
+    rejected_controller = ControlBotConversationController(
+        allowed_admin_ids=frozenset({ADMIN_ID}), backend=RejectedBackendFake()
+    )
+    durable_rejected = await rejected_controller.handle(
+        admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
+        telegram_update_id=34,
+        message_text="/pause",
+        now=NOW,
+    )
+    assert durable_rejected.text == "Request rejected: MODE_VERSION_CONFLICT."
 
     error_controller = ControlBotConversationController(
         allowed_admin_ids=frozenset({ADMIN_ID}), backend=ErrorBackendFake()
     )
     rejected = await error_controller.handle(
         admin_id=ADMIN_ID,
-        telegram_update_id=34,
+        bot_chat_id=ADMIN_ID,
+        telegram_update_id=35,
         message_text=f"/human {TARGET}",
         now=NOW,
     )

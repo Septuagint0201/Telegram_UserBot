@@ -12,7 +12,9 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.persistence.orchestrator_records import (
+    ControlCommandRecord,
     ControlResult,
+    ConversationActivityRecord,
     DraftRecord,
     GenerationClaim,
     ModelRunRecord,
@@ -149,6 +151,27 @@ def _run(row: RowMapping, trigger_kind: str) -> ModelRunRecord:
     )
 
 
+def _control_command(row: RowMapping) -> ControlCommandRecord:
+    return ControlCommandRecord(
+        row["id"],
+        row["account_id"],
+        row["conversation_id"],
+        row["bot_identity"],
+        row["telegram_update_id"],
+        row["admin_telegram_user_id"],
+        row["bot_chat_id"],
+        row["command_kind"],
+        row["expected_control_version"],
+        row["expected_mode_version"],
+        row.get("result_control_version"),
+        row.get("result_mode_version"),
+        row["state"],
+        row["result_code"],
+        row["result_changed"],
+        row.get("result_payload"),
+    )
+
+
 class ConversationOrchestratorRepository:
     """All methods are transaction-scoped; this class never commits or calls external services."""
 
@@ -252,6 +275,90 @@ class ConversationOrchestratorRepository:
 
     async def resolve(self, conversation_id: UUID, now: datetime) -> ModeResolution:
         return (await self._locked_scope(conversation_id, now)).resolution
+
+    async def account_control(self, account_id: UUID, now: datetime) -> AccountControl:
+        await self._ensure_account_state(account_id, now)
+        row = (
+            (
+                await self._session.execute(
+                    select(account_orchestrator_states)
+                    .where(account_orchestrator_states.c.account_id == account_id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one()
+        )
+        return AccountControl(
+            BaseMode(row["default_base_mode"]),
+            row["global_paused"],
+            MaintenanceState(row["maintenance_state"]),
+            row["control_version"],
+            row["resume_floor_event_id"],
+        )
+
+    async def conversation_activity(
+        self, conversation_id: UUID, now: datetime
+    ) -> ConversationActivityRecord:
+        scope = await self._locked_scope(conversation_id, now)
+        watermark = scope.resolution.last_response_covered_event_id or 0
+        unanswered_count = int(
+            await self._session.scalar(
+                select(func.count(messages.c.id))
+                .join(
+                    message_revisions,
+                    and_(
+                        message_revisions.c.message_id == messages.c.id,
+                        message_revisions.c.account_id == messages.c.account_id,
+                        message_revisions.c.revision_no == messages.c.current_revision_no,
+                    ),
+                )
+                .where(
+                    messages.c.conversation_id == conversation_id,
+                    messages.c.direction == "incoming",
+                    messages.c.source == "telegram_user",
+                    messages.c.source_status == "resolved",
+                    messages.c.is_tombstone.is_(False),
+                    message_revisions.c.source_event_id > watermark,
+                    message_revisions.c.redacted_at.is_(None),
+                )
+            )
+            or 0
+        )
+        active_turn_state = cast(
+            str | None,
+            await self._session.scalar(
+                select(conversation_turns.c.state)
+                .where(
+                    conversation_turns.c.conversation_id == conversation_id,
+                    conversation_turns.c.state.in_(
+                        ("collecting", "ready", "generating", "output_ready")
+                    ),
+                )
+                .order_by(conversation_turns.c.collection_sequence.desc())
+                .limit(1)
+            ),
+        )
+        active_draft_state = cast(
+            str | None,
+            await self._session.scalar(
+                select(copilot_drafts.c.state)
+                .where(
+                    copilot_drafts.c.conversation_id == conversation_id,
+                    copilot_drafts.c.state.in_(
+                        ("requested", "collecting", "generating", "ready", "editing", "approved")
+                    ),
+                )
+                .order_by(copilot_drafts.c.created_at.desc())
+                .limit(1)
+            ),
+        )
+        return ConversationActivityRecord(
+            scope.resolution,
+            unanswered_count,
+            active_turn_state,
+            active_draft_state,
+        )
 
     async def _latest_event_id(self, account_id: UUID) -> int | None:
         return cast(
@@ -1785,6 +1892,98 @@ class ConversationOrchestratorRepository:
             )
         )
 
+    async def _continuation_source_valid(self, row: RowMapping) -> bool:
+        """Validate immutable turn sources and reject human takeover between chunks."""
+
+        invalid_source = await self._session.scalar(
+            select(turn_messages.c.message_id)
+            .join(messages, messages.c.id == turn_messages.c.message_id)
+            .join(
+                message_revisions,
+                and_(
+                    message_revisions.c.message_id == turn_messages.c.message_id,
+                    message_revisions.c.account_id == turn_messages.c.account_id,
+                    message_revisions.c.revision_no == turn_messages.c.message_revision_no,
+                ),
+            )
+            .where(
+                turn_messages.c.turn_id == row["turn_id"],
+                or_(
+                    messages.c.current_revision_no != turn_messages.c.message_revision_no,
+                    messages.c.is_tombstone.is_(True),
+                    message_revisions.c.redacted_at.is_not(None),
+                ),
+            )
+            .limit(1)
+        )
+        if invalid_source is not None:
+            return False
+        max_included = int(
+            await self._session.scalar(
+                select(func.max(turn_messages.c.source_event_id)).where(
+                    turn_messages.c.turn_id == row["turn_id"]
+                )
+            )
+            or 0
+        )
+        human_outgoing = await self._session.scalar(
+            select(message_events.c.id)
+            .join(
+                messages,
+                and_(
+                    messages.c.account_id == message_events.c.account_id,
+                    messages.c.conversation_id == message_events.c.conversation_id,
+                    messages.c.telegram_message_id == message_events.c.telegram_message_id,
+                ),
+            )
+            .where(
+                message_events.c.account_id == row["account_id"],
+                message_events.c.conversation_id == row["conversation_id"],
+                message_events.c.id > max_included,
+                message_events.c.event_kind == EventKind.MESSAGE_CREATED.value,
+                messages.c.direction == "outgoing",
+                messages.c.source == "human",
+            )
+            .limit(1)
+        )
+        return human_outgoing is None
+
+    async def _continuation_ordinal_ready(self, row: RowMapping) -> bool:
+        previous_unsent = await self._session.scalar(
+            select(outbound_intents.c.id)
+            .where(
+                outbound_intents.c.delivery_group_id == row["delivery_group_id"],
+                outbound_intents.c.sequence_no < row["sequence_no"],
+                outbound_intents.c.state != "sent",
+            )
+            .limit(1)
+        )
+        return previous_unsent is None
+
+    async def _cancel_delivery_remainder(
+        self, row: RowMapping, *, now: datetime, reason: str
+    ) -> None:
+        """Terminally cancel this and later unclaimed chunks after a failed gate."""
+
+        await self._session.execute(
+            update(outbound_intents)
+            .where(
+                outbound_intents.c.delivery_group_id == row["delivery_group_id"],
+                outbound_intents.c.sequence_no >= row["sequence_no"],
+                outbound_intents.c.state.in_(("pending", "retry_wait")),
+            )
+            .values(state="cancelled", last_error_code=reason, updated_at=now)
+        )
+        await self._session.execute(
+            update(outbound_delivery_groups)
+            .where(outbound_delivery_groups.c.id == row["delivery_group_id"])
+            .values(
+                state="partial" if row["first_side_effect_at"] is not None else "cancelled",
+                updated_at=now,
+                completed_at=now,
+            )
+        )
+
     async def preflight_intent(self, *, intent_id: UUID, owner: UUID, now: datetime) -> Any | None:
         identity = (
             (
@@ -1818,6 +2017,8 @@ class ConversationOrchestratorRepository:
                     select(
                         outbound_intents,
                         outbound_delivery_groups.c.state.label("group_state"),
+                        outbound_delivery_groups.c.first_side_effect_at,
+                        outbound_delivery_groups.c.sent_count,
                         conversation_turns.c.state.label("turn_state"),
                         conversation_turns.c.lease_owner,
                         conversation_turns.c.lease_expires_at,
@@ -1843,9 +2044,21 @@ class ConversationOrchestratorRepository:
             or row["delivery_group_id"] != identity["delivery_group_id"]
         ):
             raise OrchestratorConflictError("INTENT_SCOPE_CHANGED")
-        grace_authorized = scope.resolution.content_revision != row[
-            "content_revision"
-        ] and await self._exact_grace_authorized(row)
+        # Claiming an intent records the conservative point at which an RPC may
+        # have produced a side effect. It does not prove a chunk was delivered.
+        # Only a durable successful prior chunk enables continuation semantics.
+        continuation = row["sent_count"] > 0
+        grace_authorized = (
+            not continuation
+            and scope.resolution.content_revision != row["content_revision"]
+            and await self._exact_grace_authorized(row)
+        )
+        source_valid = await self._continuation_source_valid(row)
+        # Ordering is a dispatch prerequisite, not a terminal authorization
+        # failure. A scheduler that observes a later chunk first must leave it
+        # pending so the preceding chunk can still make progress.
+        if not await self._continuation_ordinal_ready(row):
+            return None
         gate = evaluate_final_gate(
             FinalGateInput(
                 WorkSnapshot(
@@ -1863,15 +2076,17 @@ class ConversationOrchestratorRepository:
                 row["lease_owner"] == owner and row["lease_expires_at"] > now,
                 duplicate_delivery=row["group_state"] not in ("planned", "sending", "partial"),
                 grace_authorized=grace_authorized,
+                source_valid=source_valid,
+                content_revision_required=not continuation,
             )
         )
         if not gate.allowed:
-            if row["state"] in ("pending", "retry_wait"):
-                await self._session.execute(
-                    update(outbound_intents)
-                    .where(outbound_intents.c.id == intent_id)
-                    .values(state="cancelled", last_error_code=gate.reason, updated_at=now)
-                )
+            await self._cancel_delivery_remainder(row, now=now, reason=gate.reason)
+            return None
+        intent = await TelegramLifecycleRepository(
+            self._session, new_uuid=self._new_uuid
+        ).claim_intent(intent_id=intent_id, now=now)
+        if intent is None:
             return None
         await self._session.execute(
             update(outbound_delivery_groups)
@@ -1881,9 +2096,7 @@ class ConversationOrchestratorRepository:
             )
             .values(first_side_effect_at=now, updated_at=now)
         )
-        return await TelegramLifecycleRepository(
-            self._session, new_uuid=self._new_uuid
-        ).claim_intent(intent_id=intent_id, now=now)
+        return intent
 
     async def request_copilot_draft(
         self, *, conversation_id: UUID, requested_by: str, now: datetime
@@ -2261,6 +2474,55 @@ class ConversationOrchestratorRepository:
             )
         return len(rows)
 
+    async def end_temporary_human(
+        self,
+        *,
+        conversation_id: UUID,
+        actor_ref: str,
+        expected_version: int,
+        now: datetime,
+    ) -> ControlResult:
+        scope = await self._locked_scope(conversation_id, now)
+        row = scope.conversation
+        if row["mode_version"] != expected_version:
+            raise OrchestratorConflictError("MODE_VERSION_CONFLICT")
+        if row["temporary_human_until"] is None:
+            return ControlResult(False, "NO_TEMPORARY_TAKEOVER", scope.resolution, False)
+        latest = await self._latest_event_id(row["account_id"])
+        next_version = expected_version + 1
+        await self._session.execute(
+            update(conversations)
+            .where(conversations.c.id == conversation_id)
+            .values(
+                temporary_human_until=None,
+                mode_version=next_version,
+                automation_resume_floor_event_id=latest,
+                updated_at=now,
+            )
+        )
+        await self._session.execute(
+            insert(conversation_mode_history).values(
+                account_id=row["account_id"],
+                conversation_id=conversation_id,
+                mode_version=next_version,
+                change_kind="temporary_human_ended",
+                previous_state="temporary_human",
+                new_state="base_mode",
+                reason="control_command",
+                actor_type="admin",
+                actor_ref=actor_ref,
+                created_at=now,
+            )
+        )
+        cancelled = await self._invalidate_pre_send(
+            account_id=row["account_id"],
+            conversation_id=conversation_id,
+            now=now,
+            reason="TEMPORARY_TAKEOVER_ENDED",
+        )
+        resolution = (await self._locked_scope(conversation_id, now)).resolution
+        return ControlResult(True, "TAKEOVER_ENDED", resolution, cancelled)
+
     async def human_takeover_after_ingest(
         self,
         *,
@@ -2483,38 +2745,165 @@ class ConversationOrchestratorRepository:
         bot_identity: str,
         telegram_update_id: int,
         admin_telegram_user_id: int,
+        bot_chat_id: int,
         command_kind: str,
         idempotency_key: bytes,
         now: datetime,
-    ) -> UUID:
-        inserted = await self._session.scalar(
-            postgresql_insert(control_commands)
-            .values(
-                id=command_id,
-                account_id=account_id,
-                conversation_id=conversation_id,
-                bot_identity=bot_identity,
-                telegram_update_id=telegram_update_id,
-                admin_telegram_user_id=admin_telegram_user_id,
-                command_kind=command_kind,
-                idempotency_key=idempotency_key,
-                state="pending",
-                created_at=now,
+        expected_control_version: int | None = None,
+        expected_mode_version: int | None = None,
+    ) -> ControlCommandRecord:
+        inserted = (
+            (
+                await self._session.execute(
+                    postgresql_insert(control_commands)
+                    .values(
+                        id=command_id,
+                        account_id=account_id,
+                        conversation_id=conversation_id,
+                        bot_identity=bot_identity,
+                        telegram_update_id=telegram_update_id,
+                        admin_telegram_user_id=admin_telegram_user_id,
+                        bot_chat_id=bot_chat_id,
+                        command_kind=command_kind,
+                        idempotency_key=idempotency_key,
+                        expected_control_version=expected_control_version,
+                        expected_mode_version=expected_mode_version,
+                        state="pending",
+                        created_at=now,
+                    )
+                    .on_conflict_do_nothing(constraint="uq_control_commands_bot_update")
+                    .returning(*control_commands.c)
+                )
             )
-            .on_conflict_do_nothing(constraint="uq_control_commands_bot_update")
-            .returning(control_commands.c.id)
+            .mappings()
+            .one_or_none()
         )
         if inserted is not None:
-            return cast(UUID, inserted)
-        existing = await self._session.scalar(
-            select(control_commands.c.id).where(
-                control_commands.c.bot_identity == bot_identity,
-                control_commands.c.telegram_update_id == telegram_update_id,
+            return _control_command(inserted)
+        existing = (
+            (
+                await self._session.execute(
+                    select(control_commands).where(
+                        control_commands.c.bot_identity == bot_identity,
+                        control_commands.c.telegram_update_id == telegram_update_id,
+                    )
+                )
             )
+            .mappings()
+            .one_or_none()
         )
         if existing is None:
             raise RuntimeError("idempotent control command disappeared")
-        return cast(UUID, existing)
+        if (
+            existing["account_id"] != account_id
+            or existing["conversation_id"] != conversation_id
+            or existing["admin_telegram_user_id"] != admin_telegram_user_id
+            or existing["bot_chat_id"] != bot_chat_id
+            or existing["command_kind"] != command_kind
+            or existing["idempotency_key"] != idempotency_key
+        ):
+            raise OrchestratorConflictError("CONTROL_COMMAND_IDENTITY_MISMATCH")
+        return _control_command(existing)
+
+    async def get_control_command(
+        self, *, bot_identity: str, telegram_update_id: int
+    ) -> ControlCommandRecord | None:
+        row = (
+            (
+                await self._session.execute(
+                    select(control_commands).where(
+                        control_commands.c.bot_identity == bot_identity,
+                        control_commands.c.telegram_update_id == telegram_update_id,
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return _control_command(row) if row is not None else None
+
+    async def claim_pending_control_command(
+        self,
+        *,
+        account_id: UUID,
+        bot_identity: str,
+        command_id: UUID | None = None,
+    ) -> ControlCommandRecord | None:
+        """Lock the oldest queued command for one app-owned transaction."""
+
+        conditions = [
+            control_commands.c.account_id == account_id,
+            control_commands.c.bot_identity == bot_identity,
+            control_commands.c.state == "pending",
+        ]
+        if command_id is not None:
+            conditions.append(control_commands.c.id == command_id)
+        row = (
+            (
+                await self._session.execute(
+                    select(control_commands)
+                    .where(*conditions)
+                    .order_by(control_commands.c.created_at, control_commands.c.id)
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return _control_command(row) if row is not None else None
+
+    async def bind_control_command_versions(
+        self,
+        *,
+        command_id: UUID,
+        expected_control_version: int | None,
+        expected_mode_version: int | None,
+    ) -> None:
+        result = cast(
+            Any,
+            await self._session.execute(
+                update(control_commands)
+                .where(control_commands.c.id == command_id, control_commands.c.state == "pending")
+                .values(
+                    expected_control_version=expected_control_version,
+                    expected_mode_version=expected_mode_version,
+                )
+            ),
+        )
+        if result.rowcount != 1:
+            raise OrchestratorConflictError("CONTROL_COMMAND_NOT_PENDING")
+
+    async def finish_control_command(  # noqa: PLR0913 - terminal evidence is explicit
+        self,
+        *,
+        command_id: UUID,
+        result_code: str,
+        accepted: bool,
+        result_changed: bool,
+        now: datetime,
+        result_control_version: int | None = None,
+        result_mode_version: int | None = None,
+        result_payload: dict[str, Any] | None = None,
+    ) -> None:
+        result = cast(
+            Any,
+            await self._session.execute(
+                update(control_commands)
+                .where(control_commands.c.id == command_id, control_commands.c.state == "pending")
+                .values(
+                    state="applied" if accepted else "rejected",
+                    result_code=result_code,
+                    result_changed=result_changed,
+                    result_control_version=result_control_version,
+                    result_mode_version=result_mode_version,
+                    result_payload=result_payload,
+                    completed_at=now,
+                )
+            ),
+        )
+        if result.rowcount != 1:
+            raise OrchestratorConflictError("CONTROL_COMMAND_NOT_PENDING")
 
     async def add_invalidation_outbox(
         self, *, account_id: UUID, aggregate_id: str, version: int, now: datetime
@@ -2529,6 +2918,31 @@ class ConversationOrchestratorRepository:
                 aggregate_version=version,
                 payload_schema_version=1,
                 payload={"aggregate_id": aggregate_id, "version": version},
+                created_at=now,
+            )
+            .on_conflict_do_nothing(constraint="uq_transactional_outbox_generation")
+        )
+
+    async def add_control_command_outbox(
+        self,
+        *,
+        command_id: UUID,
+        account_id: UUID,
+        topic: str,
+        now: datetime,
+    ) -> None:
+        if topic not in {"control.command.requested", "control.command.completed"}:
+            raise ValueError("unsupported control command outbox topic")
+        await self._session.execute(
+            postgresql_insert(transactional_outbox)
+            .values(
+                account_id=account_id,
+                topic=topic,
+                aggregate_type="control_command",
+                aggregate_id=str(command_id),
+                aggregate_version=1 if topic.endswith("requested") else 2,
+                payload_schema_version=1,
+                payload={"command_id": str(command_id)},
                 created_at=now,
             )
             .on_conflict_do_nothing(constraint="uq_transactional_outbox_generation")

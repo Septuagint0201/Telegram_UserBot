@@ -9,7 +9,7 @@ from typing import Protocol
 from telegram_userbot.adapters.telegram_bot.model_control import BotReply
 from telegram_userbot.domain.conversation import BaseMode
 
-OPAQUE_TARGET = re.compile(r"^ct_[A-Za-z0-9_-]{20,100}$")
+OPAQUE_TARGET = re.compile(r"^ct_[A-Za-z0-9_-]{20,120}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,8 +22,8 @@ class ConversationStatusSummary:
     pause_reason: str | None
     block_reason: str | None
     account_control_version: int
-    mode_version: int
-    content_revision: int
+    mode_version: int | None
+    content_revision: int | None
     unanswered_count: int
     active_turn_state: str | None = None
     active_draft_state: str | None = None
@@ -34,33 +34,38 @@ class ConversationCommandResult:
     result_code: str
     changed: bool
     status: ConversationStatusSummary | None = None
+    accepted: bool = True
+    pending: bool = False
 
 
 class ConversationControlBackend(Protocol):
-    async def set_mode(
+    async def set_mode(  # noqa: PLR0913 - actor/chat/update bindings are explicit
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         target_token: str | None,
         mode: BaseMode | None,
         now: datetime,
     ) -> ConversationCommandResult: ...
 
-    async def set_pause(
+    async def set_pause(  # noqa: PLR0913 - actor/chat/update bindings are explicit
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         target_token: str | None,
         paused: bool,
         now: datetime,
     ) -> ConversationCommandResult: ...
 
-    async def execute(
+    async def execute(  # noqa: PLR0913 - actor/chat/update bindings are explicit
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         command: str,
         target_token: str,
@@ -71,9 +76,11 @@ class ConversationControlBackend(Protocol):
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
+        telegram_update_id: int,
         target_token: str | None,
         now: datetime,
-    ) -> ConversationStatusSummary: ...
+    ) -> ConversationCommandResult: ...
 
 
 class ControlBotConversationController:
@@ -90,16 +97,21 @@ class ControlBotConversationController:
         self._allowed_admin_ids = allowed_admin_ids
         self._backend = backend
 
-    async def handle(  # noqa: PLR0911 - explicit command contract
+    async def handle(  # noqa: PLR0911,PLR0912 - explicit command contract
         self,
         *,
         admin_id: int,
+        bot_chat_id: int,
         telegram_update_id: int,
         message_text: str,
         now: datetime,
     ) -> BotReply:
         if admin_id not in self._allowed_admin_ids:
             return BotReply("Request rejected.")
+        if bot_chat_id != admin_id:
+            return BotReply(
+                "Conversation controls are only available in the administrator private chat."
+            )
         try:
             arguments = shlex.split(message_text.strip())
         except ValueError:
@@ -120,6 +132,7 @@ class ControlBotConversationController:
                 return _command_reply(
                     await self._backend.set_mode(
                         admin_id=admin_id,
+                        bot_chat_id=bot_chat_id,
                         telegram_update_id=telegram_update_id,
                         target_token=target,
                         mode=mode,
@@ -132,6 +145,7 @@ class ControlBotConversationController:
                 return _command_reply(
                     await self._backend.set_mode(
                         admin_id=admin_id,
+                        bot_chat_id=bot_chat_id,
                         telegram_update_id=telegram_update_id,
                         target_token=target,
                         mode=None,
@@ -142,6 +156,7 @@ class ControlBotConversationController:
                 return _command_reply(
                     await self._backend.set_pause(
                         admin_id=admin_id,
+                        bot_chat_id=bot_chat_id,
                         telegram_update_id=telegram_update_id,
                         target_token=target,
                         paused=command == "/pause",
@@ -154,6 +169,7 @@ class ControlBotConversationController:
                 return _command_reply(
                     await self._backend.execute(
                         admin_id=admin_id,
+                        bot_chat_id=bot_chat_id,
                         telegram_update_id=telegram_update_id,
                         command=command.removeprefix("/"),
                         target_token=target,
@@ -161,13 +177,13 @@ class ControlBotConversationController:
                     )
                 )
             if command == "/status":
-                return BotReply(
-                    _status_text(
-                        await self._backend.status(
-                            admin_id=admin_id,
-                            target_token=target,
-                            now=now,
-                        )
+                return _command_reply(
+                    await self._backend.status(
+                        admin_id=admin_id,
+                        bot_chat_id=bot_chat_id,
+                        telegram_update_id=telegram_update_id,
+                        target_token=target,
+                        now=now,
                     )
                 )
         except RuntimeError, ValueError:
@@ -179,8 +195,14 @@ class ControlBotConversationController:
 
 
 def _command_reply(result: ConversationCommandResult) -> BotReply:
+    if result.pending:
+        return BotReply(
+            "Accepted: CONTROL_COMMAND_QUEUED. Retry the same command to read its result."
+        )
     if result.status is not None:
         return BotReply(_status_text(result.status))
+    if not result.accepted:
+        return BotReply(f"Request rejected: {result.result_code}.")
     if result.changed:
         return BotReply(f"Completed: {result.result_code}.")
     return BotReply(f"No change: {result.result_code}.")
@@ -191,11 +213,10 @@ def _status_text(status: ConversationStatusSummary) -> str:
         f"Target: {status.target_label}",
         f"Base: {status.base_mode.value} ({status.base_source})",
         f"Effective: {status.effective_mode}; operational={status.operational_state}",
-        (
-            "Versions: "
-            f"account={status.account_control_version}; mode={status.mode_version}; "
-            f"content={status.content_revision}"
-        ),
+        "Versions: "
+        f"account={status.account_control_version}; "
+        f"mode={status.mode_version if status.mode_version is not None else 'n/a'}; "
+        f"content={status.content_revision if status.content_revision is not None else 'n/a'}",
         f"Unanswered: {status.unanswered_count}",
     ]
     if status.pause_reason is not None:

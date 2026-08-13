@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
+from telegram_userbot.platform.evidence import JUnitStatus, evidence_status, load_junit_results
 from telegram_userbot.platform.evidence.manifest import (
     requirement_ids_for_milestone,
     validate_manifest_semantics,
@@ -20,6 +21,7 @@ class RequirementRecord(TypedDict):
     id: str
     status: str
     evidence: list[str]
+    tests: NotRequired[list[str]]
     reason: NotRequired[str]
 
 
@@ -48,6 +50,24 @@ def _commit_signed(root: Path, commit: str) -> bool:
 
 def _requirement(requirement_id: str, *evidence: str) -> RequirementRecord:
     return {"id": requirement_id, "status": "PASS", "evidence": list(evidence)}
+
+
+def _tested_requirement(
+    requirement_id: str,
+    *evidence: str,
+    test_ids: tuple[str, ...],
+    junit_results: dict[str, JUnitStatus],
+) -> RequirementRecord:
+    status, reason = evidence_status(junit_results, test_ids)
+    record: RequirementRecord = {
+        "id": requirement_id,
+        "status": status,
+        "evidence": list(evidence),
+        "tests": list(test_ids),
+    }
+    if reason is not None:
+        record["reason"] = reason
+    return record
 
 
 def _requirements_for(milestone: str, *, root: Path) -> list[RequirementRecord]:
@@ -214,63 +234,143 @@ def _requirements_for(milestone: str, *, root: Path) -> list[RequirementRecord]:
             ),
         ]
     if milestone == "M4":
+        junit_results = load_junit_results(root / ".artifacts/m4/junit.xml")
         return [
-            _requirement(
+            _tested_requirement(
                 "M4-001",
                 "src/telegram_userbot/domain/conversation/mode.py",
                 "tests/unit/domain/test_conversation.py",
+                test_ids=(
+                    "tests.unit.domain.test_conversation::"
+                    "test_mode_priority_snapshots_and_policy_blocks",
+                    "tests.unit.domain.test_conversation::"
+                    "test_final_gate_fails_closed_for_every_stale_dimension",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-002",
                 "src/telegram_userbot/domain/conversation/turn.py",
                 "alembic/versions/0004_m4_orchestrator.py",
+                "alembic/versions/0005_m4_control_result.py",
+                test_ids=(
+                    "tests.unit.domain.test_conversation::"
+                    "test_debounce_grace_and_work_snapshot_validation",
+                    "tests.unit.domain.test_conversation::"
+                    "test_splitter_is_deterministic_and_respects_combining_boundaries",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-003",
                 "src/telegram_userbot/adapters/persistence/orchestrator_repository.py",
                 "tests/integration/test_m4_conversation_orchestrator.py",
+                test_ids=(
+                    "tests.integration.test_m4_conversation_orchestrator::"
+                    "test_auto_turn_run_send_gate_and_reconciliation",
+                    "tests.integration.test_m4_conversation_orchestrator::"
+                    "test_multichunk_continuation_orders_chunks_and_rejects_strong_invalidations[edit]",
+                    "tests.integration.test_m4_conversation_orchestrator::"
+                    "test_multichunk_continuation_orders_chunks_and_rejects_strong_invalidations[human]",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-004",
                 "tests/integration/test_m4_conversation_orchestrator.py",
                 ".artifacts/m4/race-manifest.json",
+                test_ids=(
+                    "tests.integration.test_m4_conversation_orchestrator::"
+                    "test_generation_grace_and_late_result_discard",
+                    "tests.unit.platform.test_conversation_runtime::"
+                    "test_orchestrated_ingest_routes_all_event_classes",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-005",
                 "src/telegram_userbot/processes/conversation_runtime.py",
                 "tests/unit/adapters/persistence/test_orchestrator_repository.py",
+                test_ids=(
+                    "tests.unit.adapters.persistence.test_orchestrator_repository::"
+                    "test_new_incoming_routes_collect_ready_and_generation_grace",
+                    "tests.unit.adapters.persistence.test_orchestrator_repository::"
+                    "test_generation_lease_renewal_obeys_owner_mode_and_run_state",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-006",
                 "src/telegram_userbot/processes/conversation_runtime.py",
                 "tests/unit/platform/test_conversation_runtime.py",
+                test_ids=(
+                    "tests.unit.platform.test_conversation_runtime::"
+                    "test_runtime_auto_success_and_provider_failure",
+                    "tests.unit.platform.test_conversation_runtime::"
+                    "test_runtime_feedback_and_dispatch_fail_closed_branches",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-007",
                 "src/telegram_userbot/adapters/persistence/orchestrator_repository.py",
                 "src/telegram_userbot/adapters/telegram_bot/conversation_control.py",
+                "src/telegram_userbot/adapters/telegram_bot/conversation_control_backend.py",
+                test_ids=(
+                    "tests.unit.adapters.test_conversation_control_backend::"
+                    "test_control_backend_only_enqueues_and_replays_without_state_reads",
+                    "tests.unit.adapters.test_conversation_control_backend::"
+                    "test_app_processor_executes_routes_and_persists_terminal_versions",
+                    "tests.integration.test_m4_conversation_orchestrator::"
+                    "test_queued_conversation_control_executes_reply_pending_once",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-008",
                 "src/telegram_userbot/domain/conversation/draft.py",
                 "tests/integration/test_m4_conversation_orchestrator.py",
+                test_ids=(
+                    "tests.integration.test_m4_conversation_orchestrator::"
+                    "test_mode_flip_blocks_auto_and_copilot_tokens_are_one_time",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-009",
                 "src/telegram_userbot/adapters/telegram_bot/conversation_control.py",
                 "tests/unit/adapters/test_conversation_control.py",
+                test_ids=(
+                    "tests.unit.adapters.test_conversation_control::"
+                    "test_conversation_commands_route_account_and_opaque_contact_scope",
+                    "tests.unit.adapters.test_conversation_control_backend::"
+                    "test_target_token_is_bound_to_admin_expiry_and_integrity",
+                ),
+                junit_results=junit_results,
             ),
-            _requirement(
+            _tested_requirement(
                 "M4-010",
                 ".artifacts/m4/junit.xml",
                 ".artifacts/m4/race-manifest.json",
+                test_ids=(
+                    "tests.unit.platform.test_m4_race_manifest::"
+                    "test_m4_race_manifest_is_junit_derived_content_free_and_deadline_distinct",
+                    "tests.unit.platform.test_m4_race_manifest::"
+                    "test_m4_race_manifest_fails_closed_for_missing_or_failed_junit_case",
+                ),
+                junit_results=junit_results,
             ),
             (
-                _requirement(
+                _tested_requirement(
                     "M4-011",
                     "docs/compatibility/m4.md",
                     "TODO.md",
                     "docs/Implementation-Plan.md",
+                    test_ids=(
+                        "tests.unit.test_m4_documentation_status::"
+                        "test_m4_status_documents_are_consistent",
+                    ),
+                    junit_results=junit_results,
                 )
                 if "- [x] **M4-011" in (root / "TODO.md").read_text(encoding="utf-8")
                 else {

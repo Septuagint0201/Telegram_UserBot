@@ -315,6 +315,8 @@ pending messages were not auto-replied
 
 任何命令都不能通过 contact display name 作为最终身份键。Control Bot 可以让管理员搜索/选择联系人，但 callback payload 使用短期 opaque token，服务端解析为 account/contact/conversation ID。
 
+写命令和`/status`都先落入PostgreSQL `control_commands`与requested outbox。Control进程只负责鉴权、scope token解析、幂等入队和终态重放，不读取conversation/message/draft表、不直接更新mode/turn/draft；因此命令首次响应可以是`CONTROL_COMMAND_QUEUED`。App进程按FIFO加`FOR UPDATE SKIP LOCKED`消费，在同一外层transaction中锁定目标、绑定expected version，并在savepoint内执行命令：可预期业务冲突只回滚savepoint后写rejected，未知异常回滚外层transaction并保持pending。`/status`结果同样由app生成，只持久化metadata-only payload；Bot通过相同update重放或后续poll取得终态。
+
 ### 7.4 授权与确认
 
 只有 allowlist 管理员可以执行。所有写命令：
@@ -443,7 +445,7 @@ model config/credential version
 response coverage end event
 ```
 
-Group/intents 原子 commit 后、首个 Telegram RPC 前执行完整轻量门禁；mode、control、human outgoing、edit/delete、lease loss 或 policy change 均无宽限并取消未发送 group。已有部分 chunk 副作用后按 Message Lifecycle 只终止剩余 intents 并记录 `partial_cancelled`。
+Group/intents原子commit后、每个Telegram RPC前执行完整轻量门禁。首个intent通过门禁并在同一事务claim后，写入`first_side_effect_at`作为“下一步RPC可能产生副作用”的保守恢复边界；它不宣称RPC已经发生。首项之前要求完整content revision匹配或精确grace；首项之后允许本group自身outgoing observation和新incoming推进conversation revision，但仍逐段验证原turn membership未edit/delete/redact、没有confirmed human outgoing、mode/control/lease仍有效，并要求所有较小ordinal已durable sent。mode、control、human outgoing、edit/delete、lease loss或policy change均无宽限并取消未发送intent；已有部分chunk时group保留`partial`及原因，不撤回已发内容。
 
 ### 10.4 Incoming during generation
 
@@ -883,7 +885,7 @@ resume、expiry 和 block clear 都不创建 turn。
 
 ### 19.1 Control command crash
 
-Control Bot 先持久化 command，再回复成功。若 commit 后 Bot acknowledgement 失败，Telegram update 重放或管理员重试按 idempotency key 返回既有结果，不重复递增版本。
+Control Bot 只在allowlisted管理员的一对一Bot私聊执行conversation命令，并把`admin Telegram user ID + bot chat ID`同时写入command identity和加密target token。它先持久化 command，再回复成功。若 commit 后 Bot acknowledgement 失败，Telegram update重放或管理员重试按`bot identity + Telegram update ID`读取既有terminal result，不重新解析已经过期的target token，也不重复递增版本。accepted no-op保存为`state=applied, result_changed=false`；只有授权、版本或状态门禁失败才保存为`rejected`。
 
 若 command 只写了一半，数据库 transaction 回滚；不能出现 account version 已变但 history/outbox 缺失。
 
@@ -958,7 +960,7 @@ conversation_mode_history
 control_commands
 ```
 
-`control_commands` 以 `(bot_id, telegram_update_id)` 和 server idempotency key 唯一，保存 command kind、scope IDs、expected/result version、state 和无正文 result code。
+`control_commands` 以 `(bot_id, telegram_update_id)` 和 server idempotency key 唯一，保存admin ID、Bot私聊ID、command kind、scope IDs、expected/result account/mode version、pending/applied/rejected state、`result_changed`、无正文result code和metadata-only status payload。requested/completed outbox只含command ID；control role只能INSERT/SELECT command并INSERT outbox，app role拥有消费、执行和终态UPDATE。
 
 ### 20.4 Operational blocks
 

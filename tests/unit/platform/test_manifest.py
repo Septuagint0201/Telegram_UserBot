@@ -29,7 +29,7 @@ def test_alembic_head_fits_default_version_column() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     head = ScriptDirectory.from_config(config).get_current_head()
-    assert head == "0004_m4_orchestrator"
+    assert head == "0005_m4_control_result"
     assert len(head) <= 32
 
 
@@ -96,7 +96,12 @@ def test_acceptance_json_schema_is_valid_and_accepts_all_id_forms() -> None:
             {"path": "dev.lock", "sha256": "e" * 64},
         ],
         "requirements": [
-            {"id": "M0-001", "status": "PASS", "evidence": ["unit"]},
+            {
+                "id": "M0-001",
+                "status": "PASS",
+                "evidence": ["unit"],
+                "tests": ["tests.unit.test_example::test_case"],
+            },
             {"id": "X-001", "status": "NOT RUN", "evidence": [], "reason": "future"},
         ],
         "external_evidence": [{"name": "external", "status": "NOT RUN", "reason": "M0 boundary"}],
@@ -134,6 +139,11 @@ def test_manifest_rejects_unknown_or_unsubstantiated_status() -> None:
     requirement = first_requirement(document)
     requirement["evidence"] = []
     with pytest.raises(ManifestSemanticError, match="lacks evidence"):
+        validate_manifest_semantics(document)
+
+    document = valid_manifest()
+    first_requirement(document)["tests"] = []
+    with pytest.raises(ManifestSemanticError, match="declared tests are empty"):
         validate_manifest_semantics(document)
 
 

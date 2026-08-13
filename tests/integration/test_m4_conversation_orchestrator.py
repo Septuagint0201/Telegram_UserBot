@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid7
 
 import pytest
-from sqlalchemy import insert, select, text
+from sqlalchemy import func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.persistence.model_repository import ModelConfigurationRepository
@@ -29,6 +29,11 @@ from telegram_userbot.adapters.persistence.schema import (
 )
 from telegram_userbot.adapters.persistence.telegram_repository import (
     TelegramLifecycleRepository,
+)
+from telegram_userbot.adapters.telegram_bot import (
+    ConversationControlCommandProcessor,
+    ConversationTargetTokenCodec,
+    DurableConversationControlBackend,
 )
 from telegram_userbot.adapters.telegram_user import (
     PeerAdmission,
@@ -313,6 +318,12 @@ async def test_auto_turn_run_send_gate_and_reconciliation(db_session: AsyncSessi
         owner=OWNER,
         now=NOW + timedelta(seconds=4),
     )
+    with pytest.raises(OrchestratorConflictError, match="TURN_NOT_READY"):
+        await repository.start_generation(
+            turn_id=turn_id,
+            owner=uuid7(),
+            now=NOW + timedelta(seconds=4, milliseconds=100),
+        )
     assert claim.max_telegram_message_id == 10
     assert claim.typing_lease_token is not None
     assert await repository.renew_generation_lease(
@@ -379,6 +390,212 @@ async def test_auto_turn_run_send_gate_and_reconciliation(db_session: AsyncSessi
         select(background_jobs.c.id).where(
             background_jobs.c.job_type == "memory.refresh_completed_turn"
         )
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("strong_invalidation", ["edit", "human"])
+async def test_multichunk_continuation_orders_chunks_and_rejects_strong_invalidations(
+    db_session: AsyncSession,
+    strong_invalidation: str,
+) -> None:
+    account_id, conversation_id, chat_id = await seed_conversation(db_session)
+    await activate_main_ai(db_session)
+    repository = ConversationOrchestratorRepository(db_session)
+    await enable_auto(repository, account_id=account_id, conversation_id=conversation_id)
+    included_message_id = await ingest_incoming(
+        db_session,
+        repository,
+        account_id=account_id,
+        conversation_id=conversation_id,
+        chat_id=chat_id,
+        identity="m4:chunks:1",
+        message_id=15,
+        observed_at=NOW + timedelta(seconds=1),
+    )
+    turn_id = await db_session.scalar(
+        select(conversation_turns.c.id).where(
+            conversation_turns.c.conversation_id == conversation_id,
+            conversation_turns.c.state == "collecting",
+        )
+    )
+    assert turn_id is not None
+    await repository.seal_turn(turn_id=turn_id, now=NOW + timedelta(seconds=4))
+    claim = await repository.start_generation(
+        turn_id=turn_id,
+        owner=OWNER,
+        now=NOW + timedelta(seconds=4),
+    )
+    completed = await repository.complete_generation(
+        run_id=claim.run.id,
+        owner=OWNER,
+        text_output=("x" * 4000) + ("y" * 4000) + ("z" * 100),
+        completed_at=NOW + timedelta(seconds=5),
+        entropy=b"c" * 32,
+    )
+    assert completed.delivery_group_id is not None
+    intent_ids = tuple(
+        (
+            await db_session.execute(
+                select(outbound_intents.c.id)
+                .where(outbound_intents.c.delivery_group_id == completed.delivery_group_id)
+                .order_by(outbound_intents.c.sequence_no)
+            )
+        ).scalars()
+    )
+    assert len(intent_ids) == 3
+    # A later ordinal may be observed by a concurrent dispatcher, but it must
+    # remain pending until every preceding ordinal is durably sent.
+    assert (
+        await repository.preflight_intent(
+            intent_id=intent_ids[1], owner=OWNER, now=NOW + timedelta(seconds=5, milliseconds=500)
+        )
+        is None
+    )
+    first = await repository.preflight_intent(
+        intent_id=intent_ids[0], owner=OWNER, now=NOW + timedelta(seconds=6)
+    )
+    assert first is not None
+    await TelegramLifecycleRepository(db_session).finish_attempt(
+        intent=first,
+        completion=AttemptCompletionRecord(
+            "succeeded", NOW + timedelta(seconds=7), telegram_message_id=150
+        ),
+    )
+    await TelegramLifecycleRepository(db_session).ingest(
+        event(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            chat_id=chat_id,
+            identity="m4:chunks:outgoing:1",
+            message_id=150,
+            observed_at=NOW + timedelta(seconds=8),
+            direction=Direction.OUTGOING,
+            text_content="x" * 4000,
+            random_id=first.telegram_random_id,
+        )
+    )
+    await TelegramLifecycleRepository(db_session).ingest(
+        event(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            chat_id=chat_id,
+            identity="m4:chunks:incoming:2",
+            message_id=16,
+            observed_at=NOW + timedelta(seconds=9),
+        )
+    )
+    second = await repository.preflight_intent(
+        intent_id=intent_ids[1], owner=OWNER, now=NOW + timedelta(seconds=10)
+    )
+    assert second is not None
+    await TelegramLifecycleRepository(db_session).finish_attempt(
+        intent=second,
+        completion=AttemptCompletionRecord(
+            "succeeded", NOW + timedelta(seconds=11), telegram_message_id=151
+        ),
+    )
+    if strong_invalidation == "edit":
+        edited = await TelegramLifecycleRepository(db_session).ingest(
+            event(
+                account_id=account_id,
+                conversation_id=conversation_id,
+                chat_id=chat_id,
+                identity="m4:chunks:edit:1",
+                message_id=15,
+                observed_at=NOW + timedelta(seconds=12),
+                kind=EventKind.MESSAGE_EDITED,
+                text_content="edited synthetic incoming",
+            )
+        )
+        assert edited.message_id == included_message_id
+        assert edited.revision_no == 2
+    else:
+        human = await TelegramLifecycleRepository(db_session).ingest(
+            event(
+                account_id=account_id,
+                conversation_id=conversation_id,
+                chat_id=chat_id,
+                identity="m4:chunks:human:1",
+                message_id=152,
+                observed_at=NOW + timedelta(seconds=12),
+                direction=Direction.OUTGOING,
+                text_content="synthetic human reply",
+            )
+        )
+        assert human.source == "human"
+    assert (
+        await repository.preflight_intent(
+            intent_id=intent_ids[2], owner=OWNER, now=NOW + timedelta(seconds=13)
+        )
+        is None
+    )
+
+
+@pytest.mark.integration
+async def test_queued_conversation_control_executes_reply_pending_once(
+    db_session: AsyncSession,
+) -> None:
+    account_id, conversation_id, chat_id = await seed_conversation(db_session)
+    repository = ConversationOrchestratorRepository(db_session)
+    await enable_auto(repository, account_id=account_id, conversation_id=conversation_id)
+    await TelegramLifecycleRepository(db_session).ingest(
+        event(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            chat_id=chat_id,
+            identity="m4:control:pending",
+            message_id=17,
+            observed_at=NOW + timedelta(seconds=1),
+        )
+    )
+    codec = ConversationTargetTokenCodec(SensitiveValue(b"o" * 32), deployment_id="m4-integration")
+    token = codec.issue(
+        account_id=account_id,
+        conversation_id=conversation_id,
+        admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
+        expires_at=NOW + timedelta(minutes=5),
+    )
+    backend = DurableConversationControlBackend(
+        session=db_session,
+        account_id=account_id,
+        target_tokens=codec,
+    )
+    result = await backend.execute(
+        admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
+        telegram_update_id=700,
+        command="reply_pending",
+        target_token=token,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert result.pending
+    processor = ConversationControlCommandProcessor(
+        session=db_session,
+        account_id=account_id,
+        allowed_admin_ids=frozenset({ADMIN_ID}),
+    )
+    applied = await processor.process_next(now=NOW + timedelta(seconds=3))
+    replay = await backend.execute(
+        admin_id=ADMIN_ID,
+        bot_chat_id=ADMIN_ID,
+        telegram_update_id=700,
+        command="reply_pending",
+        target_token=token,
+        now=NOW + timedelta(hours=1),
+    )
+    assert applied is not None
+    assert applied.changed
+    assert replay.result_code == "PENDING_REPLY_CREATED"
+    assert (
+        await db_session.scalar(
+            select(func.count(conversation_turns.c.id)).where(
+                conversation_turns.c.conversation_id == conversation_id,
+                conversation_turns.c.trigger_kind == "manual_pending_reply",
+            )
+        )
+        == 1
     )
 
 
@@ -636,7 +853,31 @@ async def test_m4_roles_and_wide_constraints_are_enforced(db_session: AsyncSessi
         "control_commands": await db_session.scalar(
             text(
                 "SELECT has_table_privilege('telegram_userbot_control_runtime', "
-                "'control_commands', 'SELECT,INSERT,UPDATE')"
+                "'control_commands', 'SELECT,INSERT')"
+            )
+        ),
+        "control_command_update": await db_session.scalar(
+            text(
+                "SELECT has_table_privilege('telegram_userbot_control_runtime', "
+                "'control_commands', 'UPDATE')"
+            )
+        ),
+        "control_orchestrator_write": await db_session.scalar(
+            text(
+                "SELECT has_table_privilege('telegram_userbot_control_runtime', "
+                "'account_orchestrator_states', 'INSERT,UPDATE')"
+            )
+        ),
+        "control_conversation_read": await db_session.scalar(
+            text(
+                "SELECT has_table_privilege('telegram_userbot_control_runtime', "
+                "'conversations', 'SELECT')"
+            )
+        ),
+        "control_copilot_write": await db_session.scalar(
+            text(
+                "SELECT has_table_privilege('telegram_userbot_control_runtime', "
+                "'copilot_action_tokens', 'INSERT,UPDATE')"
             )
         ),
         "worker_read": await db_session.scalar(
@@ -655,6 +896,10 @@ async def test_m4_roles_and_wide_constraints_are_enforced(db_session: AsyncSessi
         "app_runs": True,
         "app_control_state": True,
         "control_commands": True,
+        "control_command_update": False,
+        "control_orchestrator_write": False,
+        "control_conversation_read": False,
+        "control_copilot_write": False,
         "worker_read": True,
         "app_delete": False,
     }

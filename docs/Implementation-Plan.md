@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M4已经通过Windows本地门禁、GitLab Linux CI与绑定签名commit/tree的acceptance manifest并正式关闭；M5—M9尚未开始。Telegram/provider live、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M3已经关闭；M4因continuation gate、durable Control Bot backend和evidence真实性修复而重开，Windows本地静态/default门禁已通过，command/outbox→app executor权限边界已完成，新GitLab evidence尚未完成；M5—M9尚未开始。Telegram/provider live、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -69,8 +69,8 @@ deploy/
 | M1 | PostgreSQL/Redis与核心持久化 | 仅测试容器 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M2 | 模型配置、adapter与key-only控制面 | 仅local fake | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | IMPLEMENTED CANDIDATE — EVIDENCE PENDING |
-| M5 | Media与Context Contract | fake provider；测试图片 | NOT STARTED |
+| M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | REOPENED — CI PENDING |
+| M5 | Media与Context Contract | fake provider；测试图片 | BLOCKED BY M4 |
 | M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | NOT STARTED |
 | M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | NOT STARTED |
 | M8 | Production Compose、backup与运维加固 | 测试backup/alert targets | NOT STARTED |
@@ -240,7 +240,7 @@ deploy/
 
 ## 9. M4 — Conversation Orchestrator与Main AI
 
-当前状态：domain、PostgreSQL migration/repository、fake runtime、Control Bot command boundary、race/integration测试和content-free evidence writer已经实现。Windows静态/unit门禁与GitLab disposable-service证据完成前，本节保持candidate而不声明关闭。
+当前状态：domain、PostgreSQL migration/repository、fake runtime、durable Control Bot backend、race/integration测试和content-free evidence writer已经实现。本轮补强后race/acceptance从JUnit stable test ID派生，Windows本地静态/default门禁通过；command/outbox→app executor权限边界已完成；新GitLab disposable-service证据完成前，本节保持reopened而不声明关闭。
 
 ### 9.1 目标
 
@@ -459,4 +459,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0—M4已经关闭，下一步进入M5 Media与Context Contract。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。
+M0—M3已经关闭；M4重开并已通过Windows本地静态/default门禁，权限边界已落定，仍等待新签名候选和GitLab证据，M5暂不启动。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。

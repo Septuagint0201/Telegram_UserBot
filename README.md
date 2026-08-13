@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0—M4已经完成。M4已实现并验证effective mode、turn/debounce、Main AI run、精确三秒grace、final send gate、AUTO read/typing续租和COPILOT draft。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+V1架构设计与M0—M3已经完成。M4已实现effective mode、turn/debounce、Main AI run、精确三秒grace、final send gate、AUTO read/typing续租、COPILOT draft和durable Control Bot backend，但因continuation/evidence补强而重开；Windows本地静态/default复验已通过，command/outbox→app executor权限边界已完成，GitLab service复验待完成。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
@@ -111,7 +111,7 @@ M2在Windows/CPython 3.14.7本地有143个默认测试通过，line coverage 92.
 
 M3在Windows/CPython 3.14.7本地有179个默认测试通过，line coverage 91.41%、branch coverage 81.13%；本机没有Docker daemon，因此PostgreSQL/Redis integration为`NOT RUN`。签名提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`对应的[GitLab Linux pipeline #2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)全部通过：`m3-telegram-fake`在PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上执行202个测试，1个browser测试按策略deselect，line coverage 93.22%、branch coverage 84.65%；4条migration路径、12项content-free replay和M3-001—M3-010 acceptance均为`PASS`。真实Telegram ingest/send与Session owner运行时保持`NOT RUN`。
 
-M4在Windows/CPython 3.14.7本地有210个默认测试通过，line coverage 89.41%、branch coverage 80.06%；本机没有Docker daemon，因此PostgreSQL/Redis integration为`NOT RUN`。签名提交`6185c6ef0a33ca4d8fadc293b49a536a18d7e24a`对应的[GitLab Linux pipeline #2752242512](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2752242512)全部9个作业通过：`m4-orchestrator-fake`在PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上执行237个测试，1个browser测试按策略deselect，line coverage 92.60%、branch coverage 84.05%；Alembic head `0004_m4_orchestrator`、51张表、4条migration路径、14项content-free race matrix和M4-001—M4-010候选acceptance均为`PASS`，本次签名关闭更新完成M4-011。真实Telegram/provider、真实AUTO与部署运行时保持`NOT RUN`。
+M4的原关闭基线为签名提交`6185c6ef0a33ca4d8fadc293b49a536a18d7e24a`和[GitLab Linux pipeline #2752242512](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2752242512)，但该证据不覆盖本轮修复。本轮race/acceptance已改为从JUnit stable test ID派生，continuation逐段验证原source与human takeover，Control Bot只入队command/outbox并由app executor写accepted/no-op/rejected终态。Windows/CPython 3.14.7有227个default测试通过、31个非默认测试deselect，line coverage 89.36%、branch coverage 80.70%，Ruff、strict mypy、import boundary与compileall通过；原80% branch gate保持不变。本机无容器运行时，M4 PostgreSQL integration为`NOT RUN`，race writer因此按设计失败关闭。command/outbox→app executor权限边界已完成，新的GitLab disposable PostgreSQL/Redis、migration、race、acceptance仍待完成，所以M4-011保持打开。真实Telegram/provider、真实AUTO与部署运行时保持`NOT RUN`。
 
 常用本地门禁：
 

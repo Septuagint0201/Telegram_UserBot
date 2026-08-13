@@ -70,6 +70,7 @@ class FinalGateInput:
     duplicate_delivery: bool = False
     grace_authorized: bool = False
     source_valid: bool = True
+    content_revision_required: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +92,9 @@ def evaluate_final_gate(value: FinalGateInput) -> GateDecision:
         ),
         (current.mode_version == value.snapshot.mode_version, "MODE_VERSION_STALE"),
         (
-            current.content_revision == value.snapshot.content_revision or value.grace_authorized,
+            not value.content_revision_required
+            or current.content_revision == value.snapshot.content_revision
+            or value.grace_authorized,
             "CONTENT_REVISION_STALE",
         ),
         (value.active_work, "WORK_NOT_ACTIVE"),

@@ -936,7 +936,7 @@ UNIQUE (id, account_id, draft_id)
 | `reconciled_chunk_count` | INTEGER | nonnegative，不超过 chunk_count |
 | `reply_to_telegram_message_id` | BIGINT | nullable；只有首 chunk 使用 |
 | `send_authorized_at` | TIMESTAMPTZ | nullable；首段完整门禁通过 |
-| `first_side_effect_at` | TIMESTAMPTZ | nullable；任一 Telegram RPC 可能产生副作用 |
+| `first_side_effect_at` | TIMESTAMPTZ | nullable；首个intent已在事务中claim、下一步Telegram RPC可能产生副作用的保守边界；不宣称RPC已经发生 |
 | `created_at` | TIMESTAMPTZ | DB default |
 | `completed_at` | TIMESTAMPTZ | nullable |
 | `redacted_at` | TIMESTAMPTZ | nullable；清除 content-derived hash |
@@ -2219,22 +2219,29 @@ id UUIDv7 PK
 bot_identity_id
 telegram_update_id BIGINT
 admin_user_id BIGINT
+bot_chat_id BIGINT
 command_kind
 scope_type
 account_id
 conversation_id?
-expected_version?
-result_version?
-state received|confirmed|applied|rejected|expired
+expected_control_version?
+expected_mode_version?
+result_control_version?
+result_mode_version?
+state pending|applied|rejected
 idempotency_key BYTEA
 result_code
+result_changed BOOLEAN?
+result_payload JSONB?  # metadata-only status result
 created_at
 completed_at?
 UNIQUE (bot_identity_id, telegram_update_id)
 UNIQUE (idempotency_key)
 ```
 
-command row 不保存 contact/message/draft 正文或 callback token。重复 update 返回既有 result，不再次递增 control/mode version。
+command row 不保存 contact/message/draft 正文或 callback token。`bot_chat_id`必须绑定管理员私聊；`applied`表示命令被接受，`result_changed`单独表示 durable state 是否实际变化；合法 no-op 不能伪装成`rejected`。`result_payload`只允许`/status`所需的mode、version、count和稳定状态code，不得保存正文、contact label、secret或provider响应。
+
+Control Bot完成allowlist、私聊和短期target token验证后，在一个`control_runtime`事务内仅插入`control_commands`和`control.command.requested` outbox。它不读取conversation/content表、不绑定expected version，也不直接修改orchestrator state。`app_runtime`按`created_at,id`使用`FOR UPDATE SKIP LOCKED`取得pending command，锁定account/conversation事实后在执行时绑定expected version；业务冲突通过savepoint回滚状态修改并写`rejected`，成功写`applied`、result version和`control.command.completed` outbox，未知异常回滚整笔事务使pending command可重试。重复Bot update只读取既有command/result，不再次解析已过期token或创建turn。
 
 `orchestrator_blocks` 使用 typed scope：
 
@@ -2915,7 +2922,7 @@ app/control/worker schema readiness mismatch fails closed
 |---|---|
 | `migrator` | schema DDL，仅 migrate 任务持有 |
 | `app_runtime` | message/turn/run/intent/media metadata，以及受限 proactive final-gate/reservation commit DML |
-| `control_runtime` | mode、model draft/version、credential ciphertext、context preview metadata DML、受限 exact-manifest reconstruction function、audit INSERT |
+| `control_runtime` | conversation/COPILOT/operational control command与outbox INSERT、结果SELECT；model draft/version、credential ciphertext、context preview metadata DML、受限 exact-manifest reconstruction function、audit INSERT；无orchestrator state/COPILOT action/operational block直接写权限 |
 | `worker_runtime` | job/memory/summary/embedding/proactive occurrence/candidate/decision/reservation hold 所需 DML；无 outbound side effect 权限 |
 | `backup` | 受限一致性备份权限 |
 | `maintenance` | erasure/retention，强审计，不供常驻服务使用 |

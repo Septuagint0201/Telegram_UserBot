@@ -52,6 +52,11 @@ def validate_manifest_semantics(
         requirement_id = requirement.get("id")
         status = requirement.get("status")
         evidence = _as_sequence(requirement.get("evidence"), f"requirements[{index}].evidence")
+        tests = requirement.get("tests")
+        if tests is not None:
+            parsed_tests = _as_sequence(tests, f"requirements[{index}].tests")
+            if not parsed_tests:
+                raise ManifestSemanticError(f"declared tests are empty: {requirement_id}")
         if not isinstance(requirement_id, str) or not requirement_id:
             raise ManifestSemanticError("requirement id must be non-empty")
         if requirement_id in seen:

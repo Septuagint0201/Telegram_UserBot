@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M4已经完成。M4 Conversation Orchestrator与Main AI已通过Windows本地门禁，以及GitLab disposable PostgreSQL/Redis、migration、race和acceptance关闭证据；下一阶段为M5 Media与Context Contract。Windows本机无Docker，真实Telegram/provider live、应用容器、真实AUTO、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。
+架构设计与M0—M3已经完成。M4 Conversation Orchestrator与Main AI在审查中重开：continuation final gate、durable Control Bot backend和JUnit-derived evidence已通过Windows本地静态/default门禁；control runtime权限边界已按command/outbox→app executor落定；新的GitLab证据尚未完成，旧GitLab证据仅作为历史基线，M5尚未启动。Windows本机无Docker，本轮disposable PostgreSQL/Redis、GitLab Linux、真实Telegram/provider live、应用容器、真实AUTO、生产部署、backup/restore、production performance和live smoke均为`NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -43,8 +43,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M1 | PostgreSQL、Redis与 durable state | COMPLETE | WINDOWS STATIC/UNIT PASS; GITLAB SERVICE INTEGRATION PASS |
 | M2 | 模型配置、adapter与 key-only 控制面 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
 | M3 | Telegram ingest 与 outbound intent | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M4 | Conversation Orchestrator 与 Main AI | IMPLEMENTED CANDIDATE | WINDOWS/CI GATES IN PROGRESS |
-| M5 | Media 与 Context Contract | WAITING | NOT RUN |
+| M4 | Conversation Orchestrator 与 Main AI | REOPENED — CI PENDING | WINDOWS STATIC/DEFAULT PASS; SERVICE INTEGRATION NOT RUN |
+| M5 | Media 与 Context Contract | BLOCKED BY M4 | NOT RUN |
 | M6 | Memory、Summary 与 Embedding Pipeline | WAITING | NOT RUN |
 | M7 | Proactive Pipeline | WAITING | NOT RUN |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
@@ -179,7 +179,7 @@ M3-001—M3-010已经由签名证据提交、disposable PostgreSQL/Redis、migra
 
 目标：完成 AUTO/HUMAN/COPILOT/PAUSED 状态、turn/run lifecycle 和最终发送门禁。
 
-M4-001—M4-011已经由签名候选提交、disposable PostgreSQL/Redis、migration、14项content-free race matrix与acceptance manifest关闭。真实Telegram/provider与真实AUTO不属于M4关闭条件，并继续为`NOT RUN`。
+M4-001—M4-010的原关闭基线可追溯，但本轮审查已重开M4并补强多分片continuation、Control Bot持久后端与证据真实性。Windows本地静态/default门禁已通过；Control Bot命令边界已按选择A落定：control role只写入command与requested outbox，app role消费、锁定目标状态、执行并写回终态与completed outbox。M4-011在该边界落定且新的签名候选通过GitLab disposable PostgreSQL/Redis、migration、JUnit-derived race和acceptance前保持未完成；真实Telegram/provider与真实AUTO继续为`NOT RUN`。
 
 - [x] **M4-001 实现 effective mode 与 overlay/version**（依赖：M1-003、M3-010）— 计算 base mode、manual override、maintenance、blocked 和 expiry；每次决策绑定 `mode_version`。
 - [x] **M4-002 实现 conversation turn 与 debounce**（依赖：M4-001）— 使用 sliding 3 秒、hard cap 10 秒的可配置收集窗口，持久化 included message/revision 和 turn state。
@@ -190,21 +190,21 @@ M4-001—M4-011已经由签名候选提交、disposable PostgreSQL/Redis、migra
 - [x] **M4-007 实现 human takeover、pause、maintenance 与 BLOCKED**（依赖：M4-001、M4-005）— 人工 outgoing 使陈旧 run 失效，门禁覆盖模型请求；恢复必须显式且版本化。
 - [x] **M4-008 实现 COPILOT draft workflow**（依赖：M4-003、M4-005）— `/draft`、edit、approve、ignore、expiry 全部持久化；approve 仍通过最终门禁与 outbound intent。
 - [x] **M4-009 实现 `/reply_pending`**（依赖：M4-002、M4-007）— 可检查/重试待处理 conversation，不绕过 mode、lease 或 revision gate。
-- [x] **M4-010 完成 race/crash/state-machine tests**（依赖：M4-001—M4-009）— 覆盖 mode flip、new input、edit/delete、human send、timeout、duplicate worker、late result 与 crash point。
-- [x] **M4-011 关闭 M4**（依赖：M4-001—M4-010）— property/state-machine 证明陈旧 run 无法发送；真实 AUTO 保持 disabled。
+- [x] **M4-010 完成 race/crash/state-machine tests**（依赖：M4-001—M4-009）— 覆盖 mode flip、new input、edit/delete、human send、timeout、duplicate worker、late result、ordered continuation 与 crash point；race/acceptance状态从JUnit stable test ID派生。
+- [ ] **M4-011 关闭 M4**（依赖：M4-001—M4-010）— 新签名候选的GitLab service、migration、race和acceptance全部`PASS`后关闭；真实 AUTO 保持 disabled。
 
 ### M4 退出门禁
 
-- [x] 任意 mode/input/config revision 变化都能在发送前阻止陈旧结果。
-- [x] debounce、三秒 supersede 与通用 provider timeout 被分别测试，语义不混淆。
-- [x] AUTO/COPILOT/HUMAN/PAUSED 的 read、typing、draft 和 send 副作用符合设计。
+- [ ] 任意强失效（mode/control、原source edit/delete/redact、human outgoing、lease）都能在每段发送前阻止剩余结果；本group outgoing与新incoming不会误取消合法continuation。
+- [ ] debounce、三秒 supersede 与通用 provider timeout 被分别测试，语义不混淆。
+- [ ] AUTO/COPILOT/HUMAN/PAUSED 的 read、typing、draft 和 send 副作用符合设计。
 
 ### M4 完成证据
 
-- 签名提交`6185c6ef0a33ca4d8fadc293b49a536a18d7e24a`、tree `fe882a20d2978c3646bda7aff9fb26306015ef4f`对应的pipeline [#2752242512](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2752242512)及全部9个作业为`PASS`。
-- `m4-orchestrator-fake`在Linux/CPython 3.14.7、PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上运行237个测试，1个browser测试按策略deselect；line coverage 92.60%，branch coverage 84.05%。
-- Migration manifest记录Alembic head `0004_m4_orchestrator`、51张表、零匿名约束和4条migration路径全部`PASS`；14项race matrix全部`PASS`，且不访问credential、外部网络或消息正文。
-- 候选acceptance manifest将M4-001—M4-010记录为`PASS`；本次签名关闭更新完成M4-011。Windows本地210个默认测试、Ruff、strict mypy与import boundary均为`PASS`，本机PostgreSQL/Redis因无Docker为`NOT RUN`。
+- 历史签名提交`6185c6ef0a33ca4d8fadc293b49a536a18d7e24a`及pipeline [#2752242512](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2752242512)保留为原关闭基线，不覆盖本轮代码。
+- 本轮race manifest与M4-001—M4-010 acceptance改为读取JUnit stable test ID；测试缺失、skip或失败均产生`NOT RUN/FAIL`并使race writer失败。
+- 本轮Windows/CPython 3.14.7有227个default测试`PASS`、31个非默认测试deselect；line coverage 89.36%、branch coverage 80.70%，Ruff、strict mypy、import boundary与compileall为`PASS`。原80% branch gate保持不变；本机无容器运行时，M4 PostgreSQL integration为`NOT RUN`，本地race manifest仍按缺失service证据fail closed。
+- Control runtime权限边界已通过单元/静态契约；新的GitLab disposable PostgreSQL/Redis、migration、race、acceptance仍为`NOT RUN`，因此M4-011未关闭。
 - 真实Telegram/provider、真实AUTO、Ubuntu production、backup/restore、production load和24小时soak仍为`NOT RUN`。
 
 ## 10. M5 — Media与 Context Contract
@@ -355,4 +355,4 @@ M4-001—M4-011已经由签名候选提交、disposable PostgreSQL/Redis、migra
 
 ## 17. 下一步
 
-M4已经关闭，下一步按依赖进入M5 Media与Context Contract。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
+M4已重开；command/outbox→app executor权限边界与本地静态/default门禁通过，但仍等待新签名候选及GitLab Linux evidence，M5保持阻塞。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from telegram_userbot.domain.conversation import ModeResolution, WorkSnapshot
@@ -76,3 +77,31 @@ class ControlResult:
     result_code: str
     resolution: ModeResolution
     cancelled_work: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ControlCommandRecord:
+    id: UUID
+    account_id: UUID
+    conversation_id: UUID | None
+    bot_identity: str
+    telegram_update_id: int
+    admin_telegram_user_id: int
+    bot_chat_id: int
+    command_kind: str
+    expected_control_version: int | None
+    expected_mode_version: int | None
+    result_control_version: int | None
+    result_mode_version: int | None
+    state: str
+    result_code: str | None
+    result_changed: bool | None
+    result_payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationActivityRecord:
+    resolution: ModeResolution
+    unanswered_count: int
+    active_turn_state: str | None
+    active_draft_state: str | None

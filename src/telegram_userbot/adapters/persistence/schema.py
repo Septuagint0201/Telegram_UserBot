@@ -2009,12 +2009,17 @@ control_commands = Table(
     Column("bot_identity", Text, nullable=False),
     Column("telegram_update_id", BigInteger, nullable=False),
     Column("admin_telegram_user_id", BigInteger, nullable=False),
+    Column("bot_chat_id", BigInteger, nullable=False),
     Column("command_kind", Text, nullable=False),
     Column("idempotency_key", LargeBinary, nullable=False),
     Column("expected_control_version", BigInteger),
     Column("expected_mode_version", BigInteger),
+    Column("result_control_version", BigInteger),
+    Column("result_mode_version", BigInteger),
     Column("state", Text, nullable=False),
     Column("result_code", Text),
+    Column("result_changed", Boolean),
+    Column("result_payload", JSONB),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     Column("completed_at", UTC_TIMESTAMP),
     ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_control_commands_account"),
@@ -2025,6 +2030,19 @@ control_commands = Table(
     ),
     CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_key_32_bytes"),
     CheckConstraint("state IN ('pending','applied','rejected')", name="state_values"),
+    CheckConstraint(
+        "result_payload IS NULL OR jsonb_typeof(result_payload) = 'object'",
+        name="result_payload_object",
+    ),
+    CheckConstraint(
+        "(state = 'pending' AND result_code IS NULL AND result_changed IS NULL "
+        "AND result_control_version IS NULL AND result_mode_version IS NULL "
+        "AND result_payload IS NULL "
+        "AND completed_at IS NULL) OR "
+        "(state IN ('applied','rejected') AND result_code IS NOT NULL "
+        "AND result_changed IS NOT NULL AND completed_at IS NOT NULL)",
+        name="terminal_result_complete",
+    ),
     UniqueConstraint("bot_identity", "telegram_update_id", name="uq_control_commands_bot_update"),
     UniqueConstraint("account_id", "idempotency_key", name="uq_control_commands_idempotency"),
 )

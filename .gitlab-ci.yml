@@ -300,7 +300,7 @@ m4-orchestrator-fake:
     - .venv/bin/pytest -m "not browser and not soak and not live and not requires_secret" --junitxml=.artifacts/m4/junit.xml --cov-report=xml:.artifacts/m4/coverage.xml
     - .venv/bin/python scripts/check_coverage.py .artifacts/coverage.json
     - .venv/bin/python scripts/write_migration_manifest.py --output .artifacts/m4/migration-manifest.json
-    - .venv/bin/python scripts/write_m4_race_manifest.py --output .artifacts/m4/race-manifest.json
+    - .venv/bin/python scripts/write_m4_race_manifest.py --junit .artifacts/m4/junit.xml --output .artifacts/m4/race-manifest.json
     - .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m4
   artifacts:
     when: on_success

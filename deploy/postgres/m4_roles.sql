@@ -45,21 +45,36 @@ GRANT SELECT, INSERT, UPDATE ON
   account_control_history
 TO telegram_userbot_app_runtime;
 
-GRANT SELECT, INSERT, UPDATE ON
-  operational_blocks,
-  copilot_action_tokens,
-  copilot_edit_sessions,
+-- Control authenticates and enqueues commands; only app owns orchestration mutations.
+REVOKE INSERT, UPDATE, DELETE ON
+  account_orchestrator_states,
+  conversation_mode_history,
+  account_control_history
+FROM telegram_userbot_control_runtime;
+
+REVOKE UPDATE, DELETE ON transactional_outbox
+FROM telegram_userbot_control_runtime;
+
+GRANT SELECT, INSERT ON
   control_commands
 TO telegram_userbot_control_runtime;
 
-GRANT SELECT ON
-  accounts,
+REVOKE UPDATE, DELETE ON control_commands
+FROM telegram_userbot_control_runtime;
+
+REVOKE INSERT, UPDATE, DELETE ON
+  operational_blocks,
+  copilot_action_tokens,
+  copilot_edit_sessions
+FROM telegram_userbot_control_runtime;
+
+REVOKE SELECT ON
   contacts,
   conversations,
   conversation_turns,
   copilot_drafts,
   copilot_draft_revisions
-TO telegram_userbot_control_runtime;
+FROM telegram_userbot_control_runtime;
 
 GRANT SELECT ON
   conversation_turns,

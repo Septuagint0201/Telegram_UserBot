@@ -75,6 +75,11 @@
             "items": { "minLength": 1, "type": "string" },
             "uniqueItems": true
           },
+          "tests": {
+            "type": "array",
+            "items": { "minLength": 1, "type": "string" },
+            "uniqueItems": true
+          },
           "reason": { "minLength": 1, "type": "string" }
         }
       }

@@ -275,8 +275,10 @@ async def test_runtime_auto_success_and_provider_failure(monkeypatch: pytest.Mon
     FakeRepository.result_value = RunResult(
         UUID(int=20), "succeeded", "COPILOT_DRAFT_READY", draft_id=UUID(int=40)
     )
+    feedback_count = len(telegram.read_requests), len(telegram.typing_requests)
     copilot = await service.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
     assert copilot.draft_id == UUID(int=40)
+    assert (len(telegram.read_requests), len(telegram.typing_requests)) == feedback_count
 
 
 @pytest.mark.unit

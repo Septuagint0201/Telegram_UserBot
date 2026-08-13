@@ -40,10 +40,12 @@ class FakeResult:
         self,
         row: Any = None,
         *,
+        rowcount: int = 0,
         scalar_rows: tuple[object, ...] = (),
         rows: tuple[object, ...] = (),
     ) -> None:
         self.row = row
+        self.rowcount = rowcount
         self.scalar_rows = scalar_rows
         self.rows = rows
 
@@ -1074,8 +1076,11 @@ async def test_failure_preflight_and_operational_block(monkeypatch: pytest.Monke
         "account_control_version": 5,
         "mode_version": 6,
         "content_revision": 7,
+        "sequence_no": 0,
         "state": "pending",
         "group_state": "planned",
+        "first_side_effect_at": None,
+        "sent_count": 0,
         "turn_state": "output_ready",
         "lease_owner": OWNER,
         "lease_expires_at": NOW + timedelta(seconds=1),
@@ -1108,6 +1113,7 @@ async def test_failure_preflight_and_operational_block(monkeypatch: pytest.Monke
     )
     preflight = ConversationOrchestratorRepository(session(preflight_fake))
     preflight._locked_scope = AsyncMock(return_value=scope())  # type: ignore[method-assign]
+    preflight._continuation_source_valid = AsyncMock(return_value=True)  # type: ignore[method-assign]
     assert (
         await preflight.preflight_intent(intent_id=cast(UUID, joined["id"]), owner=OWNER, now=NOW)
         == "claimed"
@@ -1116,9 +1122,168 @@ async def test_failure_preflight_and_operational_block(monkeypatch: pytest.Monke
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_preflight_remainder_cancellation_and_ordinal_wait_are_distinct() -> None:
+    joined = {
+        "id": UUID(int=60),
+        "delivery_group_id": UUID(int=30),
+        "account_id": ACCOUNT,
+        "conversation_id": CONVERSATION,
+        "model_run_id": RUN,
+        "turn_id": TURN,
+        "source": "ai",
+        "generation_no": 1,
+        "account_control_version": 5,
+        "mode_version": 6,
+        "content_revision": 7,
+        "sequence_no": 1,
+        "state": "pending",
+        "group_state": "partial",
+        "first_side_effect_at": NOW - timedelta(seconds=1),
+        "sent_count": 1,
+        "turn_state": "output_ready",
+        "lease_owner": OWNER,
+        "lease_expires_at": NOW + timedelta(seconds=1),
+        "active_generation_no": 1,
+    }
+    stale = ConversationOrchestratorRepository(
+        session(
+            FakeSession(
+                results=(
+                    FakeResult(
+                        {
+                            "conversation_id": CONVERSATION,
+                            "turn_id": TURN,
+                            "delivery_group_id": UUID(int=30),
+                        }
+                    ),
+                    FakeResult(),
+                    FakeResult(),
+                    FakeResult(joined),
+                    FakeResult(),
+                    FakeResult(),
+                )
+            )
+        )
+    )
+    stale._locked_scope = AsyncMock(  # type: ignore[method-assign]
+        return_value=scope(mode=BaseMode.HUMAN)
+    )
+    stale._continuation_source_valid = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    stale._continuation_ordinal_ready = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    assert await stale.preflight_intent(intent_id=UUID(int=60), owner=OWNER, now=NOW) is None
+    assert len(cast(FakeSession, stale._session).statements) == 6
+
+    waiting = ConversationOrchestratorRepository(
+        session(
+            FakeSession(
+                results=(
+                    FakeResult(
+                        {
+                            "conversation_id": CONVERSATION,
+                            "turn_id": TURN,
+                            "delivery_group_id": UUID(int=30),
+                        }
+                    ),
+                    FakeResult(),
+                    FakeResult(),
+                    FakeResult(joined),
+                )
+            )
+        )
+    )
+    waiting._locked_scope = AsyncMock(return_value=scope())  # type: ignore[method-assign]
+    waiting._continuation_source_valid = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    waiting._continuation_ordinal_ready = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    assert await waiting.preflight_intent(intent_id=UUID(int=60), owner=OWNER, now=NOW) is None
+    assert len(cast(FakeSession, waiting._session).statements) == 4
+
+    # first_side_effect_at is conservative: a claimed first RPC may still have
+    # ended in FloodWait/transient failure. Without a durable sent chunk, the
+    # retry must retain the original content-revision gate.
+    unsent_retry = {**joined, "sequence_no": 0, "sent_count": 0}
+    retry = ConversationOrchestratorRepository(
+        session(
+            FakeSession(
+                results=(
+                    FakeResult(
+                        {
+                            "conversation_id": CONVERSATION,
+                            "turn_id": TURN,
+                            "delivery_group_id": UUID(int=30),
+                        }
+                    ),
+                    FakeResult(),
+                    FakeResult(),
+                    FakeResult(unsent_retry),
+                    FakeResult(),
+                    FakeResult(),
+                )
+            )
+        )
+    )
+    retry._locked_scope = AsyncMock(  # type: ignore[method-assign]
+        return_value=scope(revision=8)
+    )
+    retry._continuation_source_valid = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    retry._continuation_ordinal_ready = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    retry._exact_grace_authorized = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    assert await retry.preflight_intent(intent_id=UUID(int=60), owner=OWNER, now=NOW) is None
+    assert len(cast(FakeSession, retry._session).statements) == 6
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_continuation_source_and_ordinal_helpers_fail_closed() -> None:
+    row = cast(
+        RowMapping,
+        {
+            "account_id": ACCOUNT,
+            "conversation_id": CONVERSATION,
+            "turn_id": TURN,
+            "delivery_group_id": UUID(int=30),
+            "sequence_no": 2,
+        },
+    )
+    invalid = ConversationOrchestratorRepository(session(FakeSession(scalars=(UUID(int=20),))))
+    assert not await invalid._continuation_source_valid(row)
+
+    valid = ConversationOrchestratorRepository(session(FakeSession(scalars=(None, 8, None))))
+    assert await valid._continuation_source_valid(row)
+    human = ConversationOrchestratorRepository(session(FakeSession(scalars=(None, 8, 9))))
+    assert not await human._continuation_source_valid(row)
+
+    ready = ConversationOrchestratorRepository(session(FakeSession(scalars=(None,))))
+    blocked = ConversationOrchestratorRepository(session(FakeSession(scalars=(UUID(int=60),))))
+    assert await ready._continuation_ordinal_ready(row)
+    assert not await blocked._continuation_ordinal_ready(row)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_control_identity_memory_and_reconciliation() -> None:
     command = UUID(int=80)
-    inserted = ConversationOrchestratorRepository(session(FakeSession(scalars=(command,))))
+    command_row = {
+        "id": command,
+        "account_id": ACCOUNT,
+        "conversation_id": CONVERSATION,
+        "bot_identity": "control-bot",
+        "telegram_update_id": 9,
+        "admin_telegram_user_id": 10,
+        "bot_chat_id": 10,
+        "command_kind": "ai",
+        "idempotency_key": b"k" * 32,
+        "expected_control_version": None,
+        "expected_mode_version": None,
+        "result_control_version": None,
+        "result_mode_version": None,
+        "state": "pending",
+        "result_code": None,
+        "result_changed": None,
+        "result_payload": None,
+    }
+    inserted = ConversationOrchestratorRepository(
+        session(FakeSession(results=(FakeResult(command_row),)))
+    )
     assert (
         await inserted.record_control_command(
             command_id=command,
@@ -1127,13 +1292,15 @@ async def test_control_identity_memory_and_reconciliation() -> None:
             bot_identity="control-bot",
             telegram_update_id=9,
             admin_telegram_user_id=10,
+            bot_chat_id=10,
             command_kind="ai",
             idempotency_key=b"k" * 32,
             now=NOW,
         )
-        == command
+    ).id == command
+    existing = ConversationOrchestratorRepository(
+        session(FakeSession(results=(FakeResult(None), FakeResult(command_row))))
     )
-    existing = ConversationOrchestratorRepository(session(FakeSession(scalars=(None, command))))
     assert (
         await existing.record_control_command(
             command_id=UUID(int=81),
@@ -1142,12 +1309,12 @@ async def test_control_identity_memory_and_reconciliation() -> None:
             bot_identity="control-bot",
             telegram_update_id=9,
             admin_telegram_user_id=10,
+            bot_chat_id=10,
             command_kind="ai",
             idempotency_key=b"k" * 32,
             now=NOW,
         )
-        == command
-    )
+    ).id == command
     invalidations = ConversationOrchestratorRepository(
         session(FakeSession(results=(FakeResult(),)))
     )
@@ -1157,6 +1324,59 @@ async def test_control_identity_memory_and_reconciliation() -> None:
         version=7,
         now=NOW,
     )
+    control_queue = ConversationOrchestratorRepository(
+        session(FakeSession(results=(FakeResult(command_row), FakeResult(rowcount=1))))
+    )
+    claimed = await control_queue.claim_pending_control_command(
+        account_id=ACCOUNT,
+        bot_identity="control-bot",
+        command_id=command,
+    )
+    assert claimed is not None
+    assert claimed.id == command
+    await control_queue.bind_control_command_versions(
+        command_id=command,
+        expected_control_version=2,
+        expected_mode_version=3,
+    )
+
+    terminal = ConversationOrchestratorRepository(
+        session(FakeSession(results=(FakeResult(rowcount=1), FakeResult())))
+    )
+    await terminal.finish_control_command(
+        command_id=command,
+        result_code="CHANGED",
+        accepted=True,
+        result_changed=True,
+        result_control_version=2,
+        result_mode_version=4,
+        now=NOW,
+    )
+    await terminal.add_control_command_outbox(
+        command_id=command,
+        account_id=ACCOUNT,
+        topic="control.command.completed",
+        now=NOW,
+    )
+    with pytest.raises(ValueError, match="unsupported"):
+        await terminal.add_control_command_outbox(
+            command_id=command,
+            account_id=ACCOUNT,
+            topic="control.command.secret",
+            now=NOW,
+        )
+
+    missing_terminal = ConversationOrchestratorRepository(
+        session(FakeSession(results=(FakeResult(rowcount=0),)))
+    )
+    with pytest.raises(OrchestratorConflictError, match="NOT_PENDING"):
+        await missing_terminal.finish_control_command(
+            command_id=command,
+            result_code="CHANGED",
+            accepted=True,
+            result_changed=True,
+            now=NOW,
+        )
 
     none = ConversationOrchestratorRepository(session(FakeSession(scalars=(None,))))
     await none.queue_memory_refresh(turn_id=TURN, now=NOW)

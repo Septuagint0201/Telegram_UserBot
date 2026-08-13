@@ -215,6 +215,17 @@ def test_final_gate_fails_closed_for_every_stale_dimension() -> None:
         )
     )
     assert allowed_grace.allowed
+    continuation = evaluate_final_gate(
+        FinalGateInput(
+            snapshot,
+            auto_resolution(revision=6),  # type: ignore[arg-type]
+            EffectiveMode.AUTO,
+            True,
+            True,
+            content_revision_required=False,
+        )
+    )
+    assert continuation.allowed
     account, conversation = controls()
     blocked = resolve_mode(
         account=account,
