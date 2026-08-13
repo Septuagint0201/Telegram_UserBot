@@ -203,8 +203,8 @@ M4-001—M4-010的原关闭基线可追溯，但本轮审查已重开M4并补强
 
 - 历史签名提交`6185c6ef0a33ca4d8fadc293b49a536a18d7e24a`及pipeline [#2752242512](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2752242512)保留为原关闭基线，不覆盖本轮代码。
 - 本轮race manifest与M4-001—M4-010 acceptance改为读取JUnit stable test ID；测试缺失、skip或失败均产生`NOT RUN/FAIL`并使race writer失败。
-- 本轮Windows/CPython 3.14.7有228个default测试`PASS`、31个非默认测试deselect；line coverage 89.52%、branch coverage 80.70%，Ruff、strict mypy、import boundary与compileall为`PASS`。原80% branch gate保持不变；本机无容器运行时，M4 PostgreSQL integration为`NOT RUN`，本地race manifest仍按缺失service证据fail closed。
-- Control runtime权限边界已通过单元/静态契约；首个重验证pipeline [#2758059918](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758059918)暴露两项已修复缺陷：8102字符fixture在4096分片限制下应为2段而非3段，以及draft活动排序应使用`requested_at`而非不存在的`created_at`。修复候选的GitLab disposable PostgreSQL/Redis、migration、race、acceptance仍为`NOT RUN`，因此M4-011未关闭。
+- 本轮Windows/CPython 3.14.7有228个default测试`PASS`、31个非默认测试deselect；line coverage 89.53%、branch coverage 80.73%，Ruff、strict mypy、import boundary与compileall为`PASS`。原80% branch gate保持不变；本机无容器运行时，M4 PostgreSQL integration为`NOT RUN`，本地race manifest仍按缺失service证据fail closed。
+- Control runtime权限边界已通过单元/静态契约；首个重验证pipeline [#2758059918](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758059918)暴露两项缺陷：分片fixture没有真实构造三段，以及draft活动排序使用了不存在的`created_at`。修复后的pipeline [#2758149511](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758149511)确认这两项不再失败，并在M4 service job以257个测试通过、1个失败、1个deselect暴露最后一项：非status命令把Python `None`绑定为JSON `null`，违反`result_payload`的object-only约束。本候选保留数据库SQL `NULL`且仅在有status object时写payload，并覆盖两条路径；新的GitLab disposable PostgreSQL/Redis、migration、race、acceptance仍为`NOT RUN`，因此M4-011未关闭。
 - 真实Telegram/provider、真实AUTO、Ubuntu production、backup/restore、production load和24小时soak仍为`NOT RUN`。
 
 ## 10. M5 — Media与 Context Contract

@@ -2886,20 +2886,25 @@ class ConversationOrchestratorRepository:
         result_mode_version: int | None = None,
         result_payload: dict[str, Any] | None = None,
     ) -> None:
+        values: dict[str, Any] = {
+            "state": "applied" if accepted else "rejected",
+            "result_code": result_code,
+            "result_changed": result_changed,
+            "result_control_version": result_control_version,
+            "result_mode_version": result_mode_version,
+            "completed_at": now,
+        }
+        # JSONB binds Python None as JSON null.  Non-status commands must leave
+        # the pending row's SQL NULL untouched so the object-only constraint
+        # remains meaningful.
+        if result_payload is not None:
+            values["result_payload"] = result_payload
         result = cast(
             Any,
             await self._session.execute(
                 update(control_commands)
                 .where(control_commands.c.id == command_id, control_commands.c.state == "pending")
-                .values(
-                    state="applied" if accepted else "rejected",
-                    result_code=result_code,
-                    result_changed=result_changed,
-                    result_control_version=result_control_version,
-                    result_mode_version=result_mode_version,
-                    result_payload=result_payload,
-                    completed_at=now,
-                )
+                .values(**values)
             ),
         )
         if result.rowcount != 1:

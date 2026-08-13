@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.dml import Update
 
 import telegram_userbot.adapters.persistence.orchestrator_repository as repository_module
 from telegram_userbot.adapters.persistence.orchestrator_records import RunResult
@@ -1356,9 +1357,8 @@ async def test_control_identity_memory_and_reconciliation() -> None:
         expected_mode_version=3,
     )
 
-    terminal = ConversationOrchestratorRepository(
-        session(FakeSession(results=(FakeResult(rowcount=1), FakeResult())))
-    )
+    terminal_session = FakeSession(results=(FakeResult(rowcount=1), FakeResult()))
+    terminal = ConversationOrchestratorRepository(session(terminal_session))
     await terminal.finish_control_command(
         command_id=command,
         result_code="CHANGED",
@@ -1368,6 +1368,24 @@ async def test_control_identity_memory_and_reconciliation() -> None:
         result_mode_version=4,
         now=NOW,
     )
+    terminal_statement = cast(Update, terminal_session.statements[0])
+    assert "result_payload" not in terminal_statement.compile().params
+
+    status_session = FakeSession(results=(FakeResult(rowcount=1),))
+    status_terminal = ConversationOrchestratorRepository(session(status_session))
+    await status_terminal.finish_control_command(
+        command_id=command,
+        result_code="STATUS",
+        accepted=True,
+        result_changed=False,
+        result_control_version=2,
+        result_mode_version=4,
+        result_payload={"target_label": "synthetic"},
+        now=NOW,
+    )
+    status_statement = cast(Update, status_session.statements[0])
+    assert status_statement.compile().params["result_payload"] == {"target_label": "synthetic"}
+
     await terminal.add_control_command_outbox(
         command_id=command,
         account_id=ACCOUNT,
