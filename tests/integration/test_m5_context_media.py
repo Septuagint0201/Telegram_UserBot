@@ -384,8 +384,8 @@ async def test_m5_constraints_and_control_role_fail_closed(db_session: AsyncSess
     assert "FOREIGN KEY (context_manifest_id, account_id)" in model_run_manifest_fk
     assert "REFERENCES context_manifests(id, account_id)" in model_run_manifest_fk
 
-    async with db_session.begin_nested():
-        with pytest.raises(DBAPIError):
+    with pytest.raises(DBAPIError):
+        async with db_session.begin_nested():
             await db_session.execute(
                 insert(context_policy_versions).values(
                     id=uuid7(),
