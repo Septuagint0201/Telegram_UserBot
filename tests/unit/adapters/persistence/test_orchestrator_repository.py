@@ -212,6 +212,22 @@ def test_record_converters_reject_missing_start_and_normalize_generation() -> No
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_conversation_activity_orders_drafts_by_requested_time() -> None:
+    fake = FakeSession(scalars=(0, None, "ready"))
+    repository = ConversationOrchestratorRepository(session(fake))
+    repository._locked_scope = AsyncMock(return_value=scope())  # type: ignore[method-assign]
+
+    activity = await repository.conversation_activity(CONVERSATION, NOW)
+
+    assert activity.unanswered_count == 0
+    assert activity.active_turn_state is None
+    assert activity.active_draft_state == "ready"
+    draft_query = str(fake.statements[-1])
+    assert "copilot_drafts.requested_at DESC" in draft_query
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_scope_resolution_bootstrap_and_missing_conversation() -> None:
     account_row = {
         "account_id": ACCOUNT,

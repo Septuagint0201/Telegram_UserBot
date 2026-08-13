@@ -349,7 +349,7 @@ class ConversationOrchestratorRepository:
                         ("requested", "collecting", "generating", "ready", "editing", "approved")
                     ),
                 )
-                .order_by(copilot_drafts.c.created_at.desc())
+                .order_by(copilot_drafts.c.requested_at.desc())
                 .limit(1)
             ),
         )

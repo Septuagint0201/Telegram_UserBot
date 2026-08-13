@@ -429,7 +429,7 @@ async def test_multichunk_continuation_orders_chunks_and_rejects_strong_invalida
     completed = await repository.complete_generation(
         run_id=claim.run.id,
         owner=OWNER,
-        text_output=("x" * 4000) + ("y" * 4000) + ("z" * 100),
+        text_output=("x" * 4000) + "\n" + ("y" * 4000) + "\n" + ("z" * 100),
         completed_at=NOW + timedelta(seconds=5),
         entropy=b"c" * 32,
     )
@@ -471,7 +471,7 @@ async def test_multichunk_continuation_orders_chunks_and_rejects_strong_invalida
             message_id=150,
             observed_at=NOW + timedelta(seconds=8),
             direction=Direction.OUTGOING,
-            text_content="x" * 4000,
+            text_content=("x" * 4000) + "\n",
             random_id=first.telegram_random_id,
         )
     )
