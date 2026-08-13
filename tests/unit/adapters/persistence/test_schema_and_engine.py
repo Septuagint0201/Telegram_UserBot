@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
+from pathlib import Path
 
 import pytest
 
@@ -9,7 +10,7 @@ from telegram_userbot.adapters.persistence.engine import (
     create_postgres_engine,
     schema_is_ready,
 )
-from telegram_userbot.adapters.persistence.schema import M1_TABLES, M5_TABLES, metadata
+from telegram_userbot.adapters.persistence.schema import M1_TABLES, M5_TABLES, metadata, model_runs
 
 
 class FakeConnection:
@@ -85,6 +86,16 @@ def test_m1_schema_inventory_and_constraint_names() -> None:
     for table in metadata.tables.values():
         assert all(constraint.name for constraint in table.constraints)
         assert all(index.name for index in table.indexes)
+
+    # The actual database constraint is added by 0006. Attaching it to the
+    # shared MetaData would contaminate the historical 0004 partial create.
+    assert "fk_model_runs_context_manifest_scope" not in {
+        constraint.name for constraint in model_runs.constraints
+    }
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0006_m5_media_context.py"
+    ).read_text(encoding="utf-8")
+    assert '"fk_model_runs_context_manifest_scope"' in migration
 
 
 @pytest.mark.unit

@@ -2569,16 +2569,9 @@ Index(
     postgresql_where=context_preview_deliveries.c.bot_message_id.is_not(None),
 )
 
-model_runs.append_constraint(
-    ForeignKeyConstraint(
-        [model_runs.c.context_manifest_id, model_runs.c.account_id],
-        [context_manifests.c.id, context_manifests.c.account_id],
-        name="fk_model_runs_context_manifest_scope",
-        deferrable=True,
-        initially="DEFERRED",
-        use_alter=True,
-    )
-)
+# This cross-milestone foreign key is created explicitly by migration 0006.
+# Keeping it attached to the shared MetaData would make the historical 0004
+# ``create_all(tables=M4_TABLES)`` try to reference an M5 table before it exists.
 
 M5_TABLES = tuple(
     name

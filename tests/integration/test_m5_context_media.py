@@ -374,6 +374,16 @@ async def test_m5_manifest_persists_content_free_and_preview_is_one_time(
 
 @pytest.mark.integration
 async def test_m5_constraints_and_control_role_fail_closed(db_session: AsyncSession) -> None:
+    model_run_manifest_fk = await db_session.scalar(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'fk_model_runs_context_manifest_scope'"
+        )
+    )
+    assert model_run_manifest_fk is not None
+    assert "FOREIGN KEY (context_manifest_id, account_id)" in model_run_manifest_fk
+    assert "REFERENCES context_manifests(id, account_id)" in model_run_manifest_fk
+
     async with db_session.begin_nested():
         with pytest.raises(DBAPIError):
             await db_session.execute(
