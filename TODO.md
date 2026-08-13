@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M5已经完成。M5 Media与Context Contract实现了安全图片摄取、私有存储、动态预算、确定性选择、instruction/data隔离、content-free manifest、三协议图片映射及受控Context Bot界面；M5-001—M5-011已经由Windows静态、unit/property/contract和synthetic image测试关闭，精确签名提交的GitLab disposable-service/migration/acceptance证据将在本阶段推送后补齐。Windows本机无Docker；真实Telegram/provider live、应用容器、真实AUTO、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。当前进入M6 Memory、Summary与Embedding Pipeline。
+架构设计与M0—M5已经完成。M5 Media与Context Contract实现了安全图片摄取、私有存储、动态预算、确定性选择、instruction/data隔离、content-free manifest、三协议图片映射及受控Context Bot界面；M5-001—M5-011已经由Windows静态、unit/property/contract、synthetic image以及签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab pipeline [#2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)关闭，11个作业全部`PASS`。Windows本机无Docker；真实Telegram/provider live、应用容器、真实AUTO、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。当前进入M6 Memory、Summary与Embedding Pipeline。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -44,7 +44,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M2 | 模型配置、adapter与 key-only 控制面 | COMPLETE | WINDOWS PASS / GITLAB LINUX PASS |
 | M3 | Telegram ingest 与 outbound intent | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M5 | Media 与 Context Contract | COMPLETE | PASS (Windows synthetic/static); GitLab pending |
+| M5 | Media 与 Context Contract | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M6 | Memory、Summary 与 Embedding Pipeline | IN PROGRESS | NOT RUN |
 | M7 | Proactive Pipeline | WAITING | NOT RUN |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
@@ -221,7 +221,7 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 - [x] **M5-008 实现 `/context`**（依赖：M5-006）— 只展示来源类别、计数、预算、版本和 freshness，不返回聊天正文、memory 正文或 secret。
 - [x] **M5-009 实现 `/context_preview`**（依赖：M5-006—M5-008）— 管理员受控查看 synthetic/redacted preview，覆盖 token overflow、rebuild、delete 和 send_unknown 场景。
 - [x] **M5-010 实现 quota、retention 与磁盘清理接口**（依赖：M5-002）— 为 Operations 暴露容量、TTL、引用保护和删除 job；阈值与最终期限留在 M8 配置。
-- [x] **M5-011 关闭 M5**（依赖：M5-001—M5-010）— 图片安全、三协议 contract、预算 property、注入和 rebuild 测试为 `PASS`。
+- [x] **M5-011 关闭 M5**（依赖：M5-001—M5-010）— 图片安全、三协议 contract、预算 property、注入和 rebuild 测试为`PASS`；签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab service、migration、browser、acceptance和artifact共11个作业全部`PASS`。
 
 ### M5 退出门禁
 

@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M5已经关闭；M4补强由签名提交`2b1ba2974d44bbd323d329f0421012dbe651638f`及GitLab pipeline [#2758187631](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758187631)验证。M5的Windows static/unit/property/contract与synthetic image门禁已经通过，精确签名提交的GitLab disposable-service/migration/acceptance证据将在本阶段推送后补齐。当前进入M6 Memory、Summary与Embedding Pipeline。Telegram/provider live、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M5已经关闭；M4补强由签名提交`2b1ba2974d44bbd323d329f0421012dbe651638f`及GitLab pipeline [#2758187631](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758187631)验证。M5的Windows static/unit/property/contract、synthetic image以及签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab pipeline [#2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)均已通过。当前进入M6 Memory、Summary与Embedding Pipeline。Telegram/provider live、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -301,7 +301,7 @@ deploy/
 - 被删source不进入context；模型无能力时fail closed。
 - Context同输入/版本可重建，全部item有source/trust。
 
-当前状态：COMPLETE。实现覆盖20 MiB/40 MP/16384 px图片校验、private 0700/0600 media storage、10 GiB quota与TTL cleanup、动态context预算、稳定selection、instruction/data隔离、content-free manifest、Responses/Chat Completions/Messages图片映射，以及metadata-only `/context`和按钮回调二次确认的`/context_preview`。Windows本地static/unit/property/contract与synthetic image证据为`PASS`；本机无Docker，PostgreSQL/Redis migration/role integration为`NOT RUN`，精确签名提交的GitLab证据待推送后记录。
+当前状态：COMPLETE。实现覆盖20 MiB/40 MP/16384 px图片校验、private 0700/0600 media storage、10 GiB quota与TTL cleanup、动态context预算、稳定selection、instruction/data隔离、content-free manifest、Responses/Chat Completions/Messages图片映射，以及metadata-only `/context`和按钮回调二次确认的`/context_preview`。Windows本地255个默认测试、static/unit/property/contract与synthetic image证据为`PASS`；本机无Docker，PostgreSQL/Redis migration/role integration为`NOT RUN`。签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab pipeline [#2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)共11个作业全部`PASS`；M5 service job执行288个测试并deselect 1个，total coverage 90.68%，同时通过独立line/branch、migration、role、acceptance和artifact门禁。
 
 ## 11. M6 — Memory、Summary与Embedding
 

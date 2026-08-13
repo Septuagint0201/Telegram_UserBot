@@ -22,4 +22,11 @@ def test_m5_status_documents_are_consistent() -> None:
     assert "当前进入M6" in readme
     assert "当前进入M6" in design
     assert "0006_m5_media_context" in compatibility
+    assert "9e6aeaf3a50ff58826a6830492c766a7983da9b6" in todo
+    assert "#2758537825" in todo
+    assert "#2758537825" in plan
+    assert "#2758537825" in design
+    assert "#2758537825" in compatibility
+    assert "GitLab pending" not in todo
+    assert "pending this stage push" not in disclosure
     assert "Current artifact status: M0-M5 component milestones complete" in disclosure
