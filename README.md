@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0—M5已经完成。M5已实现安全图片摄取与私有存储、动态context预算、确定性选择、instruction/data隔离、content-free manifest、三协议图片映射及受控Context Bot界面；当前进入M6 Memory、Summary与Embedding Pipeline。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+V1架构设计与M0—M6组件实现已经完成。M6已实现异步OR触发、strict proposal/evidence、版本化memory、immutable summary membership、single-space shadow embedding、Control Bot二次确认和one-way erasure replay；M7在M6 GitLab证据写回前保持等待。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
@@ -13,7 +13,7 @@ V1架构设计与M0—M5已经完成。M5已实现安全图片摄取与私有存
 - Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
-精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)、[M3 Compatibility Set](docs/compatibility/m3.md)、[M4 Compatibility Set](docs/compatibility/m4.md)和[M5 Compatibility Set](docs/compatibility/m5.md)。真实Telegram/provider仍未接入。
+精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)、[M3 Compatibility Set](docs/compatibility/m3.md)、[M4 Compatibility Set](docs/compatibility/m4.md)、[M5 Compatibility Set](docs/compatibility/m5.md)和[M6 Compatibility Set](docs/compatibility/m6.md)。真实Telegram/provider仍未接入。
 
 ## 架构摘要
 
@@ -112,6 +112,10 @@ M2在Windows/CPython 3.14.7本地有143个默认测试通过，line coverage 92.
 M3在Windows/CPython 3.14.7本地有179个默认测试通过，line coverage 91.41%、branch coverage 81.13%；本机没有Docker daemon，因此PostgreSQL/Redis integration为`NOT RUN`。签名提交`41f4160a6d53bdd34e2654f08a90a4b61b6675e8`对应的[GitLab Linux pipeline #2751916211](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2751916211)全部通过：`m3-telegram-fake`在PostgreSQL 17.10/pgvector 0.8.6与Redis 8.2.8上执行202个测试，1个browser测试按策略deselect，line coverage 93.22%、branch coverage 84.65%；4条migration路径、12项content-free replay和M3-001—M3-010 acceptance均为`PASS`。真实Telegram ingest/send与Session owner运行时保持`NOT RUN`。
 
 M4的补强已完成：race/acceptance从JUnit stable test ID派生，continuation逐段验证原source与human takeover，Control Bot只入队command/outbox并由app executor写accepted/no-op/rejected终态，非status command保留SQL `NULL`而status payload保持JSON object。Windows/CPython 3.14.7有228个default测试通过、31个非默认测试deselect，line coverage 89.53%、branch coverage 80.73%，Ruff、strict mypy、import boundary与compileall通过；本机无容器运行时，M4 PostgreSQL integration仍为`NOT RUN`。签名提交`2b1ba2974d44bbd323d329f0421012dbe651638f`对应的[GitLab Linux pipeline #2758187631](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758187631)九个作业全部通过：M4 service job执行258个测试、1个deselect，line coverage 92.52%、branch coverage 84.50%，migration、JUnit-derived race、M4 acceptance和artifact scan全部`PASS`。M4-001—M4-011因此关闭；真实Telegram/provider、真实AUTO与部署运行时保持`NOT RUN`。
+
+M5签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`对应的[GitLab Linux pipeline #2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)共11个作业全部`PASS`：service job执行288个测试并deselect 1个，total coverage 90.68%，同时通过migration、role、browser、acceptance和artifact门禁。真实Telegram/provider、部署、backup/restore与production load保持`NOT RUN`。
+
+M6在Windows/CPython 3.14.7有286个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；Ruff、strict mypy、import boundary、compileall、offline upgrade/downgrade SQL、wheel/sdist Disclosure和secret/artifact scan均为`PASS`。本机无Docker，PostgreSQL/Redis migration、role和durable control integration为`NOT RUN`；这些由本阶段签名提交的GitLab `m6-memory-pipeline`与`m6-acceptance`验证并在收尾提交写回。真实Telegram/provider、Control Bot polling、真实AUTO、部署和真实backup/restore保持`NOT RUN`。
 
 常用本地门禁：
 

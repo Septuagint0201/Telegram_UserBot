@@ -70,7 +70,9 @@ def _tested_requirement(
     return record
 
 
-def _requirements_for(milestone: str, *, root: Path) -> list[RequirementRecord]:
+def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
+    milestone: str, *, root: Path
+) -> list[RequirementRecord]:
     if milestone == "M0":
         return [
             _requirement(
@@ -383,7 +385,7 @@ def _requirements_for(milestone: str, *, root: Path) -> list[RequirementRecord]:
         ]
     if milestone == "M5":
         junit_results = load_junit_results(root / ".artifacts/m5/junit.xml")
-        mapping: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+        m5_mapping: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
             (
                 "M5-001",
                 (
@@ -513,7 +515,164 @@ def _requirements_for(milestone: str, *, root: Path) -> list[RequirementRecord]:
                 test_ids=test_ids,
                 junit_results=junit_results,
             )
-            for requirement_id, evidence, test_ids in mapping
+            for requirement_id, evidence, test_ids in m5_mapping
+        ]
+    if milestone == "M6":
+        junit_results = load_junit_results(root / ".artifacts/m6/junit.xml")
+        m6_mapping: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+            (
+                "M6-001",
+                ("src/telegram_userbot/domain/memory/trigger.py",),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_trigger_conditions_are_independent_or_and_compensation_is_visible",
+                ),
+            ),
+            (
+                "M6-002",
+                (
+                    "src/telegram_userbot/adapters/persistence/memory_repository.py",
+                    "tests/integration/test_m6_memory_pipeline.py",
+                ),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_generation_running_range_is_immutable_and_new_events_get_next_generation",
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_trigger_generation_guards_and_fencing_fail_closed",
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_pending_range_claim_is_immutable_and_later_event_gets_next_generation",
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_threshold_retry_and_expired_lease_are_runnable",
+                ),
+            ),
+            (
+                "M6-003",
+                (
+                    "src/telegram_userbot/domain/memory/models.py",
+                    "src/telegram_userbot/domain/memory/fakes.py",
+                    "src/telegram_userbot/adapters/persistence/memory_repository.py",
+                    "tests/integration/test_m6_memory_pipeline.py",
+                ),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_strict_parser_rejects_unknown_fields_and_validates_current_evidence",
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_validator_rejects_malformed_evidence_and_unsafe_proposals",
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_manifest_membership_is_content_free_and_hash_bound",
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_memory_proposal_storage_identity_is_run_scoped",
+                ),
+            ),
+            (
+                "M6-004",
+                ("src/telegram_userbot/domain/memory/validation.py",),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_strict_parser_rejects_unknown_fields_and_validates_current_evidence",
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_validator_rejects_malformed_evidence_and_unsafe_proposals",
+                ),
+            ),
+            (
+                "M6-005",
+                ("src/telegram_userbot/domain/memory/validation.py",),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_confidence_visual_only_and_low_confidence_never_auto_accept",
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_validator_rejects_malformed_evidence_and_unsafe_proposals",
+                ),
+            ),
+            (
+                "M6-006",
+                ("src/telegram_userbot/domain/memory/lifecycle.py",),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_memory_store_acceptance_is_idempotent_and_forget_redacts_every_version",
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_memory_store_supersede_creates_a_new_identity_and_version_ids_do_not_collide",
+                ),
+            ),
+            (
+                "M6-007",
+                ("src/telegram_userbot/domain/memory/summary.py",),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_summary_membership_period_and_late_source_invalidation",
+                ),
+            ),
+            (
+                "M6-008",
+                ("src/telegram_userbot/domain/memory/embedding.py",),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_embedding_shadow_activation_isolated_and_dimension_checked",
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_embedding_indexes_and_dimension_binding_match_architecture",
+                ),
+            ),
+            (
+                "M6-009",
+                (
+                    "src/telegram_userbot/adapters/telegram_bot/memory_control.py",
+                    "src/telegram_userbot/adapters/telegram_bot/memory_control_backend.py",
+                ),
+                (
+                    "tests.unit.adapters.test_memory_control::"
+                    "test_memory_control_is_private_metadata_only_and_uses_second_confirmation",
+                    "tests.unit.adapters.test_memory_control::"
+                    "test_memory_target_tokens_are_private_principal_bound_and_expiring",
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_durable_control_backend_empty_scope_is_metadata_only",
+                ),
+            ),
+            (
+                "M6-010",
+                ("src/telegram_userbot/domain/memory/reconciliation.py",),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_erasure_ledger_replays_without_reopening_derived_state_and_freshness_is_explicit",
+                ),
+            ),
+            (
+                "M6-011",
+                (
+                    "src/telegram_userbot/domain/memory/reconciliation.py",
+                    "src/telegram_userbot/adapters/telegram_bot/memory_control_backend.py",
+                ),
+                (
+                    "tests.unit.domain.test_m6_memory::"
+                    "test_erasure_ledger_replays_without_reopening_derived_state_and_freshness_is_explicit",
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_status_marks_revision_or_token_threshold_as_stale",
+                ),
+            ),
+            (
+                "M6-012",
+                (
+                    "alembic/versions/0007_m6_memory_pipeline.py",
+                    "deploy/postgres/m6_roles.sql",
+                    "docs/compatibility/m6.md",
+                    "TODO.md",
+                    "docs/Implementation-Plan.md",
+                ),
+                (
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_roles_keep_control_out_of_derived_truth_and_allow_review_commands",
+                    "tests.unit.test_m6_documentation_status::"
+                    "test_m6_status_documents_are_consistent",
+                ),
+            ),
+        )
+        return [
+            _tested_requirement(
+                requirement_id,
+                *evidence,
+                test_ids=test_ids,
+                junit_results=junit_results,
+            )
+            for requirement_id, evidence, test_ids in m6_mapping
         ]
     raise ValueError("unsupported milestone")
 
@@ -536,7 +695,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
     )
     if missing_evidence:
         raise ValueError("acceptance evidence path is missing: " + missing_evidence[0])
-    uses_disposable_services = milestone in {"M1", "M2", "M3", "M4", "M5"}
+    uses_disposable_services = milestone in {"M1", "M2", "M3", "M4", "M5", "M6"}
     environment: dict[str, object] = {
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),
@@ -600,7 +759,11 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--milestone", choices=("M0", "M1", "M2", "M3", "M4", "M5"), default="M0")
+    parser.add_argument(
+        "--milestone",
+        choices=("M0", "M1", "M2", "M3", "M4", "M5", "M6"),
+        default="M0",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]

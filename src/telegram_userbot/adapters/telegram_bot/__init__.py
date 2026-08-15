@@ -24,6 +24,19 @@ from telegram_userbot.adapters.telegram_bot.conversation_control_backend import 
     ConversationTargetTokenCodec,
     DurableConversationControlBackend,
 )
+from telegram_userbot.adapters.telegram_bot.memory_control import (
+    MemoryCandidateSummary,
+    MemoryControlBackend,
+    MemoryControlController,
+    MemoryItemSummary,
+    MemoryReviewChallenge,
+    MemoryStatusSummary,
+)
+from telegram_userbot.adapters.telegram_bot.memory_control_backend import (
+    DurableMemoryControlBackend,
+    MemoryControlTarget,
+    MemoryControlTargetTokenCodec,
+)
 from telegram_userbot.adapters.telegram_bot.model_control import (
     BotReply,
     ControlBotModelController,
@@ -55,10 +68,19 @@ __all__ = [
     "ConversationTargetTokenCodec",
     "DurableContextControlBackend",
     "DurableConversationControlBackend",
+    "DurableMemoryControlBackend",
     "DurableModelControlBackend",
     "EndpointAdmission",
     "ExactManifestPreviewRebuilder",
     "IssuedKeyLaunch",
+    "MemoryCandidateSummary",
+    "MemoryControlBackend",
+    "MemoryControlController",
+    "MemoryControlTarget",
+    "MemoryControlTargetTokenCodec",
+    "MemoryItemSummary",
+    "MemoryReviewChallenge",
+    "MemoryStatusSummary",
     "ModelCapabilityProbe",
     "ModelControlBackend",
     "ModelProfileSummary",

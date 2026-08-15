@@ -29,7 +29,7 @@ def test_alembic_head_fits_default_version_column() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     head = ScriptDirectory.from_config(config).get_current_head()
-    assert head == "0006_m5_media_context"
+    assert head == "0007_m6_memory_pipeline"
     assert len(head) <= 32
 
 
@@ -46,7 +46,15 @@ def test_valid_manifest_semantics() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("milestone", "count"),
-    [("M0", 12), ("M1", 12), ("M2", 11), ("M3", 10), ("M4", 11), ("M5", 11)],
+    [
+        ("M0", 12),
+        ("M1", 12),
+        ("M2", 11),
+        ("M3", 10),
+        ("M4", 11),
+        ("M5", 11),
+        ("M6", 12),
+    ],
 )
 def test_requirement_ids_follow_supported_manifest_milestone(milestone: str, count: int) -> None:
     assert requirement_ids_for_milestone(milestone) == frozenset(
@@ -56,7 +64,7 @@ def test_requirement_ids_follow_supported_manifest_milestone(milestone: str, cou
 
 @pytest.mark.unit
 def test_requirement_ids_reject_unknown_or_missing_milestone() -> None:
-    for milestone in (None, "M6", 1):
+    for milestone in (None, "M7", 1):
         with pytest.raises(ManifestSemanticError, match="unsupported evidence milestone"):
             requirement_ids_for_milestone(milestone)
 

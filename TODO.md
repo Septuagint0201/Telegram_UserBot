@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M5已经完成。M5 Media与Context Contract实现了安全图片摄取、私有存储、动态预算、确定性选择、instruction/data隔离、content-free manifest、三协议图片映射及受控Context Bot界面；M5-001—M5-011已经由Windows静态、unit/property/contract、synthetic image以及签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab pipeline [#2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)关闭，11个作业全部`PASS`。Windows本机无Docker；真实Telegram/provider live、应用容器、真实AUTO、生产部署、backup/restore、production performance和live smoke仍为`NOT RUN`。当前进入M6 Memory、Summary与Embedding Pipeline。
+架构设计与M0—M6组件实现已经完成。M5签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab pipeline [#2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)共11个作业全部`PASS`。M6新增异步OR触发、pending range/lease、content-free input manifest、严格proposal validator、版本化memory lifecycle、immutable summary membership、单一embedding space shadow切换、Control Bot二次确认及one-way erasure ledger。Windows静态、unit/property/contract与fake provider/embedding为`PASS`；本机无Docker，PostgreSQL/Redis migration/role integration为`NOT RUN`，由本阶段签名提交的GitLab M6 service/acceptance作业验证。真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。M7保持`WAITING`，直到M6 GitLab收尾证据写回。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -45,7 +45,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M3 | Telegram ingest 与 outbound intent | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M5 | Media 与 Context Contract | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M6 | Memory、Summary 与 Embedding Pipeline | IN PROGRESS | NOT RUN |
+| M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE | WINDOWS PASS / GITLAB EVIDENCE PENDING |
 | M7 | Proactive Pipeline | WAITING | NOT RUN |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
 | M9 | Release candidate 验证 | WAITING | NOT RUN |
@@ -233,24 +233,30 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 目标：异步提取、验证、版本化和检索记忆，并在编辑、删除或遗忘后完成派生数据对账。
 
-- [ ] **M6-001 实现 memory trigger 与补偿扫描**（依赖：M5-011）— `45 秒 OR 20 revisions OR 6000 tokens OR 10 分钟` 触发，另有 5 分钟补偿扫描；不与 Main AI 发言同步。
-- [ ] **M6-002 实现 range merge、lease 与幂等**（依赖：M1-007、M6-001）— 合并重叠 source ranges，绑定 revision watermark 和 fencing token；重复 job 只产生一个事实结果。
-- [ ] **M6-003 实现 memory input manifest 与 provider fake**（依赖：M2-003、M5-006、M6-002）— 记录 source membership、config/prompt version、token 和 payload hash；测试 timeout/malformed/duplicate proposal。
-- [ ] **M6-004 实现 proposal validator 与事务提交**（依赖：M6-003）— schema、长度、source coverage、时态、禁止指令和实体引用校验通过后一次性提交。
-- [ ] **M6-005 实现 source trust/confidence/conflict/candidate**（依赖：M6-004）— 区分用户陈述、观察、推断和模型提议；冲突保留候选，不用新摘要静默覆盖事实。
-- [ ] **M6-006 实现 memory lifecycle**（依赖：M6-005）— 支持 create/update/merge/supersede/invalidate、版本链和可审计 reason；读路径只返回当前有效版本。
-- [ ] **M6-007 实现 rolling/daily/weekly summary**（依赖：M6-002—M6-006）— 明确 membership、watermark、覆盖区间和重建规则；防止 summary-of-summary 漂移掩盖 source。
-- [ ] **M6-008 实现 embedding chunk/space/shadow rebuild**（依赖：M2-001、M6-006）— embedding space 绑定 provider/model/dimension/version；rebuild 写 shadow，验证后原子切换，不混合空间。
-- [ ] **M6-009 实现 Control Bot candidate/forget flow**（依赖：M6-005—M6-008）— 支持查看/确认/拒绝候选与精确 forget；命令输出默认不回显敏感正文。
-- [ ] **M6-010 实现递归 reconciliation**（依赖：M1-009、M6-006—M6-009）— edit/delete/forget/purge 使 memory、summary、embedding、context manifest 和缓存失效并可恢复重建。
-- [ ] **M6-011 实现 freshness 状态**（依赖：M6-001、M6-010）— 暴露 fresh/stale/rebuilding/blocked；过期时扩大 recent-window 而非伪称最新 memory。
-- [ ] **M6-012 完成 restore/erasure 测试并关闭 M6**（依赖：M6-001—M6-011）— 从备份恢复后重新应用 erasure ledger，验证被删内容及派生向量不复活。
+- [x] **M6-001 实现 memory trigger 与补偿扫描**（依赖：M5-011）— `45 秒 OR 20 revisions OR 6000 tokens OR 10 分钟` 触发，另有 5 分钟补偿扫描；不与 Main AI 发言同步。
+- [x] **M6-002 实现 range merge、lease 与幂等**（依赖：M1-007、M6-001）— 合并重叠 source ranges，绑定 revision watermark 和 fencing token；重复 job 只产生一个事实结果。
+- [x] **M6-003 实现 memory input manifest 与 provider fake**（依赖：M2-003、M5-006、M6-002）— 记录 source membership、config/prompt version、token 和 payload hash；测试 timeout/malformed/duplicate proposal。
+- [x] **M6-004 实现 proposal validator 与事务提交**（依赖：M6-003）— schema、长度、source coverage、时态、禁止指令和实体引用校验通过后一次性提交。
+- [x] **M6-005 实现 source trust/confidence/conflict/candidate**（依赖：M6-004）— 区分用户陈述、观察、推断和模型提议；冲突保留候选，不用新摘要静默覆盖事实。
+- [x] **M6-006 实现 memory lifecycle**（依赖：M6-005）— 支持 create/update/merge/supersede/invalidate、版本链和可审计 reason；读路径只返回当前有效版本。
+- [x] **M6-007 实现 rolling/daily/weekly summary**（依赖：M6-002—M6-006）— 明确 membership、watermark、覆盖区间和重建规则；防止 summary-of-summary 漂移掩盖 source。
+- [x] **M6-008 实现 embedding chunk/space/shadow rebuild**（依赖：M2-001、M6-006）— embedding space 绑定 provider/model/dimension/version；rebuild 写 shadow，验证后原子切换，不混合空间。
+- [x] **M6-009 实现 Control Bot candidate/forget flow**（依赖：M6-005—M6-008）— 支持查看/确认/拒绝候选与精确 forget；命令输出默认不回显敏感正文。
+- [x] **M6-010 实现递归 reconciliation**（依赖：M1-009、M6-006—M6-009）— edit/delete/forget/purge 使 memory、summary、embedding、context manifest 和缓存失效并可恢复重建。
+- [x] **M6-011 实现 freshness 状态**（依赖：M6-001、M6-010）— 暴露 fresh/stale/rebuilding/blocked；过期时扩大 recent-window 而非伪称最新 memory。
+- [x] **M6-012 完成 restore/erasure 测试并关闭 M6**（依赖：M6-001—M6-011）— one-way erasure replay组件与synthetic restore覆盖已通过；真实backup/restore仍归M8/M9并保持`NOT RUN`。
 
 ### M6 退出门禁
 
-- [ ] 全部触发条件为 OR，补偿扫描能发现漏发任务，重复处理保持幂等。
-- [ ] memory proposal 在 validator 和 transaction 之前不成为可检索事实。
-- [ ] edit/delete/forget/purge 后所有派生层可追踪、可重建且不会复活已删除内容。
+- [x] 全部触发条件为 OR，补偿扫描能发现漏发任务，重复处理保持幂等。
+- [x] memory proposal 在 validator 和 transaction 之前不成为可检索事实。
+- [x] edit/delete/forget/purge 后所有派生层可追踪、可重建且不会复活已删除内容。
+
+### M6 当前证据
+
+- Windows/CPython 3.14.7有286个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；format、Ruff、strict mypy、import boundary、compileall、build artifact、Disclosure与secret scan均为`PASS`。
+- Alembic head为`0007_m6_memory_pipeline`；offline empty→head和M6单步downgrade SQL生成均为`PASS`，并显式验证五个跨表/循环外键的创建与回滚顺序。
+- 本机无Docker，PostgreSQL/Redis migration、role、threshold/retry/expired-lease及durable control integration为`NOT RUN`；由本阶段签名提交的GitLab `m6-memory-pipeline`/`m6-acceptance`验证，精确commit、pipeline和job证据随后写回。
 
 ## 12. M7 — Proactive Pipeline
 
@@ -355,4 +361,4 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ## 17. 下一步
 
-M5已经关闭，当前进入M6 Memory、Summary与Embedding Pipeline，从M6-001异步触发与补偿扫描开始。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
+M6组件实现已经关闭，等待本阶段GitLab service/acceptance精确证据写回后进入M7。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。

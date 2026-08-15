@@ -13,7 +13,7 @@ import redis
 EXPECTED_POSTGRES_MAJOR = "17"
 EXPECTED_VECTOR_VERSION = "0.8.6"
 EXPECTED_REDIS_VERSION = "8.2.8"
-EXPECTED_REVISION = "0006_m5_media_context"
+EXPECTED_REVISION = "0007_m6_memory_pipeline"
 
 
 def _hash(path: Path) -> str:
@@ -66,7 +66,7 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
     return {
         "schema_version": 2,
         "revision": EXPECTED_REVISION,
-        "migration_sha256": _hash(root / "alembic" / "versions" / "0006_m5_media_context.py"),
+        "migration_sha256": _hash(root / "alembic" / "versions" / "0007_m6_memory_pipeline.py"),
         "migration_chain_sha256": {
             "0001_m1_durable_state": _hash(
                 root / "alembic" / "versions" / "0001_m1_durable_state.py"
@@ -86,14 +86,18 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
             "0006_m5_media_context": _hash(
                 root / "alembic" / "versions" / "0006_m5_media_context.py"
             ),
+            "0007_m6_memory_pipeline": _hash(
+                root / "alembic" / "versions" / "0007_m6_memory_pipeline.py"
+            ),
         },
-        "roles_sha256": _hash(root / "deploy" / "postgres" / "m5_roles.sql"),
+        "roles_sha256": _hash(root / "deploy" / "postgres" / "m6_roles.sql"),
         "role_chain_sha256": {
             "m1": _hash(root / "deploy" / "postgres" / "m1_roles.sql"),
             "m2": _hash(root / "deploy" / "postgres" / "m2_roles.sql"),
             "m3": _hash(root / "deploy" / "postgres" / "m3_roles.sql"),
             "m4": _hash(root / "deploy" / "postgres" / "m4_roles.sql"),
             "m5": _hash(root / "deploy" / "postgres" / "m5_roles.sql"),
+            "m6": _hash(root / "deploy" / "postgres" / "m6_roles.sql"),
         },
         "table_count": len(tables),
         "tables": [row[0] for row in tables],

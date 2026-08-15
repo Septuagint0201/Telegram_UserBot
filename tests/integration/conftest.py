@@ -99,6 +99,8 @@ def migrated_database(postgres_dsn: str) -> Iterator[str]:
         command.upgrade(config, "head")
         command.downgrade(config, "0005_m4_control_result")
         command.upgrade(config, "head")
+        command.downgrade(config, "0006_m5_media_context")
+        command.upgrade(config, "head")
 
         sync_dsn = postgres_dsn.replace("postgresql+psycopg://", "postgresql://", 1)
         role_scripts = (
@@ -107,6 +109,7 @@ def migrated_database(postgres_dsn: str) -> Iterator[str]:
             (ROOT / "deploy" / "postgres" / "m3_roles.sql").read_text(encoding="utf-8"),
             (ROOT / "deploy" / "postgres" / "m4_roles.sql").read_text(encoding="utf-8"),
             (ROOT / "deploy" / "postgres" / "m5_roles.sql").read_text(encoding="utf-8"),
+            (ROOT / "deploy" / "postgres" / "m6_roles.sql").read_text(encoding="utf-8"),
         )
         with psycopg.connect(sync_dsn, autocommit=True) as connection:
             for role_script in role_scripts:

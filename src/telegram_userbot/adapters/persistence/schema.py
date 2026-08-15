@@ -2581,3 +2581,943 @@ M5_TABLES = tuple(
     and name not in M3_TABLES
     and name not in M4_TABLES
 )
+
+# M6 owns the asynchronous memory, summary, review, and embedding state.  These
+# definitions intentionally follow the M5 snapshot so historical migrations do
+# not attempt to create future tables.
+memory_jobs = Table(
+    "memory_jobs",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("job_kind", Text, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("job_version", BigInteger, nullable=False, server_default=text("1")),
+    Column("range_start_event_id", BigInteger, nullable=False),
+    Column("range_end_event_id", BigInteger, nullable=False),
+    Column("eligible_revision_count", Integer, nullable=False, server_default=text("0")),
+    Column("estimated_input_tokens", Integer, nullable=False, server_default=text("0")),
+    Column("completed_turn_watermark", UUID_TYPE),
+    Column("idempotency_key", LargeBinary, nullable=False),
+    Column("quiet_until", UTC_TIMESTAMP, nullable=False),
+    Column("hard_due_at", UTC_TIMESTAMP, nullable=False),
+    Column("pipeline_version", Text, nullable=False),
+    Column("policy_version", Text, nullable=False),
+    Column("prompt_version", Text, nullable=False),
+    Column("input_schema_version", SmallInteger, nullable=False),
+    Column("output_schema_version", SmallInteger, nullable=False),
+    Column("input_manifest_id", UUID_TYPE),
+    Column("sealed_at", UTC_TIMESTAMP),
+    Column("background_job_id", UUID_TYPE),
+    Column("lease_owner", UUID_TYPE),
+    Column("lease_expires_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("completed_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_jobs_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_memory_jobs_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["background_job_id"], ["background_jobs.id"], name="fk_memory_jobs_background_job"
+    ),
+    CheckConstraint(
+        "job_kind IN ('episode','rolling_summary','consolidation','reconciliation')",
+        name="job_kind_values",
+    ),
+    CheckConstraint(
+        "state IN ('pending','leased','running','succeeded','retry_wait','dead_letter',"
+        "'cancelled')",
+        name="state_values",
+    ),
+    CheckConstraint("generation > 0 AND job_version > 0", name="generation_positive"),
+    CheckConstraint("range_end_event_id >= range_start_event_id", name="range_values"),
+    CheckConstraint(
+        "eligible_revision_count >= 0 AND estimated_input_tokens >= 0",
+        name="estimates_nonnegative",
+    ),
+    CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_key_32_bytes"),
+    CheckConstraint(
+        "input_schema_version > 0 AND output_schema_version > 0",
+        name="schema_versions_positive",
+    ),
+    CheckConstraint(
+        "(sealed_at IS NULL AND input_manifest_id IS NULL) OR "
+        "(sealed_at IS NOT NULL AND input_manifest_id IS NOT NULL)",
+        name="seal_pointer_matches",
+    ),
+    CheckConstraint(
+        "(state IN ('leased','running') AND lease_owner IS NOT NULL AND "
+        "lease_expires_at IS NOT NULL) OR "
+        "(state NOT IN ('leased','running') AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+        name="lease_fields_match",
+    ),
+    UniqueConstraint("account_id", "idempotency_key", name="uq_memory_jobs_idempotency"),
+    UniqueConstraint("conversation_id", "job_kind", "generation", name="uq_memory_jobs_generation"),
+)
+Index(
+    "ix_memory_jobs_pending_due",
+    memory_jobs.c.conversation_id,
+    memory_jobs.c.job_kind,
+    memory_jobs.c.state,
+    memory_jobs.c.quiet_until,
+    memory_jobs.c.hard_due_at,
+    postgresql_where=memory_jobs.c.state.in_(("pending", "retry_wait")),
+)
+Index(
+    "uq_memory_jobs_pending",
+    memory_jobs.c.conversation_id,
+    memory_jobs.c.job_kind,
+    unique=True,
+    postgresql_where=memory_jobs.c.state == "pending",
+)
+
+memory_input_manifests = Table(
+    "memory_input_manifests",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("memory_job_id", UUID_TYPE, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("manifest_kind", Text, nullable=False),
+    Column("range_start_event_id", BigInteger, nullable=False),
+    Column("range_end_event_id", BigInteger, nullable=False),
+    Column("pipeline_version", Text, nullable=False),
+    Column("policy_version", Text, nullable=False),
+    Column("prompt_version", Text, nullable=False),
+    Column("input_schema_version", SmallInteger, nullable=False),
+    Column("output_schema_version", SmallInteger, nullable=False),
+    Column("model_config_version_id", UUID_TYPE),
+    Column("credential_version_id", UUID_TYPE),
+    Column("timezone_snapshot", Text),
+    Column("input_token_estimate", Integer, nullable=False),
+    Column("image_count", Integer, nullable=False),
+    Column("manifest_sha256", LargeBinary, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_input_manifests_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_memory_input_manifests_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["memory_job_id"], ["memory_jobs.id"], name="fk_memory_input_manifests_job"
+    ),
+    ForeignKeyConstraint(
+        ["model_config_version_id"],
+        ["model_config_versions.id"],
+        name="fk_memory_input_manifests_model_config",
+    ),
+    ForeignKeyConstraint(
+        ["credential_version_id"],
+        ["model_credential_versions.id"],
+        name="fk_memory_input_manifests_credential",
+    ),
+    CheckConstraint(
+        "manifest_kind IN ('episode','rolling_summary','consolidation','reconciliation')",
+        name="manifest_kind_values",
+    ),
+    CheckConstraint(
+        "generation > 0 AND range_end_event_id >= range_start_event_id", name="range_values"
+    ),
+    CheckConstraint(
+        "input_schema_version > 0 AND output_schema_version > 0 AND "
+        "input_token_estimate >= 0 AND image_count >= 0",
+        name="manifest_estimates_valid",
+    ),
+    CheckConstraint("octet_length(manifest_sha256) = 32", name="manifest_hash_32_bytes"),
+    UniqueConstraint("memory_job_id", "generation", name="uq_memory_input_manifests_generation"),
+    UniqueConstraint(
+        "account_id",
+        "manifest_sha256",
+        "pipeline_version",
+        "prompt_version",
+        "output_schema_version",
+        name="uq_memory_input_manifests_identity",
+    ),
+)
+memory_jobs.append_constraint(
+    ForeignKeyConstraint(
+        ["input_manifest_id"],
+        ["memory_input_manifests.id"],
+        name="fk_memory_jobs_input_manifest",
+        use_alter=True,
+        deferrable=True,
+        initially="DEFERRED",
+    )
+)
+
+memory_input_manifest_items = Table(
+    "memory_input_manifest_items",
+    metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("manifest_id", UUID_TYPE, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("message_revision_id", UUID_TYPE),
+    Column("media_object_id", UUID_TYPE),
+    Column("memory_version_id", UUID_TYPE),
+    Column("summary_version_id", UUID_TYPE),
+    Column("inclusion_role", Text, nullable=False),
+    Column("trust_class", Text, nullable=False),
+    Column("source_content_sha256", LargeBinary, nullable=False),
+    Column("selection_reason_code", Text, nullable=False),
+    ForeignKeyConstraint(
+        ["manifest_id"], ["memory_input_manifests.id"], name="fk_memory_manifest_items_manifest"
+    ),
+    ForeignKeyConstraint(
+        ["message_revision_id"],
+        ["message_revisions.id"],
+        name="fk_memory_manifest_items_message_revision",
+    ),
+    ForeignKeyConstraint(
+        ["media_object_id"], ["media_objects.id"], name="fk_memory_manifest_items_media"
+    ),
+    CheckConstraint("ordinal > 0", name="ordinal_positive"),
+    CheckConstraint(
+        "source_type IN ('message_revision','media_object','memory_version','summary_version')",
+        name="source_type_values",
+    ),
+    CheckConstraint(
+        "inclusion_role IN ('episode','supporting','related_current','prior_summary','profile')",
+        name="inclusion_role_values",
+    ),
+    CheckConstraint(
+        "((source_type = 'message_revision' AND message_revision_id IS NOT NULL AND "
+        "media_object_id IS NULL AND memory_version_id IS NULL AND summary_version_id IS NULL) OR "
+        "(source_type = 'media_object' AND media_object_id IS NOT NULL AND "
+        "message_revision_id IS NULL AND memory_version_id IS NULL AND "
+        "summary_version_id IS NULL) OR "
+        "(source_type = 'memory_version' AND memory_version_id IS NOT NULL AND "
+        "message_revision_id IS NULL AND media_object_id IS NULL AND "
+        "summary_version_id IS NULL) OR "
+        "(source_type = 'summary_version' AND summary_version_id IS NOT NULL AND "
+        "message_revision_id IS NULL AND media_object_id IS NULL AND memory_version_id IS NULL))",
+        name="typed_source_matches",
+    ),
+    CheckConstraint("octet_length(source_content_sha256) = 32", name="source_hash_32_bytes"),
+    UniqueConstraint("manifest_id", "ordinal", name="uq_memory_manifest_items_ordinal"),
+)
+Index(
+    "ix_memory_manifest_items_message_revision", memory_input_manifest_items.c.message_revision_id
+)
+Index(
+    "ix_memory_manifest_items_memory_version",
+    memory_input_manifest_items.c.memory_version_id,
+    postgresql_where=memory_input_manifest_items.c.memory_version_id.is_not(None),
+)
+
+memory_watermarks = Table(
+    "memory_watermarks",
+    metadata,
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("watermark_kind", Text, nullable=False),
+    Column("last_scanned_event_id", BigInteger, nullable=False, server_default=text("0")),
+    Column(
+        "last_contiguous_decided_event_id", BigInteger, nullable=False, server_default=text("0")
+    ),
+    Column("last_succeeded_job_id", UUID_TYPE),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    PrimaryKeyConstraint("conversation_id", "watermark_kind", name="pk_memory_watermarks"),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_watermarks_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_memory_watermarks_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["last_succeeded_job_id"], ["memory_jobs.id"], name="fk_memory_watermarks_job"
+    ),
+    CheckConstraint("watermark_kind IN ('episode','reconciliation')", name="kind_values"),
+    CheckConstraint(
+        "last_scanned_event_id >= 0 AND last_contiguous_decided_event_id >= 0 AND "
+        "last_contiguous_decided_event_id <= last_scanned_event_id AND version > 0",
+        name="watermark_values",
+    ),
+)
+
+memories = Table(
+    "memories",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE),
+    Column("conversation_id", UUID_TYPE),
+    Column("memory_type", Text, nullable=False),
+    Column("semantic_key_hash", LargeBinary, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("current_version_no", Integer, nullable=False),
+    Column("superseded_by_memory_id", UUID_TYPE),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("forgotten_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memories_account"),
+    ForeignKeyConstraint(
+        ["contact_id", "account_id"],
+        ["contacts.id", "contacts.account_id"],
+        name="fk_memories_contact_scope",
+    ),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_memories_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["superseded_by_memory_id", "account_id"],
+        ["memories.id", "memories.account_id"],
+        name="fk_memories_superseded_by_scope",
+    ),
+    CheckConstraint(
+        "memory_type IN ('identity','relationship','fact','preference','event',"
+        "'intention','style')",
+        name="memory_type_values",
+    ),
+    CheckConstraint(
+        "status IN ('active','superseded','invalidated','forgotten')", name="status_values"
+    ),
+    CheckConstraint("current_version_no > 0", name="version_positive"),
+    CheckConstraint("octet_length(semantic_key_hash) = 32", name="semantic_hash_32_bytes"),
+    CheckConstraint("contact_id IS NOT NULL OR conversation_id IS NULL", name="scope_values"),
+    UniqueConstraint("id", "account_id", name="uq_memories_id_account"),
+)
+Index(
+    "ix_memories_active_semantic_key",
+    memories.c.account_id,
+    memories.c.contact_id,
+    memories.c.memory_type,
+    memories.c.semantic_key_hash,
+    postgresql_where=memories.c.status == "active",
+)
+
+memory_versions = Table(
+    "memory_versions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("memory_id", UUID_TYPE, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("operation", Text, nullable=False),
+    Column("payload_schema_version", SmallInteger, nullable=False),
+    Column("payload", JSONB, nullable=False),
+    Column("rendered_text", Text),
+    Column("importance", Numeric(5, 4), nullable=False),
+    Column("confidence", Numeric(5, 4), nullable=False),
+    Column("observed_at", UTC_TIMESTAMP),
+    Column("valid_from", UTC_TIMESTAMP),
+    Column("valid_to", UTC_TIMESTAMP),
+    Column("time_precision", Text, nullable=False),
+    Column("timezone", Text),
+    Column("model_run_id", UUID_TYPE),
+    Column("model_role", Text),
+    Column("prompt_version", Text),
+    Column("validator_policy_version", Text, nullable=False),
+    Column("acceptance_kind", Text, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("redacted_at", UTC_TIMESTAMP),
+    Column("redaction_reason", Text),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_versions_account"),
+    ForeignKeyConstraint(
+        ["memory_id", "account_id"],
+        ["memories.id", "memories.account_id"],
+        name="fk_memory_versions_memory_scope",
+    ),
+    ForeignKeyConstraint(["model_run_id"], ["model_runs.id"], name="fk_memory_versions_model_run"),
+    CheckConstraint(
+        "operation IN ('create','update','merge','supersede','invalidate')", name="operation_values"
+    ),
+    CheckConstraint("payload_schema_version > 0", name="payload_schema_positive"),
+    CheckConstraint(
+        "importance BETWEEN 0 AND 1 AND confidence BETWEEN 0 AND 1", name="scores_range"
+    ),
+    CheckConstraint(
+        "time_precision IN ('exact','day','week','month','relative','unknown')",
+        name="time_precision_values",
+    ),
+    CheckConstraint(
+        "valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from", name="valid_interval"
+    ),
+    CheckConstraint(
+        "(model_run_id IS NULL AND model_role IS NULL) OR "
+        "(model_run_id IS NOT NULL AND model_role = 'memory_agent')",
+        name="model_role_values",
+    ),
+    CheckConstraint(
+        "acceptance_kind IN ('automatic','manual','reconciliation','migration')",
+        name="acceptance_values",
+    ),
+    UniqueConstraint("memory_id", "version_no", name="uq_memory_versions_no"),
+    UniqueConstraint("id", "account_id", name="uq_memory_versions_id_account"),
+)
+memories.append_constraint(
+    ForeignKeyConstraint(
+        ["id", "account_id", "current_version_no"],
+        ["memory_versions.memory_id", "memory_versions.account_id", "memory_versions.version_no"],
+        name="fk_memories_current_version",
+        use_alter=True,
+        deferrable=True,
+        initially="DEFERRED",
+    )
+)
+
+memory_proposals = Table(
+    "memory_proposals",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE),
+    Column("conversation_id", UUID_TYPE),
+    Column("memory_job_id", UUID_TYPE, nullable=False),
+    Column("model_run_id", UUID_TYPE, nullable=False),
+    Column("model_role", Text, nullable=False, server_default=text("'memory_agent'")),
+    Column("idempotency_key", LargeBinary, nullable=False),
+    Column("proposal_ordinal", Integer, nullable=False),
+    Column("operation", Text, nullable=False),
+    Column("memory_type", Text, nullable=False),
+    Column("semantic_key_hash", LargeBinary, nullable=False),
+    Column("payload_schema_version", SmallInteger, nullable=False),
+    Column("proposed_payload", JSONB, nullable=False),
+    Column("proposed_text", Text),
+    Column("proposed_confidence", Numeric(5, 4), nullable=False),
+    Column("proposed_importance", Numeric(5, 4), nullable=False),
+    Column("proposed_valid_from", UTC_TIMESTAMP),
+    Column("proposed_valid_to", UTC_TIMESTAMP),
+    Column("visual_only", Boolean, nullable=False, server_default=text("false")),
+    Column("state", Text, nullable=False),
+    Column("validation_code", Text),
+    Column("validator_policy_version", Text, nullable=False),
+    Column("accepted_memory_version_id", UUID_TYPE),
+    Column("decision_actor_type", Text),
+    Column("decision_actor_id", Text),
+    Column("decision_reason_code", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("decided_at", UTC_TIMESTAMP),
+    Column("retention_class", Text, nullable=False),
+    Column("expires_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_proposals_account"),
+    ForeignKeyConstraint(["memory_job_id"], ["memory_jobs.id"], name="fk_memory_proposals_job"),
+    ForeignKeyConstraint(["model_run_id"], ["model_runs.id"], name="fk_memory_proposals_model_run"),
+    ForeignKeyConstraint(
+        ["accepted_memory_version_id"],
+        ["memory_versions.id"],
+        name="fk_memory_proposals_accepted_version",
+    ),
+    CheckConstraint("model_role = 'memory_agent'", name="model_role_values"),
+    CheckConstraint("proposal_ordinal >= 0", name="proposal_ordinal_nonnegative"),
+    CheckConstraint(
+        "octet_length(idempotency_key) = 32 AND octet_length(semantic_key_hash) = 32",
+        name="proposal_hashes_32_bytes",
+    ),
+    CheckConstraint(
+        "proposed_confidence BETWEEN 0 AND 1 AND proposed_importance BETWEEN 0 AND 1",
+        name="scores_range",
+    ),
+    CheckConstraint(
+        "state IN ('received','validating','accepted','rejected','candidate','error',"
+        "'invalidated','expired')",
+        name="state_values",
+    ),
+    CheckConstraint(
+        "operation IN ('create','update','merge','supersede','invalidate')", name="operation_values"
+    ),
+    CheckConstraint(
+        "memory_type IN "
+        "('identity','relationship','fact','preference','event','intention','style')",
+        name="memory_type_values",
+    ),
+    UniqueConstraint("account_id", "idempotency_key", name="uq_memory_proposals_idempotency"),
+    UniqueConstraint("model_run_id", "proposal_ordinal", name="uq_memory_proposals_run_ordinal"),
+)
+Index(
+    "ix_memory_proposals_state_expires",
+    memory_proposals.c.state,
+    memory_proposals.c.expires_at,
+)
+
+memory_proposal_targets = Table(
+    "memory_proposal_targets",
+    metadata,
+    Column("proposal_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("target_memory_id", UUID_TYPE, nullable=False),
+    Column("target_version_no_snapshot", Integer, nullable=False),
+    Column("target_role", Text, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    PrimaryKeyConstraint(
+        "proposal_id", "target_memory_id", "target_role", name="pk_memory_proposal_targets"
+    ),
+    ForeignKeyConstraint(
+        ["proposal_id"], ["memory_proposals.id"], name="fk_memory_proposal_targets_proposal"
+    ),
+    ForeignKeyConstraint(
+        ["target_memory_id", "account_id"],
+        ["memories.id", "memories.account_id"],
+        name="fk_memory_proposal_targets_memory_scope",
+    ),
+    CheckConstraint("target_version_no_snapshot > 0", name="target_version_positive"),
+    CheckConstraint(
+        "target_role IN ('primary','merge_source','superseded','invalidated')",
+        name="target_role_values",
+    ),
+)
+Index("ix_memory_proposal_targets_memory", memory_proposal_targets.c.target_memory_id)
+
+memory_proposal_evidence = Table(
+    "memory_proposal_evidence",
+    metadata,
+    Column("proposal_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("message_revision_id", UUID_TYPE, nullable=False),
+    Column("media_object_id", UUID_TYPE),
+    Column("evidence_role", Text, nullable=False),
+    Column("quoted_span_start", Integer),
+    Column("quoted_span_end", Integer),
+    Column("source_content_sha256", LargeBinary, nullable=False),
+    Column("source_normalization_version", Text, nullable=False),
+    Column("trust_class", Text, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    PrimaryKeyConstraint(
+        "proposal_id", "message_revision_id", "evidence_role", name="pk_memory_proposal_evidence"
+    ),
+    ForeignKeyConstraint(
+        ["proposal_id"], ["memory_proposals.id"], name="fk_memory_proposal_evidence_proposal"
+    ),
+    ForeignKeyConstraint(
+        ["message_revision_id"],
+        ["message_revisions.id"],
+        name="fk_memory_proposal_evidence_revision",
+    ),
+    ForeignKeyConstraint(
+        ["media_object_id"], ["media_objects.id"], name="fk_memory_proposal_evidence_media"
+    ),
+    CheckConstraint(
+        "quoted_span_start IS NULL OR quoted_span_start >= 0", name="span_start_nonnegative"
+    ),
+    CheckConstraint(
+        "quoted_span_end IS NULL OR quoted_span_end > quoted_span_start", name="span_end_valid"
+    ),
+    CheckConstraint("octet_length(source_content_sha256) = 32", name="source_hash_32_bytes"),
+)
+Index("ix_memory_proposal_evidence_revision", memory_proposal_evidence.c.message_revision_id)
+
+memory_evidence = Table(
+    "memory_evidence",
+    metadata,
+    Column("memory_version_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("message_revision_id", UUID_TYPE),
+    Column("summary_version_id", UUID_TYPE),
+    Column("other_memory_version_id", UUID_TYPE),
+    Column("media_object_id", UUID_TYPE),
+    Column("evidence_role", Text, nullable=False),
+    Column("trust_class", Text, nullable=False),
+    Column("source_content_sha256", LargeBinary, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    PrimaryKeyConstraint(
+        "memory_version_id", "evidence_role", "source_content_sha256", name="pk_memory_evidence"
+    ),
+    ForeignKeyConstraint(
+        ["memory_version_id"], ["memory_versions.id"], name="fk_memory_evidence_version"
+    ),
+    ForeignKeyConstraint(
+        ["message_revision_id"], ["message_revisions.id"], name="fk_memory_evidence_revision"
+    ),
+    ForeignKeyConstraint(
+        ["summary_version_id"], ["summary_versions.id"], name="fk_memory_evidence_summary"
+    ),
+    ForeignKeyConstraint(
+        ["other_memory_version_id"], ["memory_versions.id"], name="fk_memory_evidence_other_version"
+    ),
+    ForeignKeyConstraint(
+        ["media_object_id"], ["media_objects.id"], name="fk_memory_evidence_media"
+    ),
+    CheckConstraint(
+        "num_nonnulls(message_revision_id, summary_version_id, other_memory_version_id) = 1",
+        name="exactly_one_source",
+    ),
+    CheckConstraint(
+        "media_object_id IS NULL OR message_revision_id IS NOT NULL", name="media_requires_message"
+    ),
+    CheckConstraint("octet_length(source_content_sha256) = 32", name="source_hash_32_bytes"),
+)
+Index(
+    "ix_memory_evidence_message_revision",
+    memory_evidence.c.message_revision_id,
+    postgresql_where=memory_evidence.c.message_revision_id.is_not(None),
+)
+Index(
+    "ix_memory_evidence_media",
+    memory_evidence.c.media_object_id,
+    postgresql_where=memory_evidence.c.media_object_id.is_not(None),
+)
+
+memory_relations = Table(
+    "memory_relations",
+    metadata,
+    Column("from_version_id", UUID_TYPE, nullable=False),
+    Column("to_version_id", UUID_TYPE, nullable=False),
+    Column("relation_type", Text, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    PrimaryKeyConstraint(
+        "from_version_id", "to_version_id", "relation_type", name="pk_memory_relations"
+    ),
+    ForeignKeyConstraint(
+        ["from_version_id"], ["memory_versions.id"], name="fk_memory_relations_from"
+    ),
+    ForeignKeyConstraint(["to_version_id"], ["memory_versions.id"], name="fk_memory_relations_to"),
+    CheckConstraint("from_version_id <> to_version_id", name="not_self_relation"),
+    CheckConstraint(
+        "relation_type IN ('supports','contradicts','derived_from','merges','supersedes')",
+        name="relation_values",
+    ),
+)
+
+summaries = Table(
+    "summaries",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("summary_kind", Text, nullable=False),
+    Column("period_key", Text),
+    Column("timezone_snapshot", Text),
+    Column("period_start_at", UTC_TIMESTAMP),
+    Column("period_end_at", UTC_TIMESTAMP),
+    Column("status", Text, nullable=False),
+    Column("current_version_no", Integer, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_summaries_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_summaries_conversation_scope",
+    ),
+    CheckConstraint(
+        "summary_kind IN ('rolling','daily','weekly','consolidated')", name="kind_values"
+    ),
+    CheckConstraint("status IN ('active','quarantined','invalidated')", name="status_values"),
+    CheckConstraint("current_version_no > 0", name="version_positive"),
+    UniqueConstraint("conversation_id", "summary_kind", "period_key", name="uq_summaries_identity"),
+    UniqueConstraint("id", "account_id", name="uq_summaries_id_account"),
+)
+
+summary_versions = Table(
+    "summary_versions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("summary_id", UUID_TYPE, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("range_start_event_id", BigInteger, nullable=False),
+    Column("range_end_event_id", BigInteger, nullable=False),
+    Column("period_start_at", UTC_TIMESTAMP),
+    Column("period_end_at", UTC_TIMESTAMP),
+    Column("timezone_snapshot", Text),
+    Column("content_text", Text),
+    Column("content_sha256", LargeBinary),
+    Column("model_run_id", UUID_TYPE),
+    Column("model_role", Text),
+    Column("prompt_version", Text),
+    Column("pipeline_version", Text, nullable=False),
+    Column("output_schema_version", SmallInteger, nullable=False),
+    Column("manifest_sha256", LargeBinary, nullable=False),
+    Column("invalidation_state", Text, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("redacted_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_summary_versions_account"),
+    ForeignKeyConstraint(
+        ["summary_id", "account_id"],
+        ["summaries.id", "summaries.account_id"],
+        name="fk_summary_versions_summary_scope",
+    ),
+    ForeignKeyConstraint(["model_run_id"], ["model_runs.id"], name="fk_summary_versions_model_run"),
+    CheckConstraint(
+        "version_no > 0 AND range_end_event_id >= range_start_event_id", name="version_range_values"
+    ),
+    CheckConstraint(
+        "model_run_id IS NULL OR model_role = 'memory_agent'", name="model_role_values"
+    ),
+    CheckConstraint(
+        "invalidation_state IN ('active','quarantined','invalidated')", name="invalidation_values"
+    ),
+    CheckConstraint(
+        "content_text IS NULL OR octet_length(content_sha256) = 32", name="content_hash_matches"
+    ),
+    CheckConstraint("octet_length(manifest_sha256) = 32", name="manifest_hash_32_bytes"),
+    UniqueConstraint("summary_id", "version_no", name="uq_summary_versions_no"),
+    UniqueConstraint("id", "account_id", name="uq_summary_versions_id_account"),
+)
+summaries.append_constraint(
+    ForeignKeyConstraint(
+        ["id", "account_id", "current_version_no"],
+        [
+            "summary_versions.summary_id",
+            "summary_versions.account_id",
+            "summary_versions.version_no",
+        ],
+        name="fk_summaries_current_version",
+        use_alter=True,
+        deferrable=True,
+        initially="DEFERRED",
+    )
+)
+
+summary_version_sources = Table(
+    "summary_version_sources",
+    metadata,
+    Column("summary_version_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("message_revision_id", UUID_TYPE),
+    Column("prior_summary_version_id", UUID_TYPE),
+    Column("inclusion_role", Text, nullable=False),
+    Column("source_content_sha256", LargeBinary, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    PrimaryKeyConstraint("summary_version_id", "ordinal", name="pk_summary_version_sources"),
+    ForeignKeyConstraint(
+        ["summary_version_id", "account_id"],
+        ["summary_versions.id", "summary_versions.account_id"],
+        name="fk_summary_sources_version_scope",
+    ),
+    ForeignKeyConstraint(
+        ["message_revision_id"], ["message_revisions.id"], name="fk_summary_sources_revision"
+    ),
+    ForeignKeyConstraint(
+        ["prior_summary_version_id"], ["summary_versions.id"], name="fk_summary_sources_prior"
+    ),
+    CheckConstraint(
+        "num_nonnulls(message_revision_id, prior_summary_version_id) = 1", name="exactly_one_source"
+    ),
+    CheckConstraint("ordinal > 0", name="ordinal_positive"),
+    CheckConstraint("octet_length(source_content_sha256) = 32", name="source_hash_32_bytes"),
+)
+Index("ix_summary_version_sources_revision", summary_version_sources.c.message_revision_id)
+Index("ix_summary_version_sources_prior", summary_version_sources.c.prior_summary_version_id)
+
+summary_watermarks = Table(
+    "summary_watermarks",
+    metadata,
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("summary_kind", Text, nullable=False),
+    Column("last_included_event_id", BigInteger, nullable=False, server_default=text("0")),
+    Column("last_summary_version_id", UUID_TYPE),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    PrimaryKeyConstraint("conversation_id", "summary_kind", name="pk_summary_watermarks"),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_summary_watermarks_account"),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_summary_watermarks_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["last_summary_version_id"], ["summary_versions.id"], name="fk_summary_watermarks_version"
+    ),
+    CheckConstraint(
+        "summary_kind IN ('rolling','daily','weekly','consolidated')", name="kind_values"
+    ),
+    CheckConstraint("last_included_event_id >= 0 AND version > 0", name="watermark_values"),
+)
+
+memory_input_manifest_items.append_constraint(
+    ForeignKeyConstraint(
+        ["memory_version_id"],
+        ["memory_versions.id"],
+        name="fk_memory_manifest_items_memory_version",
+        use_alter=True,
+    )
+)
+memory_input_manifest_items.append_constraint(
+    ForeignKeyConstraint(
+        ["summary_version_id"],
+        ["summary_versions.id"],
+        name="fk_memory_manifest_items_summary_version",
+        use_alter=True,
+    )
+)
+
+embedding_spaces = Table(
+    "embedding_spaces",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE),
+    Column("model_profile_id", UUID_TYPE, nullable=False),
+    Column("profile_kind", Text, nullable=False, server_default=text("'embedding'")),
+    Column("config_version_id", UUID_TYPE, nullable=False),
+    Column("model_name_snapshot", Text, nullable=False),
+    Column("dimensions", Integer, nullable=False),
+    Column("distance_metric", Text, nullable=False),
+    Column("normalization", Text, nullable=False),
+    Column("chunker_version", Text, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("activated_at", UTC_TIMESTAMP),
+    Column("retired_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_embedding_spaces_account"),
+    ForeignKeyConstraint(
+        ["model_profile_id", "profile_kind"],
+        ["model_profiles.id", "model_profiles.profile_kind"],
+        name="fk_embedding_spaces_profile_kind",
+    ),
+    ForeignKeyConstraint(
+        ["config_version_id", "model_profile_id"],
+        ["model_config_versions.id", "model_config_versions.profile_id"],
+        name="fk_embedding_spaces_config_profile",
+    ),
+    CheckConstraint("profile_kind = 'embedding'", name="profile_kind_values"),
+    CheckConstraint("dimensions > 0 AND generation > 0", name="space_positive"),
+    CheckConstraint("distance_metric IN ('cosine','inner_product','l2')", name="distance_values"),
+    CheckConstraint("normalization IN ('none','l2')", name="normalization_values"),
+    CheckConstraint("state IN ('building','active','retired','failed')", name="state_values"),
+    UniqueConstraint("id", "dimensions", name="uq_embedding_spaces_id_dimensions"),
+)
+Index(
+    "uq_embedding_spaces_active",
+    embedding_spaces.c.model_profile_id,
+    embedding_spaces.c.account_id,
+    unique=True,
+    postgresql_where=embedding_spaces.c.state == "active",
+    postgresql_nulls_not_distinct=True,
+)
+
+embedding_records = Table(
+    "embedding_records",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE),
+    Column("embedding_space_id", UUID_TYPE, nullable=False),
+    Column("memory_version_id", UUID_TYPE),
+    Column("summary_version_id", UUID_TYPE),
+    Column("message_revision_id", UUID_TYPE),
+    Column("chunk_index", Integer, nullable=False),
+    Column("chunker_version", Text, nullable=False),
+    Column("source_sha256", LargeBinary, nullable=False),
+    Column("vector_payload", JSONB, nullable=False),
+    Column("dimensions", Integer, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("invalidated_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_embedding_records_account"),
+    ForeignKeyConstraint(
+        ["embedding_space_id", "dimensions"],
+        ["embedding_spaces.id", "embedding_spaces.dimensions"],
+        name="fk_embedding_records_space_dimensions",
+    ),
+    ForeignKeyConstraint(
+        ["memory_version_id"], ["memory_versions.id"], name="fk_embedding_records_memory_version"
+    ),
+    ForeignKeyConstraint(
+        ["summary_version_id"], ["summary_versions.id"], name="fk_embedding_records_summary_version"
+    ),
+    ForeignKeyConstraint(
+        ["message_revision_id"],
+        ["message_revisions.id"],
+        name="fk_embedding_records_message_revision",
+    ),
+    CheckConstraint(
+        "num_nonnulls(memory_version_id, summary_version_id, message_revision_id) = 1",
+        name="exactly_one_target",
+    ),
+    CheckConstraint("chunk_index >= 0 AND dimensions > 0", name="chunk_values"),
+    CheckConstraint("octet_length(source_sha256) = 32", name="source_hash_32_bytes"),
+    CheckConstraint("state IN ('pending','ready','invalidated','failed')", name="state_values"),
+)
+Index(
+    "uq_embedding_records_memory_chunk",
+    embedding_records.c.embedding_space_id,
+    embedding_records.c.memory_version_id,
+    embedding_records.c.chunk_index,
+    unique=True,
+    postgresql_where=embedding_records.c.memory_version_id.is_not(None),
+)
+Index(
+    "uq_embedding_records_summary_chunk",
+    embedding_records.c.embedding_space_id,
+    embedding_records.c.summary_version_id,
+    embedding_records.c.chunk_index,
+    unique=True,
+    postgresql_where=embedding_records.c.summary_version_id.is_not(None),
+)
+Index(
+    "uq_embedding_records_message_chunk",
+    embedding_records.c.embedding_space_id,
+    embedding_records.c.message_revision_id,
+    embedding_records.c.chunk_index,
+    unique=True,
+    postgresql_where=embedding_records.c.message_revision_id.is_not(None),
+)
+Index(
+    "ix_embedding_records_active_target",
+    embedding_records.c.embedding_space_id,
+    embedding_records.c.state,
+    postgresql_where=embedding_records.c.state == "ready",
+)
+
+memory_review_actions = Table(
+    "memory_review_actions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE),
+    Column("action", Text, nullable=False),
+    Column("proposal_id", UUID_TYPE),
+    Column("memory_id", UUID_TYPE),
+    Column("expected_proposal_version", Integer),
+    Column("expected_memory_version", Integer),
+    Column("admin_actor_id", BigInteger, nullable=False),
+    Column("bot_chat_id", BigInteger, nullable=False),
+    Column("action_token_hash", LargeBinary, nullable=False),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("used_at", UTC_TIMESTAMP),
+    Column("state", Text, nullable=False),
+    Column("reason_code", Text),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("decided_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_review_actions_account"),
+    ForeignKeyConstraint(
+        ["proposal_id"], ["memory_proposals.id"], name="fk_memory_review_actions_proposal"
+    ),
+    ForeignKeyConstraint(["memory_id"], ["memories.id"], name="fk_memory_review_actions_memory"),
+    CheckConstraint("action IN ('accept','reject','forget')", name="action_values"),
+    CheckConstraint(
+        "state IN ('pending','confirmed','applied','rejected','expired')", name="state_values"
+    ),
+    CheckConstraint("octet_length(action_token_hash) = 32", name="action_token_hash_32_bytes"),
+    CheckConstraint("proposal_id IS NOT NULL OR memory_id IS NOT NULL", name="target_required"),
+    UniqueConstraint("action_token_hash", name="uq_memory_review_actions_token"),
+)
+Index(
+    "ix_memory_review_actions_open_expiry",
+    memory_review_actions.c.expires_at,
+    postgresql_where=memory_review_actions.c.used_at.is_(None),
+)
+
+M6_TABLES = (
+    "memory_jobs",
+    "memory_input_manifests",
+    "memory_input_manifest_items",
+    "memory_watermarks",
+    "memories",
+    "memory_versions",
+    "memory_proposals",
+    "memory_proposal_targets",
+    "memory_proposal_evidence",
+    "memory_evidence",
+    "memory_relations",
+    "summaries",
+    "summary_versions",
+    "summary_version_sources",
+    "summary_watermarks",
+    "embedding_spaces",
+    "embedding_records",
+    "memory_review_actions",
+)
