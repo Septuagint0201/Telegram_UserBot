@@ -14,6 +14,7 @@ from telegram_userbot.adapters.persistence.engine import (
 from telegram_userbot.adapters.persistence.schema import (
     M1_TABLES,
     M5_TABLES,
+    M6_TABLES,
     memories,
     metadata,
     model_runs,
@@ -130,6 +131,26 @@ def test_m6_current_version_foreign_keys_reference_exact_candidate_keys(
         if isinstance(item, (PrimaryKeyConstraint, UniqueConstraint))
     }
     assert target_columns in candidate_keys
+
+
+@pytest.mark.unit
+def test_m6_table_inventory_is_topological_for_downgrade() -> None:
+    positions = {name: position for position, name in enumerate(M6_TABLES)}
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0007_m6_memory_pipeline.py"
+    ).read_text(encoding="utf-8")
+    for table_name in M6_TABLES:
+        table = metadata.tables[table_name]
+        for constraint in table.constraints:
+            if not isinstance(constraint, ForeignKeyConstraint):
+                continue
+            target_name = constraint.referred_table.name
+            if target_name not in positions or target_name == table_name:
+                continue
+            if constraint.use_alter:
+                assert f'"{constraint.name}"' in migration
+                continue
+            assert positions[target_name] < positions[table_name], constraint.name
 
 
 @pytest.mark.unit
