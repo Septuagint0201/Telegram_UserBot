@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0—M6已经完成。M6已实现异步OR触发、strict proposal/evidence、版本化memory、immutable summary membership、single-space shadow embedding、Control Bot二次确认和one-way erasure replay；签名提交`9be7012edf3aabe1dd5db7a325b0f36efce27063`的GitLab pipeline [#2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)共13个作业全部`PASS`。M7已解锁为下一阶段但尚未开始；默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+V1架构设计与M0—M6已经完成。2026-08-16重新签名全部`main`历史后，M6实现验证基线为签名提交`645fb8da5d5c35de6896825c5f29f22f08d0b168`、tree `e227ac747d85c8aaa38366c8f0aae4621d3e702c`：GitLab pipeline [#2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)的13个作业和GitHub Actions [#31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)的三个门禁均为`PASS`。M7已解锁为下一阶段但尚未开始；默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
@@ -115,7 +115,7 @@ M4的补强已完成：race/acceptance从JUnit stable test ID派生，continuati
 
 M5签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`对应的[GitLab Linux pipeline #2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)共11个作业全部`PASS`：service job执行288个测试并deselect 1个，total coverage 90.68%，同时通过migration、role、browser、acceptance和artifact门禁。真实Telegram/provider、部署、backup/restore与production load保持`NOT RUN`。
 
-M6在Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；Ruff、strict mypy、import boundary、compileall、offline migration SQL、wheel/sdist Disclosure和secret/artifact scan均为`PASS`。签名提交`9be7012edf3aabe1dd5db7a325b0f36efce27063`对应的[GitLab pipeline #2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)共13个作业全部`PASS`：M6 service job执行329个测试并deselect 1个，line coverage 91.98%、branch coverage 84.32%；migration manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。本机无Docker，Windows PostgreSQL/Redis integration仍为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署和真实backup/restore保持`NOT RUN`。
+M6在Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；Ruff、strict mypy、import boundary、compileall、offline migration SQL、wheel/sdist Disclosure和secret/artifact scan均为`PASS`。当前签名基线`645fb8da5d5c35de6896825c5f29f22f08d0b168`已由[GitLab pipeline #2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)的13个作业和[GitHub Actions #31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)验证：GitLab M6 service执行329个测试并deselect 1个，line coverage 91.98%、branch coverage 84.32%；GitHub的preflight、PostgreSQL/Redis integration和Chromium browser contract均为`PASS`。迁移manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。重签前`9be7012edf3aabe1dd5db7a325b0f36efce27063`与[GitLab pipeline #2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)保留为历史证据，不再标识当前`main`。本机无Docker，Windows PostgreSQL/Redis integration仍为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署和真实backup/restore保持`NOT RUN`。
 
 常用本地门禁：
 

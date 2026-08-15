@@ -28,5 +28,6 @@ def test_m6_status_documents_are_consistent() -> None:
     assert "Current artifact status: M0-M6 complete" in disclosure
     assert "no memory pipeline" not in disclosure
     for document in (todo, plan, readme, design, compatibility, disclosure):
-        assert "9be7012edf3aabe1dd5db7a325b0f36efce27063" in document
-        assert "2762159878" in document
+        assert "645fb8da5d5c35de6896825c5f29f22f08d0b168" in document
+        assert "2763001231" in document
+        assert "31907584107" in document

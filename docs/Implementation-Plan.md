@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M6已经取得精确GitLab证据；M6覆盖异步OR触发、strict proposal/evidence、versioned memory、immutable summary membership、single-space shadow embedding、Control Bot二次确认和one-way erasure replay，签名提交`9be7012edf3aabe1dd5db7a325b0f36efce27063`的pipeline [#2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)共13个作业全部`PASS`。M7成为下一阶段但尚未开始；Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M6已经取得精确GitLab证据；2026-08-16重新签名全部`main`历史后，M6的当前基线为签名提交`645fb8da5d5c35de6896825c5f29f22f08d0b168`，GitLab pipeline [#2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)的13个作业与GitHub Actions [#31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)的三个门禁全部`PASS`。M7成为下一阶段但尚未开始；Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -335,7 +335,7 @@ deploy/
 - AI/proactive不能自证联系人事实或human style。
 - Forget/purge/restore erasure全部PASS。
 
-当前状态：COMPLETE。Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；format/Ruff/strict mypy/import boundary、build、Disclosure、secret scan及offline migration SQL为`PASS`。Alembic head为`0007_m6_memory_pipeline`。签名提交`9be7012edf3aabe1dd5db7a325b0f36efce27063`、tree `5e2c7bda8b96ea9bb58e9a5c66f27b22e8fb6a87`的GitLab pipeline [#2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)共13个作业全部`PASS`；M6 service执行329个测试、deselect 1个，line/branch coverage为91.98%/84.32%，migration manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。本机无Docker，Windows PostgreSQL/Redis integration为`NOT RUN`；真实provider、Telegram、backup/restore、部署、load与soak不在M6完成声明内。
+当前状态：COMPLETE。Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；format/Ruff/strict mypy/import boundary、build、Disclosure、secret scan及offline migration SQL为`PASS`。Alembic head为`0007_m6_memory_pipeline`。当前签名提交`645fb8da5d5c35de6896825c5f29f22f08d0b168`、tree `e227ac747d85c8aaa38366c8f0aae4621d3e702c`的GitLab pipeline [#2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)共13个作业全部`PASS`；M6 service执行329个测试、deselect 1个，line/branch coverage为91.98%/84.32%，migration manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。同一提交的GitHub Actions [#31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)通过preflight、PostgreSQL/Redis integration与Chromium browser contract。重签前`9be7012edf3aabe1dd5db7a325b0f36efce27063`和GitLab pipeline #2762159878仅作为历史证据。本机无Docker，Windows PostgreSQL/Redis integration为`NOT RUN`；真实provider、Telegram、backup/restore、部署、load与soak不在M6完成声明内。
 
 ## 12. M7 — Proactive Pipeline
 
