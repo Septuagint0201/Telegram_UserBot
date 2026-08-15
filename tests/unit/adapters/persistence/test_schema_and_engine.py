@@ -3,6 +3,7 @@ from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 import pytest
+from sqlalchemy import ForeignKeyConstraint, PrimaryKeyConstraint, Table, UniqueConstraint
 
 from telegram_userbot.adapters.persistence.engine import (
     DurableStateConfigurationError,
@@ -10,7 +11,14 @@ from telegram_userbot.adapters.persistence.engine import (
     create_postgres_engine,
     schema_is_ready,
 )
-from telegram_userbot.adapters.persistence.schema import M1_TABLES, M5_TABLES, metadata, model_runs
+from telegram_userbot.adapters.persistence.schema import (
+    M1_TABLES,
+    M5_TABLES,
+    memories,
+    metadata,
+    model_runs,
+    summaries,
+)
 
 
 class FakeConnection:
@@ -96,6 +104,32 @@ def test_m1_schema_inventory_and_constraint_names() -> None:
         Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0006_m5_media_context.py"
     ).read_text(encoding="utf-8")
     assert '"fk_model_runs_context_manifest_scope"' in migration
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("table", "foreign_key_name"),
+    [
+        (memories, "fk_memories_current_version"),
+        (summaries, "fk_summaries_current_version"),
+    ],
+)
+def test_m6_current_version_foreign_keys_reference_exact_candidate_keys(
+    table: Table,
+    foreign_key_name: str,
+) -> None:
+    constraint = next(
+        item
+        for item in table.constraints
+        if isinstance(item, ForeignKeyConstraint) and item.name == foreign_key_name
+    )
+    target_columns = tuple(element.column.name for element in constraint.elements)
+    candidate_keys = {
+        tuple(column.name for column in item.columns)
+        for item in constraint.referred_table.constraints
+        if isinstance(item, (PrimaryKeyConstraint, UniqueConstraint))
+    }
+    assert target_columns in candidate_keys
 
 
 @pytest.mark.unit

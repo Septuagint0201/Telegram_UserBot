@@ -2957,8 +2957,8 @@ memory_versions = Table(
 )
 memories.append_constraint(
     ForeignKeyConstraint(
-        ["id", "account_id", "current_version_no"],
-        ["memory_versions.memory_id", "memory_versions.account_id", "memory_versions.version_no"],
+        ["id", "current_version_no"],
+        ["memory_versions.memory_id", "memory_versions.version_no"],
         name="fk_memories_current_version",
         use_alter=True,
         deferrable=True,
@@ -3256,10 +3256,9 @@ summary_versions = Table(
 )
 summaries.append_constraint(
     ForeignKeyConstraint(
-        ["id", "account_id", "current_version_no"],
+        ["id", "current_version_no"],
         [
             "summary_versions.summary_id",
-            "summary_versions.account_id",
             "summary_versions.version_no",
         ],
         name="fk_summaries_current_version",
