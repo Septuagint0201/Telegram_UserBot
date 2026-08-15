@@ -48,7 +48,11 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
             )
         ).mappings()
     }
-    assert {"reason_values", "state_values", "window_values"} <= constraints
+    assert {
+        "ck_proactive_occurrences_reason_values",
+        "ck_proactive_occurrences_state_values",
+        "ck_proactive_occurrences_window_values",
+    } <= constraints
 
 
 @pytest.mark.integration

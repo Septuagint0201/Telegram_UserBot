@@ -12,6 +12,7 @@ from telegram_userbot.adapters.persistence.schema import (
     M4_TABLES,
     M5_TABLES,
     M6_TABLES,
+    M7_TABLES,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 async def test_empty_base_round_trip_reaches_exact_head_and_vector(
     postgres_engine: AsyncEngine,
 ) -> None:
-    assert await schema_is_ready(postgres_engine, "0007_m6_memory_pipeline")
+    assert await schema_is_ready(postgres_engine, "0008_m7_proactive_pipeline")
     async with postgres_engine.connect() as connection:
         tables = await connection.run_sync(lambda sync: set(inspect(sync).get_table_names()))
         version = await connection.scalar(text("SHOW server_version"))
@@ -35,6 +36,7 @@ async def test_empty_base_round_trip_reaches_exact_head_and_vector(
     assert set(M4_TABLES) <= tables
     assert set(M5_TABLES) <= tables
     assert set(M6_TABLES) <= tables
+    assert set(M7_TABLES) <= tables
     assert str(version).startswith("17.")
     assert vector == "0.8.6"
 

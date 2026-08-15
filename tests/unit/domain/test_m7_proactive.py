@@ -18,9 +18,12 @@ from telegram_userbot.domain.proactive.jobs import DueJobState, DurableDueJobSto
 from telegram_userbot.domain.proactive.models import (
     AgentDecision,
     BudgetLimits,
+    BudgetReservation,
     Candidate,
+    CandidateState,
     ContactSettings,
     ProactiveAction,
+    ProactiveContext,
     ProactivePolicy,
     ReasonCode,
     RelationshipLevel,
@@ -52,6 +55,7 @@ from telegram_userbot.domain.proactive.rules import (
 )
 from telegram_userbot.domain.proactive.time import (
     TimePolicyError,
+    load_timezone,
     local_interval_to_utc,
     local_to_utc,
     next_quiet_end,
@@ -560,3 +564,373 @@ def test_m7_model_value_objects_fail_closed_on_invalid_configuration() -> None:
         BudgetLimits(-1, 1)
     with pytest.raises(ValueError, match="idempotency secret is required"):
         derive_key(b"")
+
+
+@pytest.mark.unit
+def test_m7_value_objects_cover_validation_boundaries() -> None:
+    source_id = uuid4()
+    valid_hash = sha256(b"evidence").digest()
+
+    for evidence_changes, message in (
+        ({"source_type": "model"}, "unsupported evidence"),
+        ({"source_version": ""}, "evidence source version"),
+        ({"source_hash": b"short"}, "evidence hash"),
+        ({"summary": ""}, "evidence summary"),
+        ({"summary": "x" * 501}, "evidence summary"),
+    ):
+        values: dict[str, object] = {
+            "source_type": "rule",
+            "source_id": source_id,
+            "source_version": "v1",
+            "source_hash": valid_hash,
+            "summary": "summary",
+        }
+        values.update(evidence_changes)
+        with pytest.raises(ValueError, match=message):
+            TypedEvidence(**values)  # type: ignore[arg-type]
+    assert not replace(evidence(), current=False).valid
+    assert not replace(evidence(), active=False).valid
+
+    with pytest.raises(TypeError, match="version_id"):
+        ProactivePolicy(version_id=cast(Any, "not-a-uuid"))
+    invalid_policy_cases: tuple[tuple[dict[str, object], str], ...] = (
+        ({"version_no": 0}, "version and scan"),
+        ({"scheduler_scan_seconds": 0}, "version and scan"),
+        ({"activity_suppression_seconds": 0}, "activity suppression"),
+        ({"absolute_no_send_start_local": time(1)}, "absolute no-send"),
+        ({"bypass_importance_threshold": float("nan")}, "bypass threshold"),
+        ({"contact_bypass_daily_limit": 2}, "bypass daily"),
+        ({"account_daily_limit": -1}, "daily limits"),
+        ({"close_min_interval": timedelta(0)}, "minimum intervals"),
+        ({"context_contract_version": ""}, "context contract"),
+    )
+    for policy_changes, message in invalid_policy_cases:
+        with pytest.raises(ValueError, match=message):
+            policy(**policy_changes)
+    p = policy(close_daily_limit=2, friend_daily_limit=3, acquaintance_daily_limit=4)
+    assert p.daily_limit(RelationshipLevel.CLOSE) == 2
+    assert p.daily_limit(RelationshipLevel.FRIEND) == 3
+    assert p.daily_limit(RelationshipLevel.UNKNOWN) == 4
+    assert p.minimum_interval(RelationshipLevel.CLOSE) == p.close_min_interval
+    assert p.minimum_interval(RelationshipLevel.FRIEND) == p.friend_min_interval
+    assert p.minimum_interval(RelationshipLevel.UNKNOWN) == p.acquaintance_min_interval
+
+    invalid_contact_cases: tuple[tuple[dict[str, object], str], ...] = (
+        ({"version": 0}, "settings version"),
+        ({"daily_limit": -1}, "contact daily"),
+        ({"minimum_interval": timedelta(0)}, "contact minimum"),
+    )
+    for contact_changes, message in invalid_contact_cases:
+        with pytest.raises(ValueError, match=message):
+            ContactSettings(contact_id=uuid4(), **contact_changes)  # type: ignore[arg-type]
+
+    occurrence = candidate_for().occurrences[0]
+    invalid_occurrences: tuple[tuple[dict[str, object], str], ...] = (
+        ({"occurrence_key": b"short"}, "occurrence identity"),
+        ({"generation": 0}, "occurrence identity"),
+        ({"window_start_at": NOW.replace(tzinfo=None)}, "timezone-aware"),
+        ({"window_end_at": occurrence.window_start_at}, "occurrence window"),
+        (
+            {"hard_deadline_at": occurrence.window_end_at + timedelta(seconds=1)},
+            "occurrence window",
+        ),
+        ({"importance": 2.0}, "importance"),
+        ({"evidence": ()}, "occurrence evidence"),
+        ({"evidence": (replace(occurrence.evidence[0], current=False),)}, "occurrence evidence"),
+        (
+            {"quiet_bypass_possible": True, "reason": ReasonCode.RELATIONSHIP_RECONNECT},
+            "quiet bypass",
+        ),
+    )
+    for occurrence_changes, message in invalid_occurrences:
+        with pytest.raises(ValueError, match=message):
+            replace(occurrence, **occurrence_changes)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="candidate identity"):
+        replace(candidate_for(), candidate_key=b"short")
+    with pytest.raises(ValueError, match="same-contact"):
+        replace(candidate_for(), occurrences=(replace(occurrence, contact_id=uuid4()),))
+    with pytest.raises(ValueError, match="candidate window"):
+        replace(candidate_for(), window_end_at=candidate_for().window_start_at)
+    with pytest.raises(ValueError, match="snapshots"):
+        replace(candidate_for(), mode_version=0)
+
+    valid_id = occurrence.id
+    invalid_decision_cases: tuple[tuple[dict[str, object], str], ...] = (
+        ({"decision_code": "other"}, "allowlisted"),
+        ({"priority": 2.0}, "priority"),
+        ({"topic": ""}, "topic"),
+        ({"topic": "x" * 121}, "topic"),
+        ({"defer_count": 2}, "defer count"),
+        ({"selected_occurrence_ids": (valid_id,), "topic": "x", "priority": 1}, "none decision"),
+        (
+            {"action": ProactiveAction.SEND_NOW, "selected_occurrence_ids": (), "topic": None},
+            "requires",
+        ),
+        (
+            {
+                "action": ProactiveAction.DEFER_ONCE,
+                "selected_occurrence_ids": (valid_id,),
+                "topic": "x",
+            },
+            "defer_once",
+        ),
+        (
+            {
+                "action": ProactiveAction.SEND_NOW,
+                "selected_occurrence_ids": (valid_id,),
+                "topic": "x",
+                "defer_until": NOW,
+            },
+            "only defer_once",
+        ),
+    )
+    for decision_changes, message in invalid_decision_cases:
+        decision_values: dict[str, object] = {
+            "candidate_id": candidate_for().id,
+            "action": ProactiveAction.NONE,
+            "decision_code": "not_natural_now",
+            "selected_occurrence_ids": (),
+            "topic": None,
+            "priority": 0,
+        }
+        decision_values.update(decision_changes)
+        with pytest.raises(ValueError, match=message):
+            AgentDecision(**decision_values)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="reservation identity"):
+        BudgetReservation(
+            uuid4(), b"short", uuid4(), uuid4(), NOW.date(), False, ReservationState.HELD, NOW
+        )
+    with pytest.raises(ValueError, match="proactive context"):
+        ProactiveContext(uuid4(), "", (), "UTC", "", RelationshipLevel.UNKNOWN)
+    with pytest.raises(ValueError, match="unknown context"):
+        ProactiveContext(
+            uuid4(),
+            "topic",
+            (("reason", "evidence"),),
+            "UTC",
+            "",
+            RelationshipLevel.UNKNOWN,
+            "unknown",
+        )
+
+
+@pytest.mark.unit
+def test_m7_preliminary_gate_covers_each_fail_closed_boundary() -> None:
+    candidate = candidate_for()
+    decision = AgentDecision(
+        candidate.id,
+        ProactiveAction.SEND_NOW,
+        "timely_support",
+        (candidate.occurrences[0].id,),
+        "topic",
+        0.5,
+    )
+    base = AuthorizationInput(candidate, decision, NOW, policy(), EffectiveMode.AUTO)
+    cases: tuple[tuple[AuthorizationInput, str], ...] = (
+        (replace(base, decision=replace(decision, candidate_id=uuid4())), "CANDIDATE_MISMATCH"),
+        (
+            replace(
+                base,
+                decision=AgentDecision(
+                    candidate.id, ProactiveAction.NONE, "not_natural_now", (), None, 0
+                ),
+            ),
+            "DECISION_NONE",
+        ),
+        (replace(base, policy=policy(enabled=False)), "POLICY_DISABLED"),
+        (
+            replace(base, candidate=replace(candidate, state=CandidateState.EVALUATED_NONE)),
+            "CANDIDATE_TERMINAL",
+        ),
+        (replace(base, now=candidate.window_end_at), "WINDOW_CLOSED"),
+        (replace(base, operational_ready=False), "CONTROL_BLOCKED"),
+        (replace(base, account_enabled=False), "CONTROL_BLOCKED"),
+        (replace(base, contact_enabled=False), "CONTROL_BLOCKED"),
+        (replace(base, mode=EffectiveMode.HUMAN), "MODE_SUPPRESSED"),
+        (replace(base, evidence_current=False), "EVIDENCE_INVALID"),
+        (replace(base, meaningful_activity_at=NOW - timedelta(seconds=1)), "CONVERSATION_ACTIVE"),
+        (replace(base, conflicting_work=True), "CONFLICTING_WORK"),
+        (replace(base, minimum_interval_ok=False), "MINIMUM_INTERVAL"),
+        (replace(base, budget_available=False), "BUDGET_EXHAUSTED"),
+    )
+    for value, reason in cases:
+        assert preliminary_gate(value).reason == reason
+
+    quiet_now = datetime(2026, 8, 16, 23, 0, tzinfo=UTC)
+    quiet_candidate = candidate_for(now=quiet_now)
+    quiet_base = replace(
+        base,
+        candidate=quiet_candidate,
+        decision=replace(
+            decision,
+            candidate_id=quiet_candidate.id,
+            selected_occurrence_ids=(quiet_candidate.occurrences[0].id,),
+        ),
+        now=quiet_now,
+    )
+    no_bypass = replace(
+        quiet_base,
+        candidate=replace(
+            quiet_candidate,
+            occurrences=(
+                replace(
+                    quiet_candidate.occurrences[0], importance=0.5, quiet_bypass_possible=False
+                ),
+            ),
+        ),
+    )
+    assert preliminary_gate(no_bypass).reason == "QUIET_HOURS"
+    assert (
+        preliminary_gate(
+            quiet_base,
+        ).reason
+        == "AUTHORIZED"
+    )
+    assert (
+        preliminary_gate(replace(quiet_base, bypass_available=False)).reason
+        == "BYPASS_BUDGET_EXHAUSTED"
+    )
+
+    absolute_now = datetime(2026, 8, 16, 3, 0, tzinfo=UTC)
+    absolute_candidate = candidate_for(now=absolute_now)
+    absolute = replace(
+        base,
+        candidate=absolute_candidate,
+        decision=replace(
+            decision,
+            candidate_id=absolute_candidate.id,
+            selected_occurrence_ids=(absolute_candidate.occurrences[0].id,),
+        ),
+        now=absolute_now,
+    )
+    assert preliminary_gate(absolute).reason == "ABSOLUTE_NO_SEND"
+
+
+@pytest.mark.unit
+def test_m7_time_and_quiet_policy_fail_closed_edges() -> None:
+    p = policy()
+    with pytest.raises(TimePolicyError, match="IANA timezone"):
+        load_timezone("Berlin")
+    with pytest.raises(TimePolicyError, match="unknown IANA"):
+        load_timezone("Europe/NotAZone")
+    with pytest.raises(TimePolicyError, match="wall-clock"):
+        local_to_utc(NOW, "UTC")
+    with pytest.raises(TimePolicyError, match="unknown DST"):
+        local_to_utc(datetime.fromisoformat("2026-08-16T12:00:00"), "UTC", ambiguous="bad")
+    assert local_to_utc(
+        datetime.fromisoformat("2026-03-29T02:30:00"), "Europe/Berlin", nonexistent="backward"
+    ) == datetime(2026, 3, 29, 0, 59, tzinfo=UTC)
+    with pytest.raises(TimePolicyError, match="now must"):
+        quiet_decision(datetime.fromisoformat("2026-08-16T12:00:00"), timezone_name="UTC", policy=p)
+    assert quiet_decision(NOW, timezone_name="UTC", policy=p).code == "normal_window"
+    assert next_quiet_end(NOW, timezone_name="UTC", policy=p) == datetime(
+        2026, 8, 17, 8, tzinfo=UTC
+    )
+
+    occurrence = candidate_for().occurrences[0]
+    for candidate_occurrence in (
+        None,
+        replace(occurrence, reason=ReasonCode.RELATIONSHIP_RECONNECT, quiet_bypass_possible=False),
+        replace(occurrence, importance=0.5, quiet_bypass_possible=False),
+        replace(occurrence, quiet_bypass_possible=False),
+        replace(occurrence, evidence=(replace(occurrence.evidence[0], explicit=False),)),
+    ):
+        assert not quiet_decision(
+            datetime(2026, 8, 16, 23, tzinfo=UTC),
+            timezone_name="UTC",
+            policy=p,
+            occurrence=candidate_occurrence,
+        ).bypass_allowed
+    assert quiet_decision(
+        datetime(2026, 8, 16, 23, tzinfo=UTC),
+        timezone_name="UTC",
+        policy=p,
+        occurrence=occurrence,
+    ).bypass_allowed
+    assert not quiet_decision(
+        datetime(2026, 8, 16, 1, tzinfo=UTC),
+        timezone_name="UTC",
+        policy=p,
+        occurrence=occurrence,
+    ).bypass_allowed
+    assert quiet_decision(
+        datetime(2026, 8, 16, 7, tzinfo=UTC),
+        timezone_name="UTC",
+        policy=p,
+        occurrence=occurrence,
+    ).bypass_allowed
+
+
+@pytest.mark.unit
+def test_m7_validation_and_fake_store_edge_cases() -> None:
+    candidate = candidate_for()
+    p = policy()
+    selected = str(candidate.occurrences[0].id)
+    payload = {
+        "schema_version": 1,
+        "action": "send_now",
+        "decision_code": "timely_support",
+        "selected_occurrence_ids": [selected],
+        "topic": "topic",
+        "priority": 0.5,
+        "defer_until": None,
+    }
+    invalid_payloads: tuple[dict[str, object], ...] = (
+        {**payload, "schema_version": 2},
+        {**payload, "decision_code": "bad"},
+        {**payload, "selected_occurrence_ids": "not-list"},
+        {**payload, "selected_occurrence_ids": [1]},
+        {**payload, "selected_occurrence_ids": ["bad-uuid"]},
+        {**payload, "selected_occurrence_ids": [selected, selected]},
+        {**payload, "topic": 1},
+        {**payload, "topic": "   "},
+        {**payload, "topic": "x\rline"},
+        {**payload, "priority": True},
+        {**payload, "priority": "high"},
+        {**payload, "priority": 2},
+        {
+            **payload,
+            "action": "none",
+            "selected_occurrence_ids": [selected],
+            "topic": None,
+            "priority": 0,
+        },
+        {**payload, "selected_occurrence_ids": [], "topic": None},
+        {**payload, "defer_until": "2026-08-16T12:30:00Z"},
+        {**payload, "action": "defer_once", "defer_until": None},
+        {**payload, "action": "defer_once", "defer_until": "2026-08-16T15:00:00Z"},
+    )
+    for invalid in invalid_payloads:
+        with pytest.raises(ProactiveValidationError):
+            parse_agent_decision(invalid, candidate=candidate, now=NOW, policy=p)
+
+    absolute = candidate_for(now=datetime(2026, 8, 16, 3, tzinfo=UTC))
+    absolute_payload = {
+        **payload,
+        "selected_occurrence_ids": [str(absolute.occurrences[0].id)],
+        "action": "defer_once",
+        "defer_until": "2026-08-16T04:00:00Z",
+    }
+    with pytest.raises(ProactiveValidationError, match="absolute quiet"):
+        parse_agent_decision(
+            absolute_payload,
+            candidate=absolute,
+            now=datetime(2026, 8, 16, 3, tzinfo=UTC),
+            policy=p,
+        )
+
+    store = DurableDueJobStore()
+    account_id = uuid4()
+    key = sha256(b"edge-job").digest()
+    with pytest.raises(ValueError, match="32 bytes"):
+        store.enqueue(account_id=account_id, idempotency_key=b"short", available_at=NOW)
+    store.enqueue(account_id=account_id, idempotency_key=key, available_at=NOW)
+    with pytest.raises(ValueError, match="lease"):
+        store.claim(now=NOW, owner=uuid4(), lease=timedelta(0))
+    assert (
+        store.complete(idempotency_key=sha256(b"missing").digest(), owner=uuid4(), now=NOW) is False
+    )
+    with pytest.raises(KeyError, match="unknown budget"):
+        BudgetLedger().commit(sha256(b"missing-budget").digest())
