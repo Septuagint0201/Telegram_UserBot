@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M6已经取得精确GitLab证据；M7实现已完成 Windows static/unit 门禁，Linux service acceptance 由当前 CI 运行。Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M6已经取得精确GitLab证据；M7实现及 Linux service acceptance 已由签名提交与 GitHub Actions 证据关闭。Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -72,7 +72,7 @@ deploy/
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M5 | Media与Context Contract | fake provider；测试图片 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | COMPLETE — WINDOWS STATIC/UNIT PASS; LINUX SERVICE ACCEPTANCE PENDING |
+| M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | COMPLETE — WINDOWS STATIC/UNIT PASS; LINUX SERVICE ACCEPTANCE PASS |
 | M8 | Production Compose、backup与运维加固 | 测试backup/alert targets | NOT STARTED |
 | M9 | Release candidate验证 | 受保护live smoke与授权测试peer | NOT STARTED |
 
@@ -339,7 +339,7 @@ deploy/
 
 ## 12. M7 — Proactive Pipeline
 
-当前状态：M7 Proactive Pipeline domain、migration、least-privilege roles、strict decision validation、budget reservation、DST/quiet policy、AUTO/COPILOT final-gate contract 与 content-free evidence mapping 已完成。Windows/CPython 3.14.7 的 M7 unit、Ruff、strict mypy、import boundary、build 与 Disclosure static checks 为 `PASS`；M7 unit 当前 9 tests `PASS`。quiet 默认 `22:00–08:00`，absolute no-send 固定 `00:00–07:00`。本机无 Docker，因此 PostgreSQL/Redis migration、role、lease/concurrency 和 acceptance service evidence 为 `NOT RUN`，提交后由 Linux CI 验证。真实 Telegram/provider、真实 proactive send、Control Bot polling、Ubuntu production、backup/restore、load 与 soak 仍为 `NOT RUN`。
+当前状态：M7 Proactive Pipeline domain、migration、least-privilege roles、strict decision validation、budget reservation、DST/quiet policy、AUTO/COPILOT final-gate contract 与 content-free evidence mapping 已完成。Windows/CPython 3.14.7 的 M7 unit 13 tests、Ruff、strict mypy、import boundary、build 与 Disclosure static checks 为 `PASS`；quiet 默认 `22:00–08:00`，absolute no-send 固定 `00:00–07:00`。签名提交 `7c97aa3756c5d658d9607ba19b25cf17b9080d32` 的 GitHub Actions [#31913239648](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31913239648) 中 Preflight、PostgreSQL/Redis integration 和 Chromium browser contract 全部为 `PASS`；integration 执行 345 tests、deselect 1，line/branch coverage 92.58%/85.48%，migration 与 M7 acceptance manifest 均为 `PASS`。本机无 Docker，Windows 本地 PostgreSQL/Redis service test 仍为 `NOT RUN`。真实 Telegram/provider、真实 proactive send、Control Bot polling、Ubuntu production、backup/restore、load 与 soak 仍为 `NOT RUN`。
 
 ### 12.1 目标
 
@@ -465,4 +465,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0—M6已经关闭并取得精确GitLab证据，M7实现已完成并进入 Linux service acceptance。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。
+M0—M6已经关闭并取得精确GitLab证据，M7实现及 Linux service acceptance 已关闭。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。

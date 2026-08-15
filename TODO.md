@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M7实现已经完成。M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、预算 reservation、严格 Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate 与 send-unknown 保守结算。M7 Windows静态/unit门禁已通过；本机无Docker，PostgreSQL/Redis service acceptance由Linux CI执行。真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。
+架构设计与M0—M7实现已经完成。M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、预算 reservation、严格 Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate 与 send-unknown 保守结算。M7 Windows静态/unit门禁和 GitHub Actions Linux service acceptance 已通过；真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -46,7 +46,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M5 | Media 与 Context Contract | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M7 | Proactive Pipeline | COMPLETE | WINDOWS STATIC/UNIT PASS; LINUX SERVICE ACCEPTANCE PENDING |
+| M7 | Proactive Pipeline | COMPLETE | WINDOWS STATIC/UNIT PASS; LINUX SERVICE ACCEPTANCE PASS |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
 | M9 | Release candidate 验证 | WAITING | NOT RUN |
 
@@ -275,13 +275,18 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 - [x] **M7-009 实现 AUTO final gate 与 COPILOT draft**（依赖：M4-005、M7-005—M7-008）— AUTO 才能创建 outbound intent；COPILOT 只产生待批准 draft；HUMAN/PAUSED 不发送。
 - [x] **M7-010 实现 send-unknown 保守结算**（依赖：M3-009、M7-005、M7-009）— unknown 暂按已消费预算处理，reconciliation 后修正；禁止盲目重发。
 - [x] **M7-011 实现审计、设置与 Control Bot 命令**（依赖：M7-002—M7-010）— 管理 enable、时区、quiet hours、预算、候选和状态；每次变更版本化并可追责。
-- [x] **M7-012 关闭 M7**（依赖：M7-001—M7-011）— DST、预算并发、quiet bypass、takeover 和 crash state-machine test 为 `PASS`；真实主动发送仍 disabled。Linux service acceptance 仍待 CI 运行。
+- [x] **M7-012 关闭 M7**（依赖：M7-001—M7-011）— DST、预算并发、quiet bypass、takeover 和 crash state-machine test 为 `PASS`；GitHub Actions Linux service acceptance 为 `PASS`；真实主动发送仍 disabled。
 
 ### M7 退出门禁
 
 - [x] 规则层筛选、Proactive Agent 决策、Main AI 文本和 final gate 四层不可绕过。
 - [x] quiet hours、absolute quiet、预算 reservation 和 mode/version 在发送前重新校验。
 - [x] COPILOT 只产生草稿，send-unknown 不会造成重复消息或预算免费重试。
+
+### M7 Evidence
+
+- [x] GitHub Actions [#31913239648](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31913239648) 绑定签名提交 `7c97aa3756c5d658d9607ba19b25cf17b9080d32`；Preflight 为 303 passed、43 deselected，PostgreSQL/Redis integration 为 345 passed、1 deselected，line/branch coverage 为 92.58%/85.48%，migration 与 M7 acceptance manifest 均为 `PASS`，Chromium browser contract 为 `PASS`。
+- [x] 本机 Windows/CPython 3.14.7 的 M7 unit 13 tests、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为 `PASS`；本机无 Docker，Windows 本地 PostgreSQL/Redis service test 仍为 `NOT RUN`。
 
 ## 13. M8 — Production Compose与 Operations
 
@@ -363,4 +368,4 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ## 17. 下一步
 
-M6已经关闭，M7 Proactive Pipeline实现已完成并进入Linux service acceptance。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
+M0—M6已经关闭，M7 Proactive Pipeline及其 Linux service acceptance 已关闭。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。

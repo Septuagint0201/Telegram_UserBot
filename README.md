@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0—M6已经完成；M7实现已经完成并进入 Linux PostgreSQL/Redis service acceptance。M6保留原有签名 GitLab/GitHub 证据；M7 Windows static/unit 门禁已通过。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+V1架构设计与M0—M6已经完成，M7 Proactive Pipeline 也已完成；M7 Linux PostgreSQL/Redis service acceptance 已通过 GitHub Actions 验证。M6保留原有签名 GitLab/GitHub 证据；M7 Windows static/unit 门禁已通过。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
@@ -117,7 +117,7 @@ M5签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`对应的[GitLab Linux p
 
 M6在Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；Ruff、strict mypy、import boundary、compileall、offline migration SQL、wheel/sdist Disclosure和secret/artifact scan均为`PASS`。当前签名基线`645fb8da5d5c35de6896825c5f29f22f08d0b168`已由[GitLab pipeline #2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)的13个作业和[GitHub Actions #31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)验证：GitLab M6 service执行329个测试并deselect 1个，line coverage 91.98%、branch coverage 84.32%；GitHub的preflight、PostgreSQL/Redis integration和Chromium browser contract均为`PASS`。迁移manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。重签前`9be7012edf3aabe1dd5db7a325b0f36efce27063`与[GitLab pipeline #2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)保留为历史证据，不再标识当前`main`。本机无Docker，Windows PostgreSQL/Redis integration仍为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署和真实backup/restore保持`NOT RUN`。
 
-M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、account/contact/bypass reservation、strict Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate和send-unknown保守结算。quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。Windows/CPython 3.14.7 的 M7 unit 9 tests、Ruff、strict mypy、import boundary、build、Disclosure和artifact static checks为`PASS`；本机无Docker，PostgreSQL/Redis migration、role、lease/concurrency和acceptance service evidence为`NOT RUN`，等待 Linux CI。真实Telegram/provider、Control Bot polling、真实AUTO、部署、backup/restore与production load保持`NOT RUN`。
+M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、account/contact/bypass reservation、strict Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate和send-unknown保守结算。quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。Windows/CPython 3.14.7 的 M7 unit 13 tests、Ruff、strict mypy、import boundary、build、Disclosure和artifact static checks为`PASS`；签名提交`7c97aa3756c5d658d9607ba19b25cf17b9080d32`对应的[GitHub Actions #31913239648](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31913239648)中Preflight、PostgreSQL/Redis integration和Chromium browser contract全部为`PASS`，integration执行345 tests并deselect 1，line/branch coverage为92.58%/85.48%，migration与M7 acceptance manifest均为`PASS`。本机无Docker，Windows本地PostgreSQL/Redis service test为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署、backup/restore与production load保持`NOT RUN`。
 
 常用本地门禁：
 
