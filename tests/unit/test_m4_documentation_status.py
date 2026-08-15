@@ -16,9 +16,11 @@ def test_m4_status_documents_are_consistent() -> None:
     assert "- [x] **M4-011" in todo
     assert "M5 | Media 与 Context Contract | COMPLETE" in todo
     assert "M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | COMPLETE" in plan
-    assert "M5 | Media与Context Contract |" in plan
-    assert "| COMPLETE |" in plan
-    assert "V1架构设计与M0—M6组件实现已经完成" in readme
+    assert (
+        "M5 | Media与Context Contract | fake provider\uff1b测试图片 | "
+        "COMPLETE — WINDOWS/GITLAB LINUX PASS"
+    ) in plan
+    assert "V1架构设计与M0—M6已经完成" in readme
     assert "M4当前为`COMPLETE — WINDOWS/GITLAB LINUX PASS`" in compatibility
     assert "2758187631" in todo
     assert "2758187631" in plan

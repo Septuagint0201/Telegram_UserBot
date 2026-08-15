@@ -16,8 +16,10 @@ def test_m5_status_documents_are_consistent() -> None:
     assert "- [x] **M5-011" in todo
     assert "M5 | Media 与 Context Contract | COMPLETE" in todo
     assert "M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE" in todo
-    assert "M5 | Media与Context Contract |" in plan
-    assert "| COMPLETE |" in plan
+    assert (
+        "M5 | Media与Context Contract | fake provider\uff1b测试图片 | "
+        "COMPLETE — WINDOWS/GITLAB LINUX PASS"
+    ) in plan
     assert "M0—M6" in readme
     assert "M0—M6" in design
     assert "0006_m5_media_context" in compatibility
@@ -28,4 +30,4 @@ def test_m5_status_documents_are_consistent() -> None:
     assert "#2758537825" in compatibility
     assert "GitLab pending" not in todo
     assert "pending this stage push" not in disclosure
-    assert "Current artifact status: M0-M6 component implementation complete" in disclosure
+    assert "Current artifact status: M0-M6 complete" in disclosure

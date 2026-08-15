@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M5已经取得精确GitLab证据，M6组件实现也已关闭，当前等待本阶段签名提交的GitLab service/acceptance证据写回后进入M7。M6覆盖异步OR触发、strict proposal/evidence、versioned memory、immutable summary membership、single-space shadow embedding、Control Bot二次确认和one-way erasure replay。Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M6已经取得精确GitLab证据；M6覆盖异步OR触发、strict proposal/evidence、versioned memory、immutable summary membership、single-space shadow embedding、Control Bot二次确认和one-way erasure replay，签名提交`9be7012edf3aabe1dd5db7a325b0f36efce27063`的pipeline [#2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)共13个作业全部`PASS`。M7成为下一阶段但尚未开始；Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -70,8 +70,8 @@ deploy/
 | M2 | 模型配置、adapter与key-only控制面 | 仅local fake | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M3 | Telegram ingest/outbound intent基础 | fake Telegram；隔离smoke可选 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M5 | Media与Context Contract | fake provider；测试图片 | COMPLETE |
-| M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | COMPLETE |
+| M5 | Media与Context Contract | fake provider；测试图片 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
+| M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | NOT STARTED |
 | M8 | Production Compose、backup与运维加固 | 测试backup/alert targets | NOT STARTED |
 | M9 | Release candidate验证 | 受保护live smoke与授权测试peer | NOT STARTED |
@@ -335,7 +335,7 @@ deploy/
 - AI/proactive不能自证联系人事实或human style。
 - Forget/purge/restore erasure全部PASS。
 
-当前状态：COMPLETE（组件级）。Windows/CPython 3.14.7有286个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；format/Ruff/strict mypy/import boundary、build、Disclosure、secret scan及offline upgrade/downgrade SQL为`PASS`。Alembic head为`0007_m6_memory_pipeline`，M6 migration、least-privilege roles及JUnit-derived acceptance由本阶段GitLab `m6-memory-pipeline`/`m6-acceptance`验证。本机无Docker，PostgreSQL/Redis integration为`NOT RUN`；真实provider、Telegram、backup/restore、部署、load与soak不在M6完成声明内。
+当前状态：COMPLETE。Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；format/Ruff/strict mypy/import boundary、build、Disclosure、secret scan及offline migration SQL为`PASS`。Alembic head为`0007_m6_memory_pipeline`。签名提交`9be7012edf3aabe1dd5db7a325b0f36efce27063`、tree `5e2c7bda8b96ea9bb58e9a5c66f27b22e8fb6a87`的GitLab pipeline [#2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)共13个作业全部`PASS`；M6 service执行329个测试、deselect 1个，line/branch coverage为91.98%/84.32%，migration manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。本机无Docker，Windows PostgreSQL/Redis integration为`NOT RUN`；真实provider、Telegram、backup/restore、部署、load与soak不在M6完成声明内。
 
 ## 12. M7 — Proactive Pipeline
 
@@ -463,4 +463,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0—M6组件实现已经关闭，M6 GitLab收尾证据写回后进入M7 Proactive Pipeline。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。
+M0—M6已经关闭并取得精确GitLab证据，M7 Proactive Pipeline成为下一阶段但尚未开始。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。

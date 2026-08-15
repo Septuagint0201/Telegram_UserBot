@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M6组件实现已经完成。M5签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab pipeline [#2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)共11个作业全部`PASS`。M6新增异步OR触发、pending range/lease、content-free input manifest、严格proposal validator、版本化memory lifecycle、immutable summary membership、单一embedding space shadow切换、Control Bot二次确认及one-way erasure ledger。Windows静态、unit/property/contract与fake provider/embedding为`PASS`；本机无Docker，PostgreSQL/Redis migration/role integration为`NOT RUN`，由本阶段签名提交的GitLab M6 service/acceptance作业验证。真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。M7保持`WAITING`，直到M6 GitLab收尾证据写回。
+架构设计与M0—M6已经完成。M6实现异步OR触发、pending range/lease、content-free input manifest、严格proposal validator、版本化memory lifecycle、immutable summary membership、单一embedding space shadow切换、Control Bot二次确认及one-way erasure ledger。签名提交`9be7012edf3aabe1dd5db7a325b0f36efce27063`的GitLab pipeline [#2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)共13个作业全部`PASS`，覆盖disposable PostgreSQL/pgvector、Redis、migration round trip、role、browser、M6 service与acceptance。Windows本机无Docker，真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。M7依赖已满足，作为下一阶段但尚未开始。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -45,8 +45,8 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M3 | Telegram ingest 与 outbound intent | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M5 | Media 与 Context Contract | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE | WINDOWS PASS / GITLAB EVIDENCE PENDING |
-| M7 | Proactive Pipeline | WAITING | NOT RUN |
+| M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
+| M7 | Proactive Pipeline | READY | NOT RUN |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
 | M9 | Release candidate 验证 | WAITING | NOT RUN |
 
@@ -221,7 +221,7 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 - [x] **M5-008 实现 `/context`**（依赖：M5-006）— 只展示来源类别、计数、预算、版本和 freshness，不返回聊天正文、memory 正文或 secret。
 - [x] **M5-009 实现 `/context_preview`**（依赖：M5-006—M5-008）— 管理员受控查看 synthetic/redacted preview，覆盖 token overflow、rebuild、delete 和 send_unknown 场景。
 - [x] **M5-010 实现 quota、retention 与磁盘清理接口**（依赖：M5-002）— 为 Operations 暴露容量、TTL、引用保护和删除 job；阈值与最终期限留在 M8 配置。
-- [x] **M5-011 关闭 M5**（依赖：M5-001—M5-010）— 图片安全、三协议 contract、预算 property、注入和 rebuild 测试为`PASS`；签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab service、migration、browser、acceptance和artifact共11个作业全部`PASS`。
+- [x] **M5-011 关闭 M5**（依赖：M5-001—M5-010）— 图片安全、三协议 contract、预算 property、注入和 rebuild 测试为`PASS`；签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`的GitLab pipeline [#2758537825](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2758537825)中service、migration、browser、acceptance和artifact共11个作业全部`PASS`。
 
 ### M5 退出门禁
 
@@ -254,9 +254,11 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ### M6 当前证据
 
-- Windows/CPython 3.14.7有286个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；format、Ruff、strict mypy、import boundary、compileall、build artifact、Disclosure与secret scan均为`PASS`。
-- Alembic head为`0007_m6_memory_pipeline`；offline empty→head和M6单步downgrade SQL生成均为`PASS`，并显式验证五个跨表/循环外键的创建与回滚顺序。
-- 本机无Docker，PostgreSQL/Redis migration、role、threshold/retry/expired-lease及durable control integration为`NOT RUN`；由本阶段签名提交的GitLab `m6-memory-pipeline`/`m6-acceptance`验证，精确commit、pipeline和job证据随后写回。
+- Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；format、Ruff、strict mypy、import boundary、compileall、build artifact、Disclosure与secret scan均为`PASS`。
+- 签名提交`9be7012edf3aabe1dd5db7a325b0f36efce27063`、tree `5e2c7bda8b96ea9bb58e9a5c66f27b22e8fb6a87`对应pipeline [#2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)，13个作业全部`PASS`。`m6-memory-pipeline` [#15913515021](https://gitlab.com/Septuagintks/telegram_userbot/-/jobs/15913515021)执行329个测试、deselect 1个，line coverage 91.98%、branch coverage 84.32%；`m6-acceptance` [#15913515027](https://gitlab.com/Septuagintks/telegram_userbot/-/jobs/15913515027)将M6-001—M6-012全部绑定为`PASS`。
+- Alembic head为`0007_m6_memory_pipeline`；migration manifest记录80张表、零匿名约束，empty→head、head→base→head、previous supported→head和interrupted resume全部`PASS`。下载证据的migration/acceptance manifest SHA-256分别为`8e6569962d46a96fdfb66fdddaf48e4737c4519a836749772db1756b320dff05`和`f967894881ecad51a6376836ff896487cc151da60abc229235a6d19ebdd57c9a`。
+- 失败证据保留：pipeline [#2762129343](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762129343)暴露current-version外键未引用精确candidate key，由签名提交`42d7e8f2083f7c57b89563a552a889b93a5de4a9`修复；pipeline [#2762152912](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762152912)继续暴露M6 downgrade非拓扑顺序，由`9be7012edf3aabe1dd5db7a325b0f36efce27063`修复。未重跑失败artifact冒充`PASS`。
+- 本机无Docker，Windows PostgreSQL/Redis migration、role、threshold/retry/expired-lease及durable control integration保持`NOT RUN`；真实Telegram/provider、真实AUTO、生产部署、真实backup/restore、load与soak也保持`NOT RUN`。
 
 ## 12. M7 — Proactive Pipeline
 
@@ -361,4 +363,4 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ## 17. 下一步
 
-M6组件实现已经关闭，等待本阶段GitLab service/acceptance精确证据写回后进入M7。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
+M6已经关闭，M7 Proactive Pipeline依赖已满足并成为下一阶段，但尚未开始。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
