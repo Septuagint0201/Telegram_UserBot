@@ -122,13 +122,13 @@ jobs:
         run: |
           .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
           .venv/bin/pytest -m "not browser and not soak and not live and not requires_secret" \
-            --junitxml=.artifacts/m6/junit.xml --cov-report=xml:.artifacts/m6/coverage.xml
+            --junitxml=.artifacts/m7/junit.xml --cov-report=xml:.artifacts/m7/coverage.xml
           .venv/bin/python scripts/check_coverage.py .artifacts/coverage.json
-          .venv/bin/python scripts/write_migration_manifest.py --output .artifacts/m6/migration-manifest.json
-          .venv/bin/python scripts/write_acceptance_manifest.py --milestone M6 --commit "$CI_COMMIT_SHA" \
-            --output .artifacts/m6/acceptance-manifest.json
-          .venv/bin/python scripts/validate_acceptance_manifest.py .artifacts/m6/acceptance-manifest.json
-          .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m6
+          .venv/bin/python scripts/write_migration_manifest.py --output .artifacts/m7/migration-manifest.json
+          .venv/bin/python scripts/write_acceptance_manifest.py --milestone M7 --commit "$CI_COMMIT_SHA" \
+            --output .artifacts/m7/acceptance-manifest.json
+          .venv/bin/python scripts/validate_acceptance_manifest.py .artifacts/m7/acceptance-manifest.json
+          .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m7
       - name: Upload integration evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -137,7 +137,7 @@ jobs:
           if-no-files-found: ignore
           path: |
             .artifacts/coverage.json
-            .artifacts/m6
+            .artifacts/m7
             DISCLOSURE
 
   browser:

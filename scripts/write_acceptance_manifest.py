@@ -674,6 +674,116 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
             )
             for requirement_id, evidence, test_ids in m6_mapping
         ]
+    if milestone == "M7":
+        junit_results = load_junit_results(root / ".artifacts/m7/junit.xml")
+        m7_mapping: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+            (
+                "M7-001",
+                (
+                    "src/telegram_userbot/domain/proactive/jobs.py",
+                    "alembic/versions/0008_m7_proactive_pipeline.py",
+                ),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_due_jobs_are_idempotent_and_expired_leases_requeue",
+                ),
+            ),
+            (
+                "M7-002",
+                ("src/telegram_userbot/domain/proactive/rules.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_rules_materialize_allowlisted_facts_and_group_only_overlaps",
+                ),
+            ),
+            (
+                "M7-003",
+                ("src/telegram_userbot/domain/proactive/time.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_dst_gap_fold_and_overnight_quiet_boundaries_are_explicit",
+                ),
+            ),
+            (
+                "M7-004",
+                ("src/telegram_userbot/domain/proactive/time.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_dst_gap_fold_and_overnight_quiet_boundaries_are_explicit",
+                ),
+            ),
+            (
+                "M7-005",
+                ("src/telegram_userbot/domain/proactive/budget.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged",
+                ),
+            ),
+            (
+                "M7-006",
+                ("src/telegram_userbot/domain/proactive/validation.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_agent_parser_is_strict_and_defer_stays_in_window",
+                ),
+            ),
+            (
+                "M7-007",
+                ("src/telegram_userbot/domain/proactive/pipeline.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_context_is_text_only_and_candidate_local",
+                ),
+            ),
+            (
+                "M7-008",
+                ("src/telegram_userbot/domain/proactive/rules.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_rules_cover_event_start_end_reconnect_and_filter_suppressions",
+                ),
+            ),
+            (
+                "M7-009",
+                ("src/telegram_userbot/domain/proactive/pipeline.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_final_gate_maps_modes_and_rechecks_all_snapshots",
+                ),
+            ),
+            (
+                "M7-010",
+                ("src/telegram_userbot/domain/proactive/budget.py",),
+                (
+                    "tests.unit.domain.test_m7_proactive::test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged",
+                ),
+            ),
+            (
+                "M7-011",
+                (
+                    "deploy/postgres/m7_roles.sql",
+                    "src/telegram_userbot/adapters/persistence/schema.py",
+                ),
+                (
+                    "tests.integration.test_m7_proactive_pipeline::test_m7_roles_keep_control_out_of_candidate_and_decision_truth",
+                ),
+            ),
+            (
+                "M7-012",
+                (
+                    "alembic/versions/0008_m7_proactive_pipeline.py",
+                    "deploy/postgres/m7_roles.sql",
+                    "docs/compatibility/m7.md",
+                    "TODO.md",
+                    "docs/Implementation-Plan.md",
+                ),
+                (
+                    "tests.integration.test_m7_proactive_pipeline::test_m7_schema_inventory_constraints_and_head",
+                    "tests.unit.test_m7_documentation_status::test_m7_status_documents_are_consistent",
+                ),
+            ),
+        )
+        return [
+            _tested_requirement(
+                requirement_id,
+                *evidence,
+                test_ids=test_ids,
+                junit_results=junit_results,
+            )
+            for requirement_id, evidence, test_ids in m7_mapping
+        ]
     raise ValueError("unsupported milestone")
 
 
@@ -695,7 +805,7 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
     )
     if missing_evidence:
         raise ValueError("acceptance evidence path is missing: " + missing_evidence[0])
-    uses_disposable_services = milestone in {"M1", "M2", "M3", "M4", "M5", "M6"}
+    uses_disposable_services = milestone in {"M1", "M2", "M3", "M4", "M5", "M6", "M7"}
     environment: dict[str, object] = {
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),
@@ -761,7 +871,7 @@ def main() -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument(
         "--milestone",
-        choices=("M0", "M1", "M2", "M3", "M4", "M5", "M6"),
+        choices=("M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7"),
         default="M0",
     )
     parser.add_argument("--output", required=True, type=Path)

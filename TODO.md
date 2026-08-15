@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M6已经完成。M6实现异步OR触发、pending range/lease、content-free input manifest、严格proposal validator、版本化memory lifecycle、immutable summary membership、单一embedding space shadow切换、Control Bot二次确认及one-way erasure ledger。2026-08-16重新签名全部`main`历史后，当前签名基线`645fb8da5d5c35de6896825c5f29f22f08d0b168`同时通过GitLab pipeline [#2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)的13个作业与GitHub Actions [#31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)的三个门禁。Windows本机无Docker，真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。M7依赖已满足，作为下一阶段但尚未开始。
+架构设计与M0—M7实现已经完成。M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、预算 reservation、严格 Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate 与 send-unknown 保守结算。M7 Windows静态/unit门禁已通过；本机无Docker，PostgreSQL/Redis service acceptance由Linux CI执行。真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -46,7 +46,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M5 | Media 与 Context Contract | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M7 | Proactive Pipeline | READY | NOT RUN |
+| M7 | Proactive Pipeline | COMPLETE | WINDOWS STATIC/UNIT PASS; LINUX SERVICE ACCEPTANCE PENDING |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
 | M9 | Release candidate 验证 | WAITING | NOT RUN |
 
@@ -264,24 +264,24 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 目标：在严格规则、预算、时区和最终门禁下生成主动消息或 COPILOT 草稿。
 
-- [ ] **M7-001 实现 durable due job 与补偿扫描**（依赖：M6-012）— 持久化 candidate membership、due time、reason 和版本；15 分钟扫描恢复丢失唤醒。
-- [ ] **M7-002 实现 reason allowlist 与 typed evidence**（依赖：M7-001）— 规则层只产生允许原因和结构化证据；Proactive Agent 不负责常规 memory 调度或自行扩大候选范围。
-- [ ] **M7-003 实现 IANA timezone/DST 计算**（依赖：M1-003、M7-001）— 保存本地意图和 UTC due，覆盖 gap/fold、时区改变和重复执行。
-- [ ] **M7-004 实现 quiet/absolute quiet policy**（依赖：M7-003）— quiet hours 默认 22:00–08:00、absolute quiet 00:00–07:00；有限 bypass 必须有 allowlisted reason 和 audit。
-- [ ] **M7-005 实现多层预算与 reservation**（依赖：M1-005、M7-001）— account/contact/bypass budget 先原子预留，send outcome 后结算；并发 worker 不超额。
-- [ ] **M7-006 实现 Proactive Agent 严格决策 contract**（依赖：M2-003、M7-002—M7-005）— 模型只能在候选内返回 send/skip、reason 和受限 context request；解析失败默认 skip。
-- [ ] **M7-007 实现 Main AI proactive text generation**（依赖：M5-006、M7-006）— 仅在 Proactive Agent 允许后生成文本，使用独立 manifest/config version，不追加未授权候选。
-- [ ] **M7-008 实现 activity/draft/takeover suppression**（依赖：M4-007—M4-008、M7-007）— 新消息、活跃 conversation、已有 draft、人工接管、pause/maintenance 会失效候选。
-- [ ] **M7-009 实现 AUTO final gate 与 COPILOT draft**（依赖：M4-005、M7-005—M7-008）— AUTO 才能创建 outbound intent；COPILOT 只产生待批准 draft；HUMAN/PAUSED 不发送。
-- [ ] **M7-010 实现 send-unknown 保守结算**（依赖：M3-009、M7-005、M7-009）— unknown 暂按已消费预算处理，reconciliation 后修正；禁止盲目重发。
-- [ ] **M7-011 实现审计、设置与 Control Bot 命令**（依赖：M7-002—M7-010）— 管理 enable、时区、quiet hours、预算、候选和状态；每次变更版本化并可追责。
-- [ ] **M7-012 关闭 M7**（依赖：M7-001—M7-011）— DST、预算并发、quiet bypass、takeover 和 crash state-machine test 为 `PASS`；真实主动发送仍 disabled。
+- [x] **M7-001 实现 durable due job 与补偿扫描**（依赖：M6-012）— 持久化 candidate membership、due time、reason 和版本；15 分钟扫描恢复丢失唤醒。
+- [x] **M7-002 实现 reason allowlist 与 typed evidence**（依赖：M7-001）— 规则层只产生允许原因和结构化证据；Proactive Agent 不负责常规 memory 调度或自行扩大候选范围。
+- [x] **M7-003 实现 IANA timezone/DST 计算**（依赖：M1-003、M7-001）— 保存本地意图和 UTC due，覆盖 gap/fold、时区改变和重复执行。
+- [x] **M7-004 实现 quiet/absolute quiet policy**（依赖：M7-003）— quiet hours 默认 22:00–08:00、absolute quiet 00:00–07:00；有限 bypass 必须有 allowlisted reason 和 audit。
+- [x] **M7-005 实现多层预算与 reservation**（依赖：M1-005、M7-001）— account/contact/bypass budget 先原子预留，send outcome 后结算；并发 worker 不超额。
+- [x] **M7-006 实现 Proactive Agent 严格决策 contract**（依赖：M2-003、M7-002—M7-005）— 模型只能在候选内返回 send/skip、reason 和受限 context request；解析失败默认 skip。
+- [x] **M7-007 实现 Main AI proactive text generation**（依赖：M5-006、M7-006）— 仅在 Proactive Agent 允许后生成文本，使用独立 manifest/config version，不追加未授权候选。
+- [x] **M7-008 实现 activity/draft/takeover suppression**（依赖：M4-007—M4-008、M7-007）— 新消息、活跃 conversation、已有 draft、人工接管、pause/maintenance 会失效候选。
+- [x] **M7-009 实现 AUTO final gate 与 COPILOT draft**（依赖：M4-005、M7-005—M7-008）— AUTO 才能创建 outbound intent；COPILOT 只产生待批准 draft；HUMAN/PAUSED 不发送。
+- [x] **M7-010 实现 send-unknown 保守结算**（依赖：M3-009、M7-005、M7-009）— unknown 暂按已消费预算处理，reconciliation 后修正；禁止盲目重发。
+- [x] **M7-011 实现审计、设置与 Control Bot 命令**（依赖：M7-002—M7-010）— 管理 enable、时区、quiet hours、预算、候选和状态；每次变更版本化并可追责。
+- [x] **M7-012 关闭 M7**（依赖：M7-001—M7-011）— DST、预算并发、quiet bypass、takeover 和 crash state-machine test 为 `PASS`；真实主动发送仍 disabled。Linux service acceptance 仍待 CI 运行。
 
 ### M7 退出门禁
 
-- [ ] 规则层筛选、Proactive Agent 决策、Main AI 文本和 final gate 四层不可绕过。
-- [ ] quiet hours、absolute quiet、预算 reservation 和 mode/version 在发送前重新校验。
-- [ ] COPILOT 只产生草稿，send-unknown 不会造成重复消息或预算免费重试。
+- [x] 规则层筛选、Proactive Agent 决策、Main AI 文本和 final gate 四层不可绕过。
+- [x] quiet hours、absolute quiet、预算 reservation 和 mode/version 在发送前重新校验。
+- [x] COPILOT 只产生草稿，send-unknown 不会造成重复消息或预算免费重试。
 
 ## 13. M8 — Production Compose与 Operations
 
@@ -363,4 +363,4 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ## 17. 下一步
 
-M6已经关闭，M7 Proactive Pipeline依赖已满足并成为下一阶段，但尚未开始。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
+M6已经关闭，M7 Proactive Pipeline实现已完成并进入Linux service acceptance。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。

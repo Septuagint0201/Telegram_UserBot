@@ -18,6 +18,7 @@ def requirement_ids_for_milestone(milestone: object) -> frozenset[str]:
         "M4": 11,
         "M5": 11,
         "M6": 12,
+        "M7": 12,
     }
     if milestone not in requirement_counts:
         raise ManifestSemanticError("unsupported evidence milestone")

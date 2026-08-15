@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -3519,4 +3520,510 @@ M6_TABLES = (
     "memory_proposal_evidence",
     "memory_proposal_targets",
     "memory_review_actions",
+)
+
+
+proactive_policies = Table(
+    "proactive_policies",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("timezone_name", Text, nullable=False, server_default=text("'UTC'")),
+    Column("quiet_start_local", Text, nullable=False, server_default=text("'22:00'")),
+    Column("quiet_end_local", Text, nullable=False, server_default=text("'08:00'")),
+    Column("absolute_no_send_start_local", Text, nullable=False, server_default=text("'00:00'")),
+    Column("absolute_no_send_end_local", Text, nullable=False, server_default=text("'07:00'")),
+    Column("account_daily_limit", Integer, nullable=False, server_default=text("10")),
+    Column("contact_bypass_daily_limit", Integer, nullable=False, server_default=text("1")),
+    Column("activity_suppression_seconds", Integer, nullable=False, server_default=text("1800")),
+    Column("settings_json", JSONB, nullable=False, server_default=EMPTY_JSON),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_policies_account"),
+    CheckConstraint("version_no > 0", name="version_positive"),
+    CheckConstraint("account_daily_limit >= 0", name="account_limit_nonnegative"),
+    CheckConstraint("contact_bypass_daily_limit IN (0, 1)", name="bypass_limit_values"),
+    CheckConstraint("activity_suppression_seconds > 0", name="activity_suppression_positive"),
+    CheckConstraint("absolute_no_send_start_local = '00:00'", name="absolute_start_fixed"),
+    CheckConstraint("absolute_no_send_end_local = '07:00'", name="absolute_end_fixed"),
+    UniqueConstraint("account_id", "version_no", name="uq_proactive_policies_account_version"),
+    UniqueConstraint("id", "account_id", name="uq_proactive_policies_id_account"),
+)
+
+proactive_contact_settings = Table(
+    "proactive_contact_settings",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE, nullable=False),
+    Column("version_no", Integer, nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("relationship_level", Text, nullable=False, server_default=text("'unknown'")),
+    Column("timezone_name", Text),
+    Column("daily_limit", Integer),
+    Column("minimum_interval_seconds", Integer),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["contact_id", "account_id"],
+        ["contacts.id", "contacts.account_id"],
+        name="fk_proactive_contact_settings_contact_scope",
+    ),
+    CheckConstraint("version_no > 0", name="version_positive"),
+    CheckConstraint(
+        "relationship_level IN ('close','friend','acquaintance','unknown')",
+        name="relationship_values",
+    ),
+    CheckConstraint("daily_limit IS NULL OR daily_limit >= 0", name="daily_limit_nonnegative"),
+    CheckConstraint(
+        "minimum_interval_seconds IS NULL OR minimum_interval_seconds > 0",
+        name="minimum_interval_positive",
+    ),
+    UniqueConstraint(
+        "account_id", "contact_id", "version_no", name="uq_proactive_contact_settings_version"
+    ),
+    UniqueConstraint("id", "account_id", name="uq_proactive_contact_settings_id_account"),
+)
+
+
+def _proactive_projection_table(name: str) -> Table:
+    return Table(
+        name,
+        metadata,
+        Column("id", UUID_TYPE, primary_key=True),
+        Column("account_id", UUID_TYPE, nullable=False),
+        Column("contact_id", UUID_TYPE, nullable=False),
+        Column("conversation_id", UUID_TYPE, nullable=False),
+        Column("version_no", Integer, nullable=False),
+        Column("status", Text, nullable=False, server_default=text("'active'")),
+        Column("timezone_name", Text, nullable=False),
+        Column("importance", Numeric(5, 4), nullable=False),
+        Column("payload", JSONB, nullable=False, server_default=EMPTY_JSON),
+        Column("source_hash", LargeBinary, nullable=False),
+        Column("valid_from_at", UTC_TIMESTAMP),
+        Column("valid_until_at", UTC_TIMESTAMP),
+        Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+        ForeignKeyConstraint(["account_id"], ["accounts.id"], name=f"fk_{name}_account"),
+        ForeignKeyConstraint(
+            ["contact_id", "account_id"],
+            ["contacts.id", "contacts.account_id"],
+            name=f"fk_{name}_contact_scope",
+        ),
+        ForeignKeyConstraint(
+            ["conversation_id", "account_id"],
+            ["conversations.id", "conversations.account_id"],
+            name=f"fk_{name}_conversation_scope",
+        ),
+        CheckConstraint("version_no > 0", name="version_positive"),
+        CheckConstraint("status IN ('active','invalidated','expired')", name="status_values"),
+        CheckConstraint("importance >= 0 AND importance <= 1", name="importance_bounded"),
+        CheckConstraint("octet_length(source_hash) = 32", name="source_hash_32_bytes"),
+        CheckConstraint(
+            "valid_until_at IS NULL OR valid_from_at IS NULL OR valid_until_at > valid_from_at",
+            name="valid_range",
+        ),
+        UniqueConstraint("id", "account_id", name=f"uq_{name}_id_account"),
+        UniqueConstraint("account_id", "id", "version_no", name=f"uq_{name}_version"),
+    )
+
+
+proactive_life_events = _proactive_projection_table("proactive_life_events")
+proactive_intentions = _proactive_projection_table("proactive_intentions")
+proactive_relationships = _proactive_projection_table("proactive_relationships")
+
+proactive_occurrences = Table(
+    "proactive_occurrences",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("occurrence_key", LargeBinary, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("reason", Text, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("window_start_at", UTC_TIMESTAMP, nullable=False),
+    Column("window_end_at", UTC_TIMESTAMP, nullable=False),
+    Column("hard_deadline_at", UTC_TIMESTAMP, nullable=False),
+    Column("timezone_name", Text, nullable=False),
+    Column("local_date", Date, nullable=False),
+    Column("importance", Numeric(5, 4), nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("source_id", UUID_TYPE, nullable=False),
+    Column("source_version", Text, nullable=False),
+    Column("policy_version_id", UUID_TYPE),
+    Column("quiet_bypass_possible", Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_occurrences_account"),
+    ForeignKeyConstraint(
+        ["contact_id", "account_id"],
+        ["contacts.id", "contacts.account_id"],
+        name="fk_proactive_occurrences_contact_scope",
+    ),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_proactive_occurrences_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["policy_version_id", "account_id"],
+        ["proactive_policies.id", "proactive_policies.account_id"],
+        name="fk_proactive_occurrences_policy_scope",
+    ),
+    CheckConstraint("octet_length(occurrence_key) = 32", name="occurrence_key_32_bytes"),
+    CheckConstraint("generation > 0", name="generation_positive"),
+    CheckConstraint(
+        "reason IN ('promise_due','event_upcoming','event_followup',"
+        "'relationship_reconnect','explicit_followup')",
+        name="reason_values",
+    ),
+    CheckConstraint(
+        "state IN ('scheduled','eligible','grouped','evaluated','suppressed',"
+        "'invalidated','expired')",
+        name="state_values",
+    ),
+    CheckConstraint(
+        "window_start_at < window_end_at AND hard_deadline_at <= window_end_at",
+        name="window_values",
+    ),
+    CheckConstraint("importance >= 0 AND importance <= 1", name="importance_bounded"),
+    UniqueConstraint("occurrence_key", name="uq_proactive_occurrences_key"),
+    UniqueConstraint("id", "account_id", name="uq_proactive_occurrences_id_account"),
+)
+Index(
+    "ix_proactive_occurrences_due",
+    proactive_occurrences.c.state,
+    proactive_occurrences.c.window_start_at,
+)
+
+proactive_occurrence_evidence = Table(
+    "proactive_occurrence_evidence",
+    metadata,
+    Column("occurrence_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("source_id", UUID_TYPE, nullable=False),
+    Column("source_version", Text, nullable=False),
+    Column("source_hash", LargeBinary, nullable=False),
+    Column("summary", Text, nullable=False),
+    Column("current", Boolean, nullable=False, server_default=text("true")),
+    Column("explicit", Boolean, nullable=False, server_default=text("true")),
+    ForeignKeyConstraint(
+        ["occurrence_id", "account_id"],
+        ["proactive_occurrences.id", "proactive_occurrences.account_id"],
+        name="fk_proactive_occurrence_evidence_occurrence_scope",
+    ),
+    CheckConstraint("ordinal > 0", name="ordinal_positive"),
+    CheckConstraint("octet_length(source_hash) = 32", name="source_hash_32_bytes"),
+    CheckConstraint("length(summary) BETWEEN 1 AND 500", name="summary_length"),
+    PrimaryKeyConstraint("occurrence_id", "ordinal", name="pk_proactive_occurrence_evidence"),
+)
+
+proactive_candidates = Table(
+    "proactive_candidates",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("candidate_key", LargeBinary, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("membership_hash", LargeBinary, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("window_start_at", UTC_TIMESTAMP, nullable=False),
+    Column("window_end_at", UTC_TIMESTAMP, nullable=False),
+    Column("due_at", UTC_TIMESTAMP, nullable=False),
+    Column("policy_version_id", UUID_TYPE),
+    Column("mode_version", BigInteger, nullable=False),
+    Column("content_revision", BigInteger, nullable=False),
+    Column("activity_revision", BigInteger, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_candidates_account"),
+    ForeignKeyConstraint(
+        ["contact_id", "account_id"],
+        ["contacts.id", "contacts.account_id"],
+        name="fk_proactive_candidates_contact_scope",
+    ),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_proactive_candidates_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["policy_version_id", "account_id"],
+        ["proactive_policies.id", "proactive_policies.account_id"],
+        name="fk_proactive_candidates_policy_scope",
+    ),
+    CheckConstraint("octet_length(candidate_key) = 32", name="candidate_key_32_bytes"),
+    CheckConstraint("octet_length(membership_hash) = 32", name="membership_hash_32_bytes"),
+    CheckConstraint(
+        "generation > 0 AND mode_version > 0 AND content_revision >= 0 AND activity_revision >= 0",
+        name="snapshot_values",
+    ),
+    CheckConstraint(
+        "state IN ('open','evaluating','send_selected','deferred_once',"
+        "'evaluated_none','failed_model','superseded','expired')",
+        name="state_values",
+    ),
+    CheckConstraint(
+        "window_start_at < window_end_at AND due_at <= window_end_at", name="window_values"
+    ),
+    UniqueConstraint("candidate_key", name="uq_proactive_candidates_key"),
+    UniqueConstraint("id", "account_id", name="uq_proactive_candidates_id_account"),
+)
+Index("ix_proactive_candidates_due", proactive_candidates.c.state, proactive_candidates.c.due_at)
+
+proactive_candidate_memberships = Table(
+    "proactive_candidate_memberships",
+    metadata,
+    Column("candidate_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("occurrence_id", UUID_TYPE, nullable=False),
+    Column("occurrence_generation", Integer, nullable=False),
+    Column("occurrence_key", LargeBinary, nullable=False),
+    ForeignKeyConstraint(
+        ["candidate_id", "account_id"],
+        ["proactive_candidates.id", "proactive_candidates.account_id"],
+        name="fk_proactive_candidate_memberships_candidate_scope",
+    ),
+    ForeignKeyConstraint(
+        ["occurrence_id", "account_id"],
+        ["proactive_occurrences.id", "proactive_occurrences.account_id"],
+        name="fk_proactive_candidate_memberships_occurrence_scope",
+    ),
+    CheckConstraint("ordinal > 0 AND occurrence_generation > 0", name="membership_values"),
+    CheckConstraint("octet_length(occurrence_key) = 32", name="occurrence_key_32_bytes"),
+    PrimaryKeyConstraint("candidate_id", "ordinal", name="pk_proactive_candidate_memberships"),
+    UniqueConstraint(
+        "candidate_id", "occurrence_id", name="uq_proactive_candidate_memberships_occurrence"
+    ),
+)
+
+proactive_jobs = Table(
+    "proactive_jobs",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("candidate_id", UUID_TYPE),
+    Column("job_kind", Text, nullable=False),
+    Column("idempotency_key", LargeBinary, nullable=False),
+    Column("available_at", UTC_TIMESTAMP, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'pending'")),
+    Column("lease_owner", UUID_TYPE),
+    Column("lease_expires_at", UTC_TIMESTAMP),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_jobs_account"),
+    ForeignKeyConstraint(
+        ["candidate_id", "account_id"],
+        ["proactive_candidates.id", "proactive_candidates.account_id"],
+        name="fk_proactive_jobs_candidate_scope",
+    ),
+    CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_key_32_bytes"),
+    CheckConstraint(
+        "job_kind IN ('candidate_due','compensation_scan','budget_reaper')", name="job_kind_values"
+    ),
+    CheckConstraint("state IN ('pending','leased','succeeded','expired')", name="state_values"),
+    CheckConstraint("attempt_count >= 0", name="attempt_nonnegative"),
+    UniqueConstraint("idempotency_key", name="uq_proactive_jobs_idempotency"),
+)
+Index("ix_proactive_jobs_due", proactive_jobs.c.state, proactive_jobs.c.available_at)
+
+proactive_budget_buckets = Table(
+    "proactive_budget_buckets",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE),
+    Column("scope", Text, nullable=False),
+    Column("local_date", Date, nullable=False),
+    Column("limit_value", Integer, nullable=False),
+    Column("held_count", Integer, nullable=False, server_default=text("0")),
+    Column("committed_count", Integer, nullable=False, server_default=text("0")),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["account_id"], ["accounts.id"], name="fk_proactive_budget_buckets_account"
+    ),
+    ForeignKeyConstraint(
+        ["contact_id", "account_id"],
+        ["contacts.id", "contacts.account_id"],
+        name="fk_proactive_budget_buckets_contact_scope",
+    ),
+    CheckConstraint(
+        "scope IN ('account_daily','contact_daily','contact_bypass')", name="scope_values"
+    ),
+    CheckConstraint(
+        "limit_value >= 0 AND held_count >= 0 AND committed_count >= 0", name="count_nonnegative"
+    ),
+    CheckConstraint("held_count + committed_count <= limit_value", name="count_within_limit"),
+    CheckConstraint("version > 0", name="version_positive"),
+    UniqueConstraint(
+        "account_id",
+        "contact_id",
+        "scope",
+        "local_date",
+        name="uq_proactive_budget_bucket_identity",
+        postgresql_nulls_not_distinct=True,
+    ),
+)
+
+proactive_budget_reservations = Table(
+    "proactive_budget_reservations",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE, nullable=False),
+    Column("candidate_id", UUID_TYPE),
+    Column("reservation_key", LargeBinary, nullable=False),
+    Column("local_date", Date, nullable=False),
+    Column("bypass", Boolean, nullable=False, server_default=text("false")),
+    Column("state", Text, nullable=False, server_default=text("'held'")),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("committed_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["account_id"], ["accounts.id"], name="fk_proactive_budget_reservations_account"
+    ),
+    ForeignKeyConstraint(
+        ["contact_id", "account_id"],
+        ["contacts.id", "contacts.account_id"],
+        name="fk_proactive_budget_reservations_contact_scope",
+    ),
+    ForeignKeyConstraint(
+        ["candidate_id", "account_id"],
+        ["proactive_candidates.id", "proactive_candidates.account_id"],
+        name="fk_proactive_budget_reservations_candidate_scope",
+    ),
+    CheckConstraint("octet_length(reservation_key) = 32", name="reservation_key_32_bytes"),
+    CheckConstraint(
+        "state IN ('held','committed','released','expired','send_unknown')", name="state_values"
+    ),
+    UniqueConstraint("reservation_key", name="uq_proactive_budget_reservations_key"),
+)
+
+proactive_decisions = Table(
+    "proactive_decisions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("candidate_id", UUID_TYPE, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("action", Text, nullable=False),
+    Column("decision_code", Text, nullable=False),
+    Column("topic", Text),
+    Column("priority", Numeric(5, 4), nullable=False),
+    Column("defer_until", UTC_TIMESTAMP),
+    Column("output_hash", LargeBinary, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'accepted'")),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_decisions_account"),
+    ForeignKeyConstraint(
+        ["candidate_id", "account_id"],
+        ["proactive_candidates.id", "proactive_candidates.account_id"],
+        name="fk_proactive_decisions_candidate_scope",
+    ),
+    CheckConstraint("generation > 0", name="generation_positive"),
+    CheckConstraint("action IN ('send_now','defer_once','none')", name="action_values"),
+    CheckConstraint(
+        "decision_code IN ('timely_support','better_later_in_window',"
+        "'not_natural_now','insufficient_context')",
+        name="decision_code_values",
+    ),
+    CheckConstraint("priority >= 0 AND priority <= 1", name="priority_bounded"),
+    CheckConstraint("octet_length(output_hash) = 32", name="output_hash_32_bytes"),
+    CheckConstraint("state IN ('accepted','rejected','stale')", name="state_values"),
+    UniqueConstraint("id", "account_id", name="uq_proactive_decisions_id_account"),
+)
+
+proactive_decision_memberships = Table(
+    "proactive_decision_memberships",
+    metadata,
+    Column("decision_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("occurrence_id", UUID_TYPE, nullable=False),
+    ForeignKeyConstraint(
+        ["decision_id", "account_id"],
+        ["proactive_decisions.id", "proactive_decisions.account_id"],
+        name="fk_proactive_decision_memberships_decision_scope",
+    ),
+    ForeignKeyConstraint(
+        ["occurrence_id", "account_id"],
+        ["proactive_occurrences.id", "proactive_occurrences.account_id"],
+        name="fk_proactive_decision_memberships_occurrence_scope",
+    ),
+    CheckConstraint("ordinal > 0", name="ordinal_positive"),
+    PrimaryKeyConstraint("decision_id", "ordinal", name="pk_proactive_decision_memberships"),
+    UniqueConstraint(
+        "decision_id", "occurrence_id", name="uq_proactive_decision_memberships_occurrence"
+    ),
+)
+
+proactive_state_transitions = Table(
+    "proactive_state_transitions",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("candidate_id", UUID_TYPE, nullable=False),
+    Column("from_state", Text),
+    Column("to_state", Text, nullable=False),
+    Column("event", Text, nullable=False),
+    Column("reason", Text),
+    Column("actor", Text, nullable=False),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["account_id"], ["accounts.id"], name="fk_proactive_state_transitions_account"
+    ),
+    ForeignKeyConstraint(
+        ["candidate_id", "account_id"],
+        ["proactive_candidates.id", "proactive_candidates.account_id"],
+        name="fk_proactive_state_transitions_candidate_scope",
+    ),
+    CheckConstraint("actor IN ('rule','agent','worker','app','control')", name="actor_values"),
+    UniqueConstraint("id", "account_id", name="uq_proactive_state_transitions_id_account"),
+)
+
+proactive_scan_cursors = Table(
+    "proactive_scan_cursors",
+    metadata,
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("cursor_kind", Text, nullable=False),
+    Column("last_scanned_at", UTC_TIMESTAMP),
+    Column("last_candidate_id", UUID_TYPE),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_scan_cursors_account"),
+    ForeignKeyConstraint(
+        ["last_candidate_id", "account_id"],
+        ["proactive_candidates.id", "proactive_candidates.account_id"],
+        name="fk_proactive_scan_cursors_candidate_scope",
+    ),
+    CheckConstraint(
+        "cursor_kind IN ('due','compensation','budget_reaper')", name="cursor_kind_values"
+    ),
+    CheckConstraint("version > 0", name="version_positive"),
+    PrimaryKeyConstraint("account_id", "cursor_kind", name="pk_proactive_scan_cursors"),
+)
+
+M7_TABLES = (
+    "proactive_policies",
+    "proactive_contact_settings",
+    "proactive_life_events",
+    "proactive_intentions",
+    "proactive_relationships",
+    "proactive_occurrences",
+    "proactive_occurrence_evidence",
+    "proactive_candidates",
+    "proactive_candidate_memberships",
+    "proactive_jobs",
+    "proactive_budget_buckets",
+    "proactive_budget_reservations",
+    "proactive_decisions",
+    "proactive_decision_memberships",
+    "proactive_state_transitions",
+    "proactive_scan_cursors",
 )
