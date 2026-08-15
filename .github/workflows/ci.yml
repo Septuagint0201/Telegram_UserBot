@@ -1,0 +1,168 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_INPUT: "1"
+  PYTHONHASHSEED: "0"
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install locked toolchain
+        shell: bash
+        run: |
+          python --version
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes -r requirements/bootstrap.lock
+          .venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+          .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+      - name: Run repository and quality gates
+        shell: bash
+        env:
+          CI_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
+          .venv/bin/ruff format --check .
+          .venv/bin/ruff check .
+          .venv/bin/mypy
+          .venv/bin/python scripts/check_import_boundaries.py
+          .venv/bin/python -m build --no-isolation --outdir .artifacts/dist
+          .venv/bin/python scripts/inspect_build_artifacts.py .artifacts/dist
+          .venv/bin/pytest --junitxml=.artifacts/junit.xml --cov-report=xml:.artifacts/coverage.xml
+          .venv/bin/python scripts/check_coverage.py .artifacts/coverage.json
+          .venv/bin/python scripts/write_acceptance_manifest.py --commit "$CI_COMMIT_SHA" --output .artifacts/m0/acceptance-manifest.json
+          .venv/bin/python scripts/validate_acceptance_manifest.py .artifacts/m0/acceptance-manifest.json
+          .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts
+      - name: Upload preflight evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: preflight-evidence
+          if-no-files-found: ignore
+          path: |
+            .artifacts/coverage.json
+            .artifacts/coverage.xml
+            .artifacts/junit.xml
+            .artifacts/m0/acceptance-manifest.json
+            .artifacts/dist
+            DISCLOSURE
+
+  integration:
+    name: PostgreSQL and Redis integration
+    runs-on: ubuntu-24.04
+    container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
+        env:
+          POSTGRES_DB: telegram_userbot_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres -d telegram_userbot_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8.2.8-bookworm@sha256:2f7462b9e93e0a7ae2edf3a0a0babc8a4d29f8bfc50849b906b7caaef925edc1
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 6379:6379
+    env:
+      TEST_POSTGRES_DSN: postgresql+psycopg://postgres@postgres:5432/telegram_userbot_test
+      TEST_REDIS_URL: redis://redis:6379/0
+      TEST_POSTGRES_IMAGE: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
+      TEST_REDIS_IMAGE: redis:8.2.8-bookworm@sha256:2f7462b9e93e0a7ae2edf3a0a0babc8a4d29f8bfc50849b906b7caaef925edc1
+      CI_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install locked toolchain
+        shell: bash
+        run: |
+          python --version
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes -r requirements/bootstrap.lock
+          .venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+          .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+      - name: Run integration and migration gates
+        shell: bash
+        run: |
+          .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
+          .venv/bin/pytest -m "not browser and not soak and not live and not requires_secret" \
+            --junitxml=.artifacts/m6/junit.xml --cov-report=xml:.artifacts/m6/coverage.xml
+          .venv/bin/python scripts/check_coverage.py .artifacts/coverage.json
+          .venv/bin/python scripts/write_migration_manifest.py --output .artifacts/m6/migration-manifest.json
+          .venv/bin/python scripts/write_acceptance_manifest.py --milestone M6 --commit "$CI_COMMIT_SHA" \
+            --output .artifacts/m6/acceptance-manifest.json
+          .venv/bin/python scripts/validate_acceptance_manifest.py .artifacts/m6/acceptance-manifest.json
+          .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m6
+      - name: Upload integration evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: integration-evidence
+          if-no-files-found: ignore
+          path: |
+            .artifacts/coverage.json
+            .artifacts/m6
+            DISCLOSURE
+
+  browser:
+    name: Chromium browser contract
+    runs-on: ubuntu-24.04
+    container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install locked toolchain and Chromium
+        shell: bash
+        run: |
+          python --version
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes -r requirements/bootstrap.lock
+          .venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+          .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+          .venv/bin/python -m playwright install --with-deps chromium
+      - name: Run browser security contract
+        shell: bash
+        run: |
+          .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
+          .venv/bin/pytest -m browser tests/browser --no-cov --junitxml=.artifacts/browser/junit.xml
+          .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/browser
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: browser-evidence
+          if-no-files-found: ignore
+          path: |
+            .artifacts/browser
+            DISCLOSURE
