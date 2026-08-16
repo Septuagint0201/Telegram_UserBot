@@ -404,7 +404,7 @@ def materialize_reconnect(  # noqa: PLR0913 - snapshot inputs are explicit and i
             source_id=fact.id,
             source_version=fact.version,
             reason=ReasonCode.RELATIONSHIP_RECONNECT,
-            start=max(start, now_utc),
+            start=start,
             end=end,
             timezone_name=fact.timezone_name,
             importance=0.50,
@@ -559,6 +559,7 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
                 ),
             )
             member_hash = membership_digest(tuple(cluster))
+            candidate_start = max(start, now_utc)
             key = derive_key(
                 secret,
                 str(cluster[0].account_id),
@@ -568,7 +569,7 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
                 str(policy_version_id),
                 member_hash.hex(),
                 str(policy.version_id),
-                start.isoformat(),
+                candidate_start.isoformat(),
                 end.isoformat(),
             )
             candidate_id = uuid5(OCCURRENCE_NAMESPACE, "candidate:" + key.hex())
@@ -582,15 +583,15 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
                     generation=1,
                     membership_hash=member_hash,
                     occurrences=tuple(cluster),
-                    window_start_at=max(start, now_utc),
+                    window_start_at=candidate_start,
                     window_end_at=end,
                     policy_version_id=policy_version_id,
                     contact_setting_version=contact_setting_version,
                     relationship_state_version=relationship_state_version,
                     timezone_name=timezone_name,
-                    mode_version=(mode_versions or {}).get(contact_id, 1),
-                    content_revision=(content_revisions or {}).get(contact_id, 0),
-                    activity_revision=(activity_revisions or {}).get(contact_id, 0),
+                    mode_version=(mode_versions or {}).get(conversation_id, 1),
+                    content_revision=(content_revisions or {}).get(conversation_id, 0),
+                    activity_revision=(activity_revisions or {}).get(conversation_id, 0),
                     state=CandidateState.OPEN,
                 )
             )

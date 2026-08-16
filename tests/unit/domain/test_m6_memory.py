@@ -242,9 +242,10 @@ def test_memory_store_acceptance_is_idempotent_and_forget_redacts_every_version(
     second = store.accept(validated)
     assert first.memory_id is not None
     assert second.idempotent
-    forgotten = store.forget(first.memory_id)
+    forgotten = store.forget(first.memory_id, now=NOW + timedelta(minutes=1))
     assert forgotten.current.payload == {}
     assert forgotten.current.rendered_text is None
+    assert all(version.redacted_at == NOW + timedelta(minutes=1) for version in forgotten.versions)
 
 
 def test_memory_store_replay_identity_and_candidate_upgrade_are_scoped() -> None:

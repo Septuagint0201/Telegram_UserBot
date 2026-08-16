@@ -283,8 +283,9 @@ class MemoryStore:
                 changed += 1
         return changed
 
-    def forget(self, memory_id: UUID) -> MemoryRecord:
+    def forget(self, memory_id: UUID, *, now: datetime | None = None) -> MemoryRecord:
         record = self.get(memory_id)
+        current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         forgotten = MemoryRecord(
             id=record.id,
             account_id=record.account_id,
@@ -309,7 +310,7 @@ class MemoryStore:
                     evidence=(),
                     status=MemoryStatus.FORGOTTEN,
                     created_at=version.created_at,
-                    redacted_at=datetime.now(UTC),
+                    redacted_at=current_time,
                 )
                 for version in record.versions
             ),

@@ -240,6 +240,77 @@ def test_m7_candidate_grouping_keeps_account_and_conversation_scopes_separate() 
 
 
 @pytest.mark.unit
+def test_m7_candidate_snapshots_are_conversation_scoped_and_key_the_actual_window() -> None:
+    p = policy()
+    fact = intention(expected_at=NOW + timedelta(minutes=5))
+    first = materialize_intention(fact, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)[0]
+    other_conversation_id = uuid4()
+    second = replace(
+        first,
+        id=uuid4(),
+        conversation_id=other_conversation_id,
+        occurrence_key=sha256(b"other-conversation-occurrence").digest(),
+    )
+    snapshots = {
+        fact.conversation_id: (4, 9, 12),
+        other_conversation_id: (7, 11, 14),
+    }
+    candidates = aggregate_candidates(
+        (first, second),
+        now=NOW,
+        policy=p,
+        secret=PROACTIVE_TEST_SECRET,
+        mode_versions={key: value[0] for key, value in snapshots.items()},
+        content_revisions={key: value[1] for key, value in snapshots.items()},
+        activity_revisions={key: value[2] for key, value in snapshots.items()},
+    )
+    assert {
+        item.conversation_id: (
+            item.mode_version,
+            item.content_revision,
+            item.activity_revision,
+        )
+        for item in candidates
+    } == snapshots
+
+    advanced = aggregate_candidates(
+        (first,),
+        now=NOW + timedelta(minutes=10),
+        policy=p,
+        secret=PROACTIVE_TEST_SECRET,
+    )[0]
+    initial = next(item for item in candidates if item.conversation_id == fact.conversation_id)
+    assert advanced.window_start_at > initial.window_start_at
+    assert advanced.candidate_key != initial.candidate_key
+
+
+@pytest.mark.unit
+def test_m7_reconnect_occurrence_is_stable_across_compensation_scans() -> None:
+    p = policy()
+    fact = RelationshipFact(
+        id=uuid4(),
+        account_id=uuid4(),
+        contact_id=uuid4(),
+        conversation_id=uuid4(),
+        version=1,
+        relationship=RelationshipLevel.FRIEND,
+        last_meaningful_at=NOW - timedelta(days=60),
+        timezone_name="UTC",
+        evidence=(evidence("relationship"),),
+    )
+    first = materialize_reconnect(fact, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)[0]
+    replay = materialize_reconnect(
+        fact,
+        now=NOW + timedelta(minutes=15),
+        policy=p,
+        secret=PROACTIVE_TEST_SECRET,
+    )[0]
+    assert replay.id == first.id
+    assert replay.occurrence_key == first.occurrence_key
+    assert replay.window_start_at == first.window_start_at == NOW.replace(hour=8)
+
+
+@pytest.mark.unit
 def test_m7_rules_cover_event_start_end_reconnect_and_filter_suppressions() -> None:
     p = policy()
     account_id, contact_id, conversation_id = uuid4(), uuid4(), uuid4()
@@ -955,6 +1026,60 @@ def test_m7_final_gate_maps_modes_and_rechecks_all_snapshots() -> None:
             )
         ).reason
         == "BUDGET_EXHAUSTED"
+    )
+
+
+@pytest.mark.unit
+def test_m7_final_gate_rejects_stale_contact_and_relationship_snapshots() -> None:
+    p = policy()
+    candidate = candidate_for(active_policy=p)
+    occurrence = replace(
+        candidate.occurrences[0],
+        contact_setting_version=3,
+        relationship_state_version=7,
+    )
+    candidate = replace(
+        candidate,
+        occurrences=(occurrence,),
+        membership_hash=membership_digest((occurrence,)),
+        contact_setting_version=3,
+        relationship_state_version=7,
+    )
+    decision = AgentDecision(
+        candidate.id,
+        ProactiveAction.SEND_NOW,
+        "timely_support",
+        (occurrence.id,),
+        "check in",
+        0.5,
+    )
+    final = FinalGateInput(
+        AuthorizationInput(candidate, decision, NOW, p, EffectiveMode.AUTO),
+        1,
+        1,
+        EffectiveMode.AUTO,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        NOW,
+        current_contact_setting_version=3,
+        current_relationship_state_version=7,
+    )
+    assert final_gate(final).reason == "AUTHORIZED_FINAL"
+    assert (
+        final_gate(replace(final, current_contact_setting_version=4)).reason
+        == "CONTACT_SETTING_VERSION_STALE"
+    )
+    assert (
+        final_gate(replace(final, current_relationship_state_version=8)).reason
+        == "RELATIONSHIP_STATE_VERSION_STALE"
+    )
+    assert (
+        final_gate(replace(final, current_contact_setting_version=None)).reason
+        == "CONTACT_SETTING_VERSION_STALE"
     )
 
 

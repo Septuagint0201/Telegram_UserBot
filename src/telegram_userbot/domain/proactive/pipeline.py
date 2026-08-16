@@ -61,6 +61,8 @@ class FinalGateInput:
     delivery_already_created: bool = False
     reservation_held: bool = True
     main_output_valid: bool = True
+    current_contact_setting_version: int | None = None
+    current_relationship_state_version: int | None = None
 
 
 def map_mode(mode: EffectiveMode) -> ProactiveTarget:
@@ -168,6 +170,16 @@ def final_gate(value: FinalGateInput) -> GateResult:  # noqa: PLR0911, PLR0912 -
         return GateResult(False, "ACTIVITY_REVISION_STALE")
     if value.snapshot_activity_revision != value.authorization.candidate.activity_revision:
         return GateResult(False, "ACTIVITY_REVISION_SNAPSHOT_INVALID")
+    if (
+        value.authorization.candidate.contact_setting_version
+        != value.current_contact_setting_version
+    ):
+        return GateResult(False, "CONTACT_SETTING_VERSION_STALE")
+    if (
+        value.authorization.candidate.relationship_state_version
+        != value.current_relationship_state_version
+    ):
+        return GateResult(False, "RELATIONSHIP_STATE_VERSION_STALE")
     if not value.reservation_held:
         return GateResult(False, "RESERVATION_NOT_HELD")
     if not value.main_output_valid:
