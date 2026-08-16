@@ -883,10 +883,15 @@ class MemoryRepository:
             .on_conflict_do_nothing(constraint="uq_memory_proposals_idempotency")
         )
         if cast(CursorResult[Any], result).rowcount != 1:
-            # The idempotency key is derived from the model run and ordinal,
-            # which are also covered by a durable unique constraint.  Returning
-            # the deterministic ID lets a replay continue to acceptance instead
-            # of losing the proposal identity on a harmless conflict.
+            await self._require_matching_proposal_replay(
+                validated,
+                recorded_proposal_id=persisted_proposal_id,
+                job_id=job_id,
+                model_run_id=model_run_id,
+                proposal_ordinal=proposal_ordinal,
+                idempotency_key=idempotency_key,
+                validator_policy_version=validator_policy_version,
+            )
             return persisted_proposal_id
         for index, target_id in enumerate(proposal.target_memory_ids):
             target = (
@@ -945,6 +950,118 @@ class MemoryRepository:
                 )
             )
         return persisted_proposal_id
+
+    async def _require_matching_proposal_replay(  # noqa: PLR0913 - durable identity is explicit
+        self,
+        validated: ValidatedProposal,
+        *,
+        recorded_proposal_id: UUID,
+        job_id: UUID,
+        model_run_id: UUID,
+        proposal_ordinal: int,
+        idempotency_key: bytes,
+        validator_policy_version: str,
+    ) -> None:
+        proposal = validated.proposal
+        row = (
+            (
+                await self._session.execute(
+                    select(memory_proposals)
+                    .where(memory_proposals.c.id == recorded_proposal_id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        validation_code = validated.issues[0].code if validated.issues else None
+        if row is None or not _proposal_replay_identity_matches(
+            row,
+            proposal,
+            recorded_proposal_id=recorded_proposal_id,
+            job_id=job_id,
+            model_run_id=model_run_id,
+            proposal_ordinal=proposal_ordinal,
+            idempotency_key=idempotency_key,
+            validator_policy_version=validator_policy_version,
+            state=validated.state,
+            validation_code=validation_code,
+        ):
+            raise ValueError("proposal replay does not match durable identity")
+
+        target_rows = list(
+            (
+                await self._session.execute(
+                    select(
+                        memory_proposal_targets.c.target_memory_id,
+                        memory_proposal_targets.c.target_role,
+                    )
+                    .where(
+                        memory_proposal_targets.c.proposal_id == recorded_proposal_id,
+                        memory_proposal_targets.c.account_id == proposal.account_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        expected_targets = {
+            target_id: _target_role(proposal.operation, index)
+            for index, target_id in enumerate(proposal.target_memory_ids)
+        }
+        durable_targets = {
+            cast(UUID, target["target_memory_id"]): cast(str, target["target_role"])
+            for target in target_rows
+        }
+        if len(target_rows) != len(expected_targets) or durable_targets != expected_targets:
+            raise ValueError("proposal replay does not match durable targets")
+
+        evidence_rows = list(
+            (
+                await self._session.execute(
+                    select(
+                        memory_proposal_evidence.c.message_revision_id,
+                        memory_proposal_evidence.c.evidence_role,
+                        memory_proposal_evidence.c.quoted_span_start,
+                        memory_proposal_evidence.c.quoted_span_end,
+                        memory_proposal_evidence.c.source_content_sha256,
+                        memory_proposal_evidence.c.trust_class,
+                    )
+                    .where(
+                        memory_proposal_evidence.c.proposal_id == recorded_proposal_id,
+                        memory_proposal_evidence.c.account_id == proposal.account_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        durable_evidence = {
+            (
+                evidence["message_revision_id"],
+                evidence["evidence_role"],
+                evidence["quoted_span_start"],
+                evidence["quoted_span_end"],
+                evidence["source_content_sha256"],
+                evidence["trust_class"],
+            )
+            for evidence in evidence_rows
+        }
+        expected_evidence = {
+            (
+                evidence.source_id,
+                evidence.role.value,
+                evidence.span_start,
+                evidence.span_end,
+                evidence.source_content_sha256,
+                evidence.trust.value,
+            )
+            for evidence in proposal.evidence
+        }
+        if len(evidence_rows) != len(expected_evidence) or durable_evidence != expected_evidence:
+            raise ValueError("proposal replay does not match durable evidence")
 
     async def accept_validated_proposal(  # noqa: PLR0913 - public compatibility boundary
         self,
@@ -2670,6 +2787,40 @@ def _proposal_matches(row: Any, proposal: Any) -> bool:
             row["proposed_valid_to"] == proposal.valid_to,
             row["visual_only"] == proposal.visual_only,
         )
+    )
+
+
+def _proposal_replay_identity_matches(  # noqa: PLR0913 - durable identity is explicit
+    row: Any,
+    proposal: Any,
+    *,
+    recorded_proposal_id: UUID,
+    job_id: UUID,
+    model_run_id: UUID,
+    proposal_ordinal: int,
+    idempotency_key: bytes,
+    validator_policy_version: str,
+    state: ProposalState,
+    validation_code: str | None,
+) -> bool:
+    return _proposal_matches(row, proposal) and all(
+        row[column] == value
+        for column, value in {
+            "id": recorded_proposal_id,
+            "account_id": proposal.account_id,
+            "contact_id": None,
+            "conversation_id": proposal.conversation_id,
+            "memory_job_id": job_id,
+            "model_run_id": model_run_id,
+            "model_role": "memory_agent",
+            "idempotency_key": idempotency_key,
+            "proposal_ordinal": proposal_ordinal,
+            "payload_schema_version": 1,
+            "state": state.value,
+            "validation_code": validation_code,
+            "validator_policy_version": validator_policy_version,
+            "retention_class": "memory_proposal",
+        }.items()
     )
 
 

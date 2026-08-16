@@ -184,9 +184,10 @@ def build_text_only_context(
         raise ValueError("decision does not bind candidate topic")
     selected = set(decision.selected_occurrence_ids)
     reasons = tuple(
-        (occurrence.reason.value, occurrence.evidence[0].summary)
+        (occurrence.reason.value, evidence.summary)
         for occurrence in candidate.occurrences
         if occurrence.id in selected
+        for evidence in occurrence.evidence
     )
     if not reasons:
         raise ValueError("context cannot be built without selected evidence")

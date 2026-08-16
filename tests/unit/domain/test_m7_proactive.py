@@ -770,11 +770,19 @@ def test_m7_final_gate_maps_modes_and_rechecks_all_snapshots() -> None:
 @pytest.mark.unit
 def test_m7_context_is_text_only_and_candidate_local() -> None:
     candidate = candidate_for(timezone_name="Asia/Tokyo")
+    occurrence = replace(
+        candidate.occurrences[0],
+        evidence=(
+            replace(candidate.occurrences[0].evidence[0], summary="first evidence"),
+            replace(evidence("message_revision"), summary="second evidence"),
+        ),
+    )
+    candidate = replace(candidate, occurrences=(occurrence,))
     decision = AgentDecision(
         candidate.id,
         ProactiveAction.SEND_NOW,
         "timely_support",
-        (candidate.occurrences[0].id,),
+        (occurrence.id,),
         "synthetic topic",
         0.1,
     )
@@ -783,7 +791,10 @@ def test_m7_context_is_text_only_and_candidate_local() -> None:
     )
     assert context.timezone_name == "Asia/Tokyo"
     assert context.relationship is RelationshipLevel.FRIEND
-    assert context.reasons[0][0] == "promise_due"
+    assert context.reasons == (
+        ("promise_due", "first evidence"),
+        ("promise_due", "second evidence"),
+    )
     with pytest.raises(ValueError, match="decision does not bind"):
         build_text_only_context(
             candidate,

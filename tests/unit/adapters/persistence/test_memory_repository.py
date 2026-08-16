@@ -36,6 +36,7 @@ from telegram_userbot.domain.memory.models import (
 )
 from telegram_userbot.domain.memory.summary import SummaryCoverageError
 from telegram_userbot.domain.memory.validation import ValidatedProposal
+from telegram_userbot.domain.shared.hashing import stable_json_bytes
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
 ERASURE_SECRET = b"e" * 32
@@ -401,8 +402,49 @@ async def test_record_proposal_binds_job_run_manifest_and_evidence_scope() -> No
     assert isinstance(recorded_id, UUID)
     repo._require_message_revision_scope.assert_awaited_once()
 
+    durable_row = {
+        "id": recorded_id,
+        "account_id": account_id,
+        "contact_id": None,
+        "conversation_id": conversation_id,
+        "memory_job_id": job_id,
+        "model_run_id": model_run_id,
+        "model_role": "memory_agent",
+        "idempotency_key": sha256(
+            stable_json_bytes({"model_run_id": str(model_run_id), "proposal_ordinal": 0})
+        ).digest(),
+        "proposal_ordinal": 0,
+        "operation": validated.proposal.operation.value,
+        "memory_type": validated.proposal.memory_type.value,
+        "semantic_key_hash": validated.proposal.semantic_key_hash,
+        "payload_schema_version": 1,
+        "proposed_payload": dict(validated.proposal.payload),
+        "proposed_text": validated.proposal.rendered_text,
+        "proposed_confidence": Decimal("0.9500"),
+        "proposed_importance": Decimal("0.5000"),
+        "proposed_valid_from": validated.proposal.valid_from,
+        "proposed_valid_to": validated.proposal.valid_to,
+        "visual_only": validated.proposal.visual_only,
+        "state": validated.state.value,
+        "validation_code": None,
+        "validator_policy_version": "m6-v1",
+        "retention_class": "memory_proposal",
+    }
+    durable_evidence = {
+        "message_revision_id": source.source_id,
+        "evidence_role": validated.proposal.evidence[0].role.value,
+        "quoted_span_start": validated.proposal.evidence[0].span_start,
+        "quoted_span_end": validated.proposal.evidence[0].span_end,
+        "source_content_sha256": source.content_sha256,
+        "trust_class": validated.proposal.evidence[0].trust.value,
+    }
     session.scalar.side_effect = [job_id, model_run_id]
-    session.execute.return_value = _Result(rowcount=0)
+    session.execute.side_effect = [
+        _Result(rowcount=0),
+        _Result(durable_row),
+        _Result(rows=[]),
+        _Result(rows=[durable_evidence]),
+    ]
     replayed_id = await repo.record_proposal(
         validated,
         job_id=job_id,
@@ -411,6 +453,38 @@ async def test_record_proposal_binds_job_run_manifest_and_evidence_scope() -> No
         manifest=manifest,
     )
     assert replayed_id == recorded_id
+
+    mutated = replace(
+        validated,
+        proposal=replace(validated.proposal, payload={"value": "mutated"}),
+    )
+    session.scalar.side_effect = [job_id, model_run_id]
+    session.execute.side_effect = [_Result(rowcount=0), _Result(durable_row)]
+    with pytest.raises(ValueError, match="replay does not match durable identity"):
+        await repo.record_proposal(
+            mutated,
+            job_id=job_id,
+            model_run_id=model_run_id,
+            proposal_ordinal=0,
+            manifest=manifest,
+        )
+
+    session.scalar.side_effect = [job_id, model_run_id]
+    session.execute.side_effect = [
+        _Result(rowcount=0),
+        _Result(durable_row),
+        _Result(rows=[]),
+        _Result(rows=[]),
+    ]
+    with pytest.raises(ValueError, match="replay does not match durable evidence"):
+        await repo.record_proposal(
+            validated,
+            job_id=job_id,
+            model_run_id=model_run_id,
+            proposal_ordinal=0,
+            manifest=manifest,
+        )
+
     session.scalar.side_effect = [None]
     with pytest.raises(ValueError, match="job and manifest"):
         await repo.record_proposal(
@@ -438,6 +512,7 @@ async def test_record_proposal_binds_job_run_manifest_and_evidence_scope() -> No
         ),
     )
     session.scalar.side_effect = [job_id, model_run_id]
+    session.execute.side_effect = None
     session.execute.return_value = _Result(rowcount=1)
     with pytest.raises(ValueError, match="canonical message root"):
         await repo.record_proposal(
