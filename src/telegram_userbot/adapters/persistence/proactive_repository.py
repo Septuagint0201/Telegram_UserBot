@@ -367,6 +367,21 @@ class ProactiveRepository:
                 ),
                 completed_at=case(
                     (candidate_not_runnable, current_time),
+                    (
+                        and_(
+                            proactive_jobs.c.candidate_id.is_not(None),
+                            exists(
+                                select(1).where(
+                                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                                    proactive_candidates.c.account_id
+                                    == proactive_jobs.c.account_id,
+                                    proactive_candidates.c.window_end_at <= current_time,
+                                )
+                            ),
+                        ),
+                        current_time,
+                    ),
+                    (proactive_jobs.c.attempt_count >= max_attempts, current_time),
                     else_=proactive_jobs.c.completed_at,
                 ),
             )
@@ -522,7 +537,8 @@ class ProactiveRepository:
                     lease_expires_at=None,
                     completed_at=case(
                         (candidate_not_runnable, current_time),
-                        (candidate_window_closed, None),
+                        (candidate_window_closed, current_time),
+                        (proactive_jobs.c.attempt_count >= max_attempts, current_time),
                         else_=current_time if succeeded else None,
                     ),
                     available_at=next_available_at,
@@ -610,6 +626,8 @@ class ProactiveRepository:
                     lease_expires_at=None,
                     completed_at=case(
                         (candidate_not_runnable, current_time),
+                        (candidate_window_closed, current_time),
+                        (proactive_jobs.c.attempt_count >= max_attempts, current_time),
                         else_=proactive_jobs.c.completed_at,
                     ),
                 )

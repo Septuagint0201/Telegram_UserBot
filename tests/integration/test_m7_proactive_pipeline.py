@@ -313,14 +313,19 @@ async def test_m7_concurrent_job_replay_and_same_owner_reclaim_are_fenced(
             is None
         )
     async with factory() as verification:
-        assert (
-            await verification.scalar(
-                select(proactive_jobs.c.state).where(
-                    proactive_jobs.c.idempotency_key == terminal_key
+        terminal_row = (
+            (
+                await verification.execute(
+                    select(proactive_jobs.c.state, proactive_jobs.c.completed_at).where(
+                        proactive_jobs.c.idempotency_key == terminal_key
+                    )
                 )
             )
-            == "dead_letter"
+            .mappings()
+            .one()
         )
+        assert terminal_row["state"] == "dead_letter"
+        assert terminal_row["completed_at"] == NOW + timedelta(seconds=11)
 
 
 @pytest.mark.integration
