@@ -34,6 +34,7 @@ from telegram_userbot.domain.proactive.models import (
     ReservationState,
     membership_digest,
 )
+from telegram_userbot.domain.proactive.time import local_interval_to_utc
 from telegram_userbot.domain.shared.time import require_aware
 
 
@@ -45,12 +46,16 @@ class ProactiveRepository:
 
     async def enqueue_candidate(self, candidate: Candidate, *, now: datetime) -> UUID:
         current_time = require_aware(now, "now")
+        if candidate.policy_version_id is None or not candidate.timezone_name:
+            raise ValueError("candidate policy and timezone snapshots are required")
         occurrence_keys = [occurrence.occurrence_key for occurrence in candidate.occurrences]
         if (
             any(
                 occurrence.account_id != candidate.account_id
                 or occurrence.contact_id != candidate.contact_id
                 or occurrence.conversation_id != candidate.conversation_id
+                or occurrence.timezone_name != candidate.timezone_name
+                or occurrence.policy_version_id != candidate.policy_version_id
                 for occurrence in candidate.occurrences
             )
             or len({occurrence.id for occurrence in candidate.occurrences})
@@ -150,6 +155,7 @@ class ProactiveRepository:
                 window_end_at=candidate.window_end_at,
                 due_at=candidate.window_start_at,
                 policy_version_id=candidate.policy_version_id,
+                timezone_name=candidate.timezone_name,
                 mode_version=candidate.mode_version,
                 content_revision=candidate.content_revision,
                 activity_revision=candidate.activity_revision,
@@ -463,32 +469,107 @@ class ProactiveRepository:
         )
         return result.rowcount
 
-    async def reserve_budget(  # noqa: PLR0913 - all budget scopes are part of the reservation key
+    async def reserve_budget(  # noqa: PLR0912,PLR0913 - durable authorization spans every budget scope
         self,
         *,
         account_id: UUID,
         contact_id: UUID,
-        local_date: date,
+        account_local_date: date,
+        contact_local_date: date,
+        account_timezone_name: str,
+        contact_timezone_name: str,
         limits: BudgetLimits,
+        now: datetime,
         expires_at: datetime,
         reservation_key: bytes,
-        candidate_id: UUID | None = None,
+        candidate_id: UUID,
+        decision_id: UUID,
+        policy_version_id: UUID,
+        authorization_generation: int,
         bypass: bool = False,
     ) -> BudgetReservation | None:
         if len(reservation_key) != 32:
             raise ValueError("budget reservation identity is invalid")
+        if authorization_generation < 1:
+            raise ValueError("authorization generation must be positive")
+        current_time = require_aware(now, "now")
         expiry = require_aware(expires_at, "expires_at")
+        account_start, account_end = local_interval_to_utc(
+            account_local_date, datetime.min.time(), datetime.min.time(), account_timezone_name
+        )
+        contact_start, contact_end = local_interval_to_utc(
+            contact_local_date, datetime.min.time(), datetime.min.time(), contact_timezone_name
+        )
         if bypass and limits.bypass_daily == 0:
             return None
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-            {"lock_key": f"proactive_budget:{reservation_key.hex()}"},
+            {"lock_key": f"proactive_budget:{account_id}:{reservation_key.hex()}"},
         )
+        binding = (
+            (
+                await self._session.execute(
+                    select(
+                        proactive_candidates.c.id.label("candidate_row_id"),
+                        proactive_candidates.c.account_id,
+                        proactive_candidates.c.contact_id,
+                        proactive_candidates.c.conversation_id,
+                        proactive_candidates.c.generation,
+                        proactive_candidates.c.policy_version_id.label("candidate_policy_id"),
+                        proactive_candidates.c.timezone_name.label("candidate_timezone"),
+                        proactive_decisions.c.id.label("decision_row_id"),
+                        proactive_decisions.c.candidate_id.label("decision_candidate_id"),
+                        proactive_decisions.c.generation.label("decision_generation"),
+                        proactive_decisions.c.contact_id.label("decision_contact_id"),
+                        proactive_decisions.c.conversation_id.label("decision_conversation_id"),
+                        proactive_decisions.c.policy_version_id.label("decision_policy_id"),
+                        proactive_decisions.c.timezone_name.label("decision_timezone"),
+                    )
+                    .select_from(
+                        proactive_candidates.join(
+                            proactive_decisions,
+                            (proactive_decisions.c.candidate_id == proactive_candidates.c.id)
+                            & (
+                                proactive_decisions.c.account_id
+                                == proactive_candidates.c.account_id
+                            ),
+                        )
+                    )
+                    .where(
+                        proactive_candidates.c.id == candidate_id,
+                        proactive_candidates.c.account_id == account_id,
+                        proactive_decisions.c.id == decision_id,
+                        proactive_decisions.c.account_id == account_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if binding is None:
+            raise ValueError("budget reservation decision/candidate binding is missing")
+        if (
+            binding["contact_id"] != contact_id
+            or binding["decision_candidate_id"] != candidate_id
+            or binding["decision_contact_id"] != contact_id
+            or binding["decision_conversation_id"] != binding["conversation_id"]
+            or binding["candidate_policy_id"] != policy_version_id
+            or binding["decision_policy_id"] != policy_version_id
+            or binding["candidate_policy_id"] is None
+            or binding["decision_generation"] != binding["generation"]
+            or binding["decision_timezone"] != binding["candidate_timezone"]
+        ):
+            raise ValueError("budget reservation scope does not match decision/candidate")
+
         existing = (
             (
                 await self._session.execute(
                     select(proactive_budget_reservations)
-                    .where(proactive_budget_reservations.c.reservation_key == reservation_key)
+                    .where(
+                        proactive_budget_reservations.c.account_id == account_id,
+                        proactive_budget_reservations.c.reservation_key == reservation_key,
+                    )
                     .with_for_update()
                 )
             )
@@ -496,13 +577,18 @@ class ProactiveRepository:
             .one_or_none()
         )
         if existing is not None:
-            if (
-                existing["account_id"] != account_id
-                or existing["contact_id"] != contact_id
-                or existing["local_date"] != local_date
-                or existing["bypass"] != bypass
-                or existing["candidate_id"] != candidate_id
-                or existing["expires_at"] != expiry
+            if any(
+                (
+                    existing["contact_id"] != contact_id,
+                    existing["candidate_id"] != candidate_id,
+                    existing["decision_id"] != decision_id,
+                    existing["policy_version_id"] != policy_version_id,
+                    existing["authorization_generation"] != authorization_generation,
+                    existing["account_local_date"] != account_local_date,
+                    existing["contact_local_date"] != contact_local_date,
+                    existing["bypass"] != bypass,
+                    existing["expires_at"] != expiry,
+                )
             ):
                 raise ValueError("budget reservation key belongs to another scope")
             reservation = _reservation(existing)
@@ -516,14 +602,41 @@ class ProactiveRepository:
                 }
                 else None
             )
+
         scopes = [
-            (None, "account_daily", limits.account_daily),
-            (contact_id, "contact_daily", limits.contact_daily),
+            (
+                None,
+                "account_daily",
+                account_local_date,
+                account_timezone_name,
+                account_start,
+                account_end,
+                limits.account_daily,
+            ),
+            (
+                contact_id,
+                "contact_daily",
+                contact_local_date,
+                contact_timezone_name,
+                contact_start,
+                contact_end,
+                limits.contact_daily,
+            ),
         ]
         if bypass:
-            scopes.append((contact_id, "contact_bypass", limits.bypass_daily))
+            scopes.append(
+                (
+                    contact_id,
+                    "contact_bypass",
+                    contact_local_date,
+                    contact_timezone_name,
+                    contact_start,
+                    contact_end,
+                    limits.bypass_daily,
+                )
+            )
         buckets: list[tuple[Any, int]] = []
-        for scoped_contact, scope, limit in scopes:
+        for scoped_contact, scope, bucket_date, timezone_name, starts_at, ends_at, limit in scopes:
             await self._session.execute(
                 postgresql_insert(proactive_budget_buckets)
                 .values(
@@ -531,7 +644,10 @@ class ProactiveRepository:
                     account_id=account_id,
                     contact_id=scoped_contact,
                     scope=scope,
-                    local_date=local_date,
+                    local_date=bucket_date,
+                    timezone_name_snapshot=timezone_name,
+                    starts_at=starts_at,
+                    ends_at=ends_at,
                     limit_value=limit,
                     held_count=0,
                     committed_count=0,
@@ -539,7 +655,7 @@ class ProactiveRepository:
                 )
                 .on_conflict_do_nothing(constraint="uq_proactive_budget_bucket_identity")
             )
-            row = (
+            raw_row = (
                 (
                     await self._session.execute(
                         select(proactive_budget_buckets)
@@ -549,28 +665,43 @@ class ProactiveRepository:
                             if scoped_contact is None
                             else proactive_budget_buckets.c.contact_id == scoped_contact,
                             proactive_budget_buckets.c.scope == scope,
-                            proactive_budget_buckets.c.local_date == local_date,
+                            proactive_budget_buckets.c.local_date == bucket_date,
                         )
                         .with_for_update()
                     )
                 )
                 .mappings()
-                .one()
+                .one_or_none()
             )
+            if raw_row is None:
+                raise RuntimeError("budget bucket disappeared during reservation")
+            row = dict(raw_row)
+            if (
+                row["timezone_name_snapshot"] != timezone_name
+                or row["starts_at"] != starts_at
+                or row["ends_at"] != ends_at
+            ):
+                raise ValueError("budget bucket snapshot does not match reservation")
             used = row["held_count"] + row["committed_count"]
             effective_limit = min(row["limit_value"], limit)
             if effective_limit < row["limit_value"] and used <= effective_limit:
-                await self._session.execute(
-                    update(proactive_budget_buckets)
-                    .where(
-                        proactive_budget_buckets.c.id == row["id"],
-                        proactive_budget_buckets.c.limit_value == row["limit_value"],
-                    )
-                    .values(
-                        limit_value=effective_limit,
-                        version=proactive_budget_buckets.c.version + 1,
-                    )
+                result = cast(
+                    CursorResult[Any],
+                    await self._session.execute(
+                        update(proactive_budget_buckets)
+                        .where(
+                            proactive_budget_buckets.c.id == row["id"],
+                            proactive_budget_buckets.c.version == row["version"],
+                        )
+                        .values(
+                            limit_value=effective_limit,
+                            version=proactive_budget_buckets.c.version + 1,
+                        )
+                    ),
                 )
+                if result.rowcount != 1:
+                    raise RuntimeError("budget bucket limit CAS failed")
+                row = dict(row, limit_value=effective_limit, version=row["version"] + 1)
             buckets.append((row, effective_limit))
         if any(
             row["held_count"] + row["committed_count"] >= effective_limit
@@ -583,29 +714,47 @@ class ProactiveRepository:
                 id=reservation_id,
                 account_id=account_id,
                 contact_id=contact_id,
+                conversation_id=binding["conversation_id"],
                 candidate_id=candidate_id,
+                decision_id=decision_id,
+                policy_version_id=policy_version_id,
+                authorization_generation=authorization_generation,
+                account_bucket_id=buckets[0][0]["id"],
+                contact_bucket_id=buckets[1][0]["id"],
+                bypass_bucket_id=buckets[2][0]["id"] if bypass else None,
                 reservation_key=reservation_key,
-                local_date=local_date,
+                account_local_date=account_local_date,
+                contact_local_date=contact_local_date,
+                local_date=contact_local_date,
                 bypass=bypass,
                 state="held",
                 expires_at=expiry,
+                held_at=current_time,
             )
         )
         for row, _effective_limit in buckets:
-            await self._session.execute(
-                update(proactive_budget_buckets)
-                .where(proactive_budget_buckets.c.id == row["id"])
-                .values(
-                    held_count=proactive_budget_buckets.c.held_count + 1,
-                    version=proactive_budget_buckets.c.version + 1,
-                )
+            result = cast(
+                CursorResult[Any],
+                await self._session.execute(
+                    update(proactive_budget_buckets)
+                    .where(
+                        proactive_budget_buckets.c.id == row["id"],
+                        proactive_budget_buckets.c.version == row["version"],
+                    )
+                    .values(
+                        held_count=proactive_budget_buckets.c.held_count + 1,
+                        version=proactive_budget_buckets.c.version + 1,
+                    )
+                ),
             )
+            if result.rowcount != 1:
+                raise RuntimeError("budget bucket hold CAS failed")
         return BudgetReservation(
             reservation_id,
             reservation_key,
             account_id,
             contact_id,
-            local_date,
+            contact_local_date,
             bypass,
             ReservationState.HELD,
             expiry,
@@ -657,41 +806,54 @@ class ProactiveRepository:
         ):
             target = ReservationState.EXPIRED
         delta_committed = target in {ReservationState.COMMITTED, ReservationState.SEND_UNKNOWN}
-        await self._session.execute(
-            update(proactive_budget_reservations)
-            .where(
-                proactive_budget_reservations.c.id == row["id"],
-                proactive_budget_reservations.c.state == "held",
-            )
-            .values(state=target.value, committed_at=current_time if delta_committed else None)
-        )
-        scopes = [(None, "account_daily"), (row["contact_id"], "contact_daily")]
-        if row["bypass"]:
-            scopes.append((row["contact_id"], "contact_bypass"))
-        for scoped_contact, scope in scopes:
+        reservation_update = cast(
+            CursorResult[Any],
             await self._session.execute(
-                update(proactive_budget_buckets)
+                update(proactive_budget_reservations)
                 .where(
-                    proactive_budget_buckets.c.account_id == row["account_id"],
-                    proactive_budget_buckets.c.contact_id.is_(None)
-                    if scoped_contact is None
-                    else proactive_budget_buckets.c.contact_id == scoped_contact,
-                    proactive_budget_buckets.c.scope == scope,
-                    proactive_budget_buckets.c.local_date == row["local_date"],
+                    proactive_budget_reservations.c.id == row["id"],
+                    proactive_budget_reservations.c.state == "held",
                 )
                 .values(
-                    held_count=proactive_budget_buckets.c.held_count - 1,
-                    committed_count=proactive_budget_buckets.c.committed_count
-                    + (1 if delta_committed else 0),
-                    version=proactive_budget_buckets.c.version + 1,
+                    state=target.value,
+                    committed_at=current_time if delta_committed else None,
+                    terminal_at=current_time,
                 )
+            ),
+        )
+        if reservation_update.rowcount != 1:
+            raise RuntimeError("budget reservation settlement CAS failed")
+        bucket_ids = [row["account_bucket_id"], row["contact_bucket_id"]]
+        if row["bypass"]:
+            if row["bypass_bucket_id"] is None:
+                raise RuntimeError("bypass reservation has no bypass bucket")
+            bucket_ids.append(row["bypass_bucket_id"])
+        for bucket_id in bucket_ids:
+            bucket_update = cast(
+                CursorResult[Any],
+                await self._session.execute(
+                    update(proactive_budget_buckets)
+                    .where(
+                        proactive_budget_buckets.c.id == bucket_id,
+                        proactive_budget_buckets.c.account_id == row["account_id"],
+                        proactive_budget_buckets.c.held_count > 0,
+                    )
+                    .values(
+                        held_count=proactive_budget_buckets.c.held_count - 1,
+                        committed_count=proactive_budget_buckets.c.committed_count
+                        + (1 if delta_committed else 0),
+                        version=proactive_budget_buckets.c.version + 1,
+                    )
+                ),
             )
+            if bucket_update.rowcount != 1:
+                raise RuntimeError("budget bucket settlement CAS failed")
         return BudgetReservation(
             cast(UUID, row["id"]),
             reservation_key,
             cast(UUID, row["account_id"]),
             cast(UUID, row["contact_id"]),
-            cast(date, row["local_date"]),
+            cast(date, row["contact_local_date"]),
             cast(bool, row["bypass"]),
             target,
             cast(datetime, row["expires_at"]),
@@ -771,6 +933,8 @@ class ProactiveRepository:
     ) -> UUID:
         if decision.candidate_id != candidate.id or len(output_hash) != 32:
             raise ValueError("decision does not bind candidate")
+        if candidate.policy_version_id is None or not candidate.timezone_name:
+            raise ValueError("candidate policy and timezone snapshots are required")
         current_time = require_aware(now, "now")
         candidate_occurrence_ids = {occurrence.id for occurrence in candidate.occurrences}
         if not set(decision.selected_occurrence_ids) <= candidate_occurrence_ids:
@@ -794,10 +958,7 @@ class ProactiveRepository:
             .mappings()
             .one_or_none()
         )
-        if current_candidate is None or (
-            current_candidate["generation"] != candidate.generation
-            or current_candidate["membership_hash"] != candidate.membership_hash
-        ):
+        if current_candidate is None or not _candidate_matches(current_candidate, candidate):
             raise ValueError("candidate snapshot is stale")
         existing = (
             (
@@ -849,7 +1010,11 @@ class ProactiveRepository:
                 candidate_id=candidate.id,
                 generation=candidate.generation,
                 action=decision.action.value,
+                contact_id=candidate.contact_id,
+                conversation_id=candidate.conversation_id,
                 decision_code=decision.decision_code,
+                policy_version_id=candidate.policy_version_id,
+                timezone_name=candidate.timezone_name,
                 topic=decision.topic,
                 priority=decision.priority,
                 defer_until=decision.defer_until,
@@ -897,15 +1062,20 @@ class ProactiveRepository:
             ProactiveAction.DEFER_ONCE: "deferred_once",
             ProactiveAction.NONE: "evaluated_none",
         }[decision.action]
-        await self._session.execute(
-            update(proactive_candidates)
-            .where(
-                proactive_candidates.c.id == candidate.id,
-                proactive_candidates.c.account_id == candidate.account_id,
-                proactive_candidates.c.state.in_(("open", "evaluating")),
-            )
-            .values(state=target_state)
+        candidate_update = cast(
+            CursorResult[Any],
+            await self._session.execute(
+                update(proactive_candidates)
+                .where(
+                    proactive_candidates.c.id == candidate.id,
+                    proactive_candidates.c.account_id == candidate.account_id,
+                    proactive_candidates.c.state.in_(("open", "evaluating")),
+                )
+                .values(state=target_state)
+            ),
         )
+        if candidate_update.rowcount != 1:
+            raise RuntimeError("candidate state transition CAS failed")
         await self._session.execute(
             insert(proactive_state_transitions).values(
                 id=uuid4(),
@@ -942,7 +1112,7 @@ def _reservation(row: Any) -> BudgetReservation:
         cast(bytes, row["reservation_key"]),
         cast(UUID, row["account_id"]),
         cast(UUID, row["contact_id"]),
-        cast(date, row["local_date"]),
+        cast(date, row.get("contact_local_date", row.get("local_date"))),
         cast(bool, row["bypass"]),
         ReservationState(row["state"]),
         cast(datetime, row["expires_at"]),
@@ -989,6 +1159,7 @@ def _candidate_matches(row: Any, candidate: Candidate) -> bool:
             "window_start_at": candidate.window_start_at,
             "window_end_at": candidate.window_end_at,
             "policy_version_id": candidate.policy_version_id,
+            "timezone_name": candidate.timezone_name,
             "mode_version": candidate.mode_version,
             "content_revision": candidate.content_revision,
             "activity_revision": candidate.activity_revision,
@@ -1068,8 +1239,12 @@ def _decision_matches(
         for column, value in {
             "id": uuid5(candidate.id, f"proactive-decision:{output_hash.hex()}"),
             "account_id": candidate.account_id,
+            "contact_id": candidate.contact_id,
+            "conversation_id": candidate.conversation_id,
             "candidate_id": candidate.id,
             "generation": candidate.generation,
+            "policy_version_id": candidate.policy_version_id,
+            "timezone_name": candidate.timezone_name,
             "action": decision.action.value,
             "decision_code": decision.decision_code,
             "topic": decision.topic,

@@ -122,10 +122,18 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
         await repo.reserve_budget(
             account_id=account_id,
             contact_id=contact_id,
-            local_date=NOW.date(),
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
             limits=BudgetLimits(1, 1),
+            now=NOW,
             expires_at=NOW,
             reservation_key=b"short",
+            candidate_id=uuid4(),
+            decision_id=uuid4(),
+            policy_version_id=uuid4(),
+            authorization_generation=1,
         )
     with pytest.raises(ValueError, match="invalid budget settlement"):
         await repo.settle_budget(
@@ -157,10 +165,18 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
         await repo.reserve_budget(
             account_id=account_id,
             contact_id=contact_id,
-            local_date=NOW.date(),
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
             limits=BudgetLimits(1, 1),
+            now=NOW,
             expires_at=naive,
             reservation_key=b"p" * 32,
+            candidate_id=uuid4(),
+            decision_id=uuid4(),
+            policy_version_id=uuid4(),
+            authorization_generation=1,
         )
     with pytest.raises(ValueError, match="timezone-aware"):
         await repo.settle_budget(
@@ -175,10 +191,18 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
         await repo.reserve_budget(
             account_id=account_id,
             contact_id=contact_id,
-            local_date=NOW.date(),
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
             limits=BudgetLimits(1, 1),
+            now=NOW,
             expires_at=datetime(2026, 8, 16, 12, tzinfo=_NoOffset()),
             reservation_key=b"q" * 32,
+            candidate_id=uuid4(),
+            decision_id=uuid4(),
+            policy_version_id=uuid4(),
+            authorization_generation=1,
         )
 
 
@@ -190,6 +214,10 @@ async def test_proactive_persistence_rejects_unbound_decisions_without_database_
         SimpleNamespace(
             id=uuid4(),
             account_id=uuid4(),
+            contact_id=uuid4(),
+            conversation_id=uuid4(),
+            policy_version_id=uuid4(),
+            timezone_name="UTC",
             generation=1,
             membership_hash=b"m" * 32,
             occurrences=(),
@@ -258,15 +286,26 @@ async def test_proactive_persistence_success_paths_are_transaction_shaped() -> N
     )
 
     candidate_id = uuid4()
+    contact_id, conversation_id, policy_id = uuid4(), uuid4(), uuid4()
     empty_membership = membership_digest(())
     candidate = cast(
         Candidate,
         SimpleNamespace(
             id=candidate_id,
             account_id=account_id,
+            contact_id=contact_id,
+            conversation_id=conversation_id,
+            candidate_key=b"c" * 32,
             generation=1,
             membership_hash=empty_membership,
             occurrences=(),
+            window_start_at=NOW,
+            window_end_at=NOW + timedelta(hours=1),
+            policy_version_id=policy_id,
+            timezone_name="UTC",
+            mode_version=1,
+            content_revision=0,
+            activity_revision=0,
         ),
     )
     decision = AgentDecision(
@@ -281,8 +320,19 @@ async def test_proactive_persistence_success_paths_are_transaction_shaped() -> N
         _Result(
             {
                 "id": candidate_id,
+                "account_id": account_id,
+                "contact_id": contact_id,
+                "conversation_id": conversation_id,
+                "candidate_key": b"c" * 32,
                 "generation": 1,
                 "membership_hash": empty_membership,
+                "window_start_at": NOW,
+                "window_end_at": NOW + timedelta(hours=1),
+                "policy_version_id": policy_id,
+                "timezone_name": "UTC",
+                "mode_version": 1,
+                "content_revision": 0,
+                "activity_revision": 0,
                 "state": "open",
             }
         ),
@@ -364,6 +414,7 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
     None
 ):
     account_id, contact_id, conversation_id = uuid4(), uuid4(), uuid4()
+    policy_id = uuid4()
     occurrence_id = uuid4()
     occurrence = SimpleNamespace(
         id=occurrence_id,
@@ -383,7 +434,7 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
         source_type="rule",
         source_id=uuid4(),
         source_version="v1",
-        policy_version_id=None,
+        policy_version_id=policy_id,
         quiet_bypass_possible=False,
         evidence=(
             SimpleNamespace(
@@ -411,7 +462,7 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
             occurrences=occurrences,
             window_start_at=NOW,
             window_end_at=NOW + timedelta(hours=1),
-            policy_version_id=None,
+            policy_version_id=policy_id,
             timezone_name="UTC",
             mode_version=1,
             content_revision=0,
@@ -451,6 +502,7 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
         "window_start_at": candidate.window_start_at,
         "window_end_at": candidate.window_end_at,
         "policy_version_id": candidate.policy_version_id,
+        "timezone_name": candidate.timezone_name,
         "mode_version": candidate.mode_version,
         "content_revision": candidate.content_revision,
         "activity_revision": candidate.activity_revision,
@@ -539,53 +591,110 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
 @pytest.mark.asyncio
 async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal() -> None:
     account_id, contact_id = uuid4(), uuid4()
+    candidate_id, decision_id, policy_id = uuid4(), uuid4(), uuid4()
+    conversation_id = uuid4()
     key = b"r" * 32
+    binding = {
+        "candidate_row_id": candidate_id,
+        "account_id": account_id,
+        "contact_id": contact_id,
+        "conversation_id": conversation_id,
+        "generation": 1,
+        "candidate_policy_id": policy_id,
+        "candidate_timezone": "UTC",
+        "decision_row_id": decision_id,
+        "decision_candidate_id": candidate_id,
+        "decision_generation": 1,
+        "decision_contact_id": contact_id,
+        "decision_conversation_id": conversation_id,
+        "decision_policy_id": policy_id,
+        "decision_timezone": "UTC",
+    }
     row = {
         "id": uuid4(),
         "reservation_key": key,
         "account_id": account_id,
         "contact_id": contact_id,
+        "conversation_id": conversation_id,
+        "candidate_id": candidate_id,
+        "decision_id": decision_id,
+        "policy_version_id": policy_id,
+        "authorization_generation": 1,
+        "account_bucket_id": uuid4(),
+        "contact_bucket_id": uuid4(),
+        "bypass_bucket_id": None,
+        "account_local_date": NOW.date(),
+        "contact_local_date": NOW.date(),
         "local_date": NOW.date(),
         "bypass": False,
-        "candidate_id": None,
         "state": "held",
         "expires_at": NOW + timedelta(hours=1),
     }
     session = AsyncMock()
-    session.execute.return_value = _Result(row)
     repo = ProactiveRepository(cast(AsyncSession, session))
-    with pytest.raises(ValueError, match="another scope"):
+    session.execute.side_effect = [_Result(), _Result(binding), _Result(row)]
+    with pytest.raises(ValueError, match="scope"):
         await repo.reserve_budget(
-            account_id=uuid4(),
-            contact_id=contact_id,
-            local_date=NOW.date(),
+            account_id=account_id,
+            contact_id=uuid4(),
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
             limits=BudgetLimits(1, 1),
+            now=NOW,
             expires_at=NOW + timedelta(hours=1),
             reservation_key=key,
+            candidate_id=candidate_id,
+            decision_id=decision_id,
+            policy_version_id=policy_id,
+            authorization_generation=1,
         )
+    session.execute.side_effect = [_Result(), _Result(binding), _Result(row)]
     replay = await repo.reserve_budget(
         account_id=account_id,
         contact_id=contact_id,
-        local_date=NOW.date(),
+        account_local_date=NOW.date(),
+        contact_local_date=NOW.date(),
+        account_timezone_name="UTC",
+        contact_timezone_name="UTC",
         limits=BudgetLimits(1, 1),
+        now=NOW,
         expires_at=NOW + timedelta(hours=1),
         reservation_key=key,
+        candidate_id=candidate_id,
+        decision_id=decision_id,
+        policy_version_id=policy_id,
+        authorization_generation=1,
     )
     assert replay is not None
     assert replay.state is ReservationState.HELD
-    session.execute.return_value = _Result(dict(row, state="released"))
+    session.execute.side_effect = [
+        _Result(),
+        _Result(binding),
+        _Result(dict(row, state="released")),
+    ]
     assert (
         await repo.reserve_budget(
             account_id=account_id,
             contact_id=contact_id,
-            local_date=NOW.date(),
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
             limits=BudgetLimits(1, 1),
+            now=NOW,
             expires_at=NOW + timedelta(hours=1),
             reservation_key=key,
+            candidate_id=candidate_id,
+            decision_id=decision_id,
+            policy_version_id=policy_id,
+            authorization_generation=1,
         )
         is None
     )
     session.execute.return_value = _Result(None)
+    session.execute.side_effect = None
     assert (
         await repo.settle_budget(
             account_id=account_id,
@@ -647,11 +756,24 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
         SimpleNamespace(
             id=candidate_id,
             account_id=account_id,
+            contact_id=uuid4(),
+            conversation_id=uuid4(),
+            candidate_key=b"c" * 32,
             generation=1,
             membership_hash=membership_hash,
             occurrences=(),
+            window_start_at=NOW,
+            window_end_at=NOW + timedelta(hours=1),
+            policy_version_id=uuid4(),
+            timezone_name="UTC",
+            mode_version=1,
+            content_revision=0,
+            activity_revision=0,
         ),
     )
+    contact_id = candidate.contact_id
+    conversation_id = candidate.conversation_id
+    policy_id = candidate.policy_version_id
     decision = AgentDecision(
         candidate_id,
         ProactiveAction.NONE,
@@ -666,8 +788,19 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
         _Result(
             {
                 "id": candidate_id,
+                "account_id": account_id,
+                "contact_id": contact_id,
+                "conversation_id": conversation_id,
+                "candidate_key": b"c" * 32,
                 "generation": 1,
                 "membership_hash": membership_hash,
+                "window_start_at": NOW,
+                "window_end_at": NOW + timedelta(hours=1),
+                "policy_version_id": policy_id,
+                "timezone_name": "UTC",
+                "mode_version": 1,
+                "content_revision": 0,
+                "activity_revision": 0,
                 "state": "open",
             }
         ),
@@ -675,8 +808,12 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
             {
                 "id": decision_id,
                 "account_id": account_id,
+                "contact_id": uuid4(),
+                "conversation_id": uuid4(),
                 "candidate_id": candidate_id,
                 "generation": 1,
+                "policy_version_id": policy_id,
+                "timezone_name": "UTC",
                 "action": ProactiveAction.SEND_NOW.value,
                 "decision_code": decision.decision_code,
                 "topic": decision.topic,
@@ -699,8 +836,12 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
     matching_decision_row = {
         "id": decision_id,
         "account_id": account_id,
+        "contact_id": candidate.contact_id,
+        "conversation_id": candidate.conversation_id,
         "candidate_id": candidate_id,
         "generation": 1,
+        "policy_version_id": policy_id,
+        "timezone_name": "UTC",
         "action": decision.action.value,
         "decision_code": decision.decision_code,
         "topic": decision.topic,
@@ -712,8 +853,19 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
         _Result(
             {
                 "id": candidate_id,
+                "account_id": account_id,
+                "contact_id": contact_id,
+                "conversation_id": conversation_id,
+                "candidate_key": b"c" * 32,
                 "generation": 1,
                 "membership_hash": membership_hash,
+                "window_start_at": NOW,
+                "window_end_at": NOW + timedelta(hours=1),
+                "policy_version_id": policy_id,
+                "timezone_name": "UTC",
+                "mode_version": 1,
+                "content_revision": 0,
+                "activity_revision": 0,
                 "state": "open",
             }
         ),
@@ -747,11 +899,24 @@ async def test_proactive_decision_rejects_a_second_decision_for_terminal_candida
         SimpleNamespace(
             id=candidate_id,
             account_id=account_id,
+            contact_id=uuid4(),
+            conversation_id=uuid4(),
+            candidate_key=b"c" * 32,
             generation=1,
             membership_hash=membership_hash,
             occurrences=(),
+            window_start_at=NOW,
+            window_end_at=NOW + timedelta(hours=1),
+            policy_version_id=uuid4(),
+            timezone_name="UTC",
+            mode_version=1,
+            content_revision=0,
+            activity_revision=0,
         ),
     )
+    contact_id = candidate.contact_id
+    conversation_id = candidate.conversation_id
+    policy_id = candidate.policy_version_id
     decision = AgentDecision(
         candidate_id,
         ProactiveAction.NONE,
@@ -765,8 +930,19 @@ async def test_proactive_decision_rejects_a_second_decision_for_terminal_candida
         _Result(
             {
                 "id": candidate_id,
+                "account_id": account_id,
+                "contact_id": contact_id,
+                "conversation_id": conversation_id,
+                "candidate_key": b"c" * 32,
                 "generation": 1,
                 "membership_hash": membership_hash,
+                "window_start_at": NOW,
+                "window_end_at": NOW + timedelta(hours=1),
+                "policy_version_id": policy_id,
+                "timezone_name": "UTC",
+                "mode_version": 1,
+                "content_revision": 0,
+                "activity_revision": 0,
                 "state": "evaluated_none",
             }
         ),

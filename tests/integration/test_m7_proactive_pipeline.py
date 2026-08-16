@@ -6,7 +6,7 @@ from typing import cast
 from uuid import UUID, uuid7
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from telegram_userbot.adapters.persistence.proactive_repository import ProactiveRepository
@@ -14,12 +14,69 @@ from telegram_userbot.adapters.persistence.schema import (
     M7_TABLES,
     conversations,
     proactive_budget_buckets,
+    proactive_candidates,
+    proactive_decisions,
     proactive_jobs,
+    proactive_policies,
 )
 from telegram_userbot.domain.proactive.models import BudgetLimits, BudgetReservation
 from tests.integration.test_m1_persistence import NOW, seed_conversation
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+async def seed_budget_binding(
+    session: AsyncSession,
+    account_id: UUID,
+    contact_id: UUID,
+    conversation_id: UUID,
+    *,
+    policy_id: UUID | None = None,
+) -> tuple[UUID, UUID, UUID]:
+    policy_id = uuid7() if policy_id is None else policy_id
+    candidate_id = uuid7()
+    decision_id = uuid7()
+    await session.execute(
+        insert(proactive_policies).values(id=policy_id, account_id=account_id, version_no=1)
+    )
+    await session.execute(
+        insert(proactive_candidates).values(
+            id=candidate_id,
+            account_id=account_id,
+            contact_id=contact_id,
+            conversation_id=conversation_id,
+            candidate_key=candidate_id.bytes + candidate_id.bytes,
+            generation=1,
+            membership_hash=b"m" * 32,
+            state="open",
+            window_start_at=NOW,
+            window_end_at=NOW + timedelta(hours=1),
+            due_at=NOW,
+            policy_version_id=policy_id,
+            timezone_name="UTC",
+            mode_version=1,
+            content_revision=0,
+            activity_revision=0,
+        )
+    )
+    await session.execute(
+        insert(proactive_decisions).values(
+            id=decision_id,
+            account_id=account_id,
+            contact_id=contact_id,
+            conversation_id=conversation_id,
+            candidate_id=candidate_id,
+            generation=1,
+            policy_version_id=policy_id,
+            timezone_name="UTC",
+            action="send_now",
+            decision_code="timely_support",
+            topic="synthetic",
+            priority=0,
+            output_hash=b"d" * 32,
+        )
+    )
+    return candidate_id, decision_id, policy_id
 
 
 @pytest.mark.integration
@@ -32,7 +89,7 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
     )
     assert set(rows) == set(M7_TABLES)
     assert await db_session.scalar(text("SELECT version_num FROM alembic_version")) == (
-        "0013_m5_m7_consistency"
+        "0014_m7_budget_integrity"
     )
     indexes = set(
         await db_session.scalars(
@@ -223,7 +280,10 @@ async def test_m7_concurrent_budget_replay_counts_one_hold(postgres_engine: Asyn
         contact_id = await setup.scalar(
             select(conversations.c.contact_id).where(conversations.c.id == conversation_id)
         )
-    assert contact_id is not None
+        assert contact_id is not None
+        candidate_id, decision_id, policy_id = await seed_budget_binding(
+            setup, account_id, contact_id, conversation_id
+        )
     key = b"b" * 32
 
     async def reserve() -> BudgetReservation | None:
@@ -231,10 +291,18 @@ async def test_m7_concurrent_budget_replay_counts_one_hold(postgres_engine: Asyn
             return await ProactiveRepository(worker).reserve_budget(
                 account_id=account_id,
                 contact_id=contact_id,
-                local_date=NOW.date(),
+                account_local_date=NOW.date(),
+                contact_local_date=NOW.date(),
+                account_timezone_name="UTC",
+                contact_timezone_name="UTC",
                 limits=BudgetLimits(10, 10),
+                now=NOW,
                 expires_at=NOW + timedelta(minutes=5),
                 reservation_key=key,
+                candidate_id=candidate_id,
+                decision_id=decision_id,
+                policy_version_id=policy_id,
+                authorization_generation=1,
             )
 
     first, second = await asyncio.gather(reserve(), reserve())
@@ -262,17 +330,28 @@ async def test_m7_budget_limits_only_shrink_without_breaking_count_constraint(
         contact_id = await setup.scalar(
             select(conversations.c.contact_id).where(conversations.c.id == conversation_id)
         )
-    assert contact_id is not None
+        assert contact_id is not None
+        candidate_id, decision_id, policy_id = await seed_budget_binding(
+            setup, account_id, contact_id, conversation_id
+        )
 
     first_key = b"s" * 32
     async with factory() as worker, worker.begin():
         first = await ProactiveRepository(worker).reserve_budget(
             account_id=account_id,
             contact_id=contact_id,
-            local_date=NOW.date(),
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
             limits=BudgetLimits(5, 5),
+            now=NOW,
             expires_at=NOW + timedelta(minutes=5),
             reservation_key=first_key,
+            candidate_id=candidate_id,
+            decision_id=decision_id,
+            policy_version_id=policy_id,
+            authorization_generation=1,
         )
     assert first is not None
 
@@ -281,10 +360,18 @@ async def test_m7_budget_limits_only_shrink_without_breaking_count_constraint(
             await ProactiveRepository(worker).reserve_budget(
                 account_id=account_id,
                 contact_id=contact_id,
-                local_date=NOW.date(),
+                account_local_date=NOW.date(),
+                contact_local_date=NOW.date(),
+                account_timezone_name="UTC",
+                contact_timezone_name="UTC",
                 limits=BudgetLimits(1, 1),
+                now=NOW,
                 expires_at=NOW + timedelta(minutes=5),
                 reservation_key=b"t" * 32,
+                candidate_id=candidate_id,
+                decision_id=decision_id,
+                policy_version_id=policy_id,
+                authorization_generation=1,
             )
             is None
         )
@@ -311,10 +398,18 @@ async def test_m7_budget_limits_only_shrink_without_breaking_count_constraint(
             await ProactiveRepository(worker).reserve_budget(
                 account_id=account_id,
                 contact_id=contact_id,
-                local_date=NOW.date(),
+                account_local_date=NOW.date(),
+                contact_local_date=NOW.date(),
+                account_timezone_name="UTC",
+                contact_timezone_name="UTC",
                 limits=BudgetLimits(0, 0),
+                now=NOW,
                 expires_at=NOW + timedelta(minutes=5),
                 reservation_key=b"u" * 32,
+                candidate_id=candidate_id,
+                decision_id=decision_id,
+                policy_version_id=policy_id,
+                authorization_generation=1,
             )
             is None
         )

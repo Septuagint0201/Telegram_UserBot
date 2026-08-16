@@ -657,6 +657,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0011_scope_context_erasure.py",
                     "alembic/versions/0012_worker_lease_retry.py",
                     "alembic/versions/0013_m5_m7_consistency.py",
+                    "alembic/versions/0014_m7_budget_integrity.py",
                     "deploy/postgres/m6_roles.sql",
                     "docs/compatibility/m6.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
@@ -696,6 +697,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0008_m7_proactive_pipeline.py",
                     "alembic/versions/0012_worker_lease_retry.py",
                     "alembic/versions/0013_m5_m7_consistency.py",
+                    "alembic/versions/0014_m7_budget_integrity.py",
                 ),
                 (
                     "tests.unit.domain.test_m7_proactive::test_m7_due_jobs_are_idempotent_and_expired_leases_requeue",
@@ -730,6 +732,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "src/telegram_userbot/domain/proactive/budget.py",
                     "src/telegram_userbot/adapters/persistence/proactive_repository.py",
                     "alembic/versions/0013_m5_m7_consistency.py",
+                    "alembic/versions/0014_m7_budget_integrity.py",
                 ),
                 (
                     "tests.unit.domain.test_m7_proactive::test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged",
@@ -791,6 +794,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0011_scope_context_erasure.py",
                     "alembic/versions/0012_worker_lease_retry.py",
                     "alembic/versions/0013_m5_m7_consistency.py",
+                    "alembic/versions/0014_m7_budget_integrity.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
