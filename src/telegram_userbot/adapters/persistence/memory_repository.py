@@ -635,7 +635,7 @@ class MemoryRepository:
         proposal_ordinal: int,
         manifest: InputManifest,
         validator_policy_version: str = "m6-v1",
-    ) -> UUID | None:
+    ) -> UUID:
         if proposal_ordinal < 0 or not validator_policy_version:
             raise ValueError("proposal persistence identity is invalid")
         proposal = validated.proposal
@@ -699,7 +699,11 @@ class MemoryRepository:
             .on_conflict_do_nothing(constraint="uq_memory_proposals_idempotency")
         )
         if cast(CursorResult[Any], result).rowcount != 1:
-            return None
+            # The idempotency key is derived from the model run and ordinal,
+            # which are also covered by a durable unique constraint.  Returning
+            # the deterministic ID lets a replay continue to acceptance instead
+            # of losing the proposal identity on a harmless conflict.
+            return persisted_proposal_id
         for index, target_id in enumerate(proposal.target_memory_ids):
             target = (
                 (

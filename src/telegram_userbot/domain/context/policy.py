@@ -86,6 +86,8 @@ def calculate_budget(
     *,
     required_image_count: int = 0,
 ) -> BudgetSnapshot:
+    if required_image_count < 0:
+        raise ContextAdmissionError("context_image_count_invalid")
     safety = max(
         policy.minimum_safety_reserve_tokens,
         math.ceil(capabilities.max_context_tokens * policy.safety_reserve_basis_points / 10_000),

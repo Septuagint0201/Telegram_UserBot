@@ -243,6 +243,12 @@ def test_context_policy_and_source_contracts_fail_closed() -> None:
             ContextCapabilities(5_000, 100, True, max_images_per_request=1),
             required_image_count=2,
         )
+    with pytest.raises(ValueError, match="context_image_count_invalid"):
+        calculate_budget(
+            policy,
+            ContextCapabilities(5_000, 100, True),
+            required_image_count=-1,
+        )
 
     instruction = ContextSource(
         Candidate(uuid7(), "version-1", "prompt:large", ContextLayer.INSTRUCTION, NOW, 101),

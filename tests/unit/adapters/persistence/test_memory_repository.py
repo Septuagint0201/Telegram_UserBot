@@ -318,13 +318,14 @@ async def test_record_proposal_binds_job_run_manifest_and_evidence_scope() -> No
 
     session.scalar.side_effect = [job_id, model_run_id]
     session.execute.return_value = _Result(rowcount=0)
-    assert not await repo.record_proposal(
+    replayed_id = await repo.record_proposal(
         validated,
         job_id=job_id,
         model_run_id=model_run_id,
         proposal_ordinal=0,
         manifest=manifest,
     )
+    assert replayed_id == recorded_id
     session.scalar.side_effect = [None]
     with pytest.raises(ValueError, match="job and manifest"):
         await repo.record_proposal(
