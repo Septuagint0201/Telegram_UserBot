@@ -16,11 +16,13 @@ from telegram_userbot.adapters.persistence.schema import (
     M1_TABLES,
     M5_TABLES,
     M6_TABLES,
+    copilot_drafts,
     memories,
     memory_proposals,
     memory_review_actions,
     metadata,
     model_runs,
+    outbound_delivery_groups,
     proactive_budget_reservations,
     proactive_decisions,
     summaries,
@@ -363,6 +365,14 @@ def test_recovery_binding_migration_fences_delete_and_proactive_side_effects() -
     assert "uq_proactive_decisions_full_scope" in migration
     assert "))) NOT VALID" in migration
     assert "VALIDATE CONSTRAINT" in migration
+    assert "cannot downgrade M7: proactive side-effect provenance exists" in migration
+    assert "delete_claim_downgrade_recovered" in migration
+    assert "fk_outbound_groups_proactive_decision_scope" not in {
+        constraint.name for constraint in outbound_delivery_groups.foreign_key_constraints
+    }
+    assert "fk_copilot_drafts_proactive_decision_scope" not in {
+        constraint.name for constraint in copilot_drafts.foreign_key_constraints
+    }
 
 
 @pytest.mark.unit

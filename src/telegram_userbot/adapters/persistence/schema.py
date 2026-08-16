@@ -1356,17 +1356,6 @@ outbound_delivery_groups = Table(
         ["conversations.id", "conversations.account_id"],
         name="fk_outbound_delivery_groups_conversation_scope",
     ),
-    ForeignKeyConstraint(
-        ["proactive_decision_id", "account_id", "conversation_id"],
-        [
-            "proactive_decisions.id",
-            "proactive_decisions.account_id",
-            "proactive_decisions.conversation_id",
-        ],
-        name="fk_outbound_groups_proactive_decision_scope",
-        deferrable=True,
-        initially="DEFERRED",
-    ),
     CheckConstraint(
         "source IN ('ai','proactive_ai','copilot_approved','system')",
         name="source_values",
@@ -1925,17 +1914,6 @@ copilot_drafts = Table(
             "model_runs.logical_role",
         ],
         name="fk_copilot_drafts_model_run_scope",
-    ),
-    ForeignKeyConstraint(
-        ["proactive_decision_id", "account_id", "conversation_id"],
-        [
-            "proactive_decisions.id",
-            "proactive_decisions.account_id",
-            "proactive_decisions.conversation_id",
-        ],
-        name="fk_copilot_drafts_proactive_decision_scope",
-        deferrable=True,
-        initially="DEFERRED",
     ),
     CheckConstraint(
         "(draft_kind = 'reactive' AND proactive_decision_id IS NULL) OR "

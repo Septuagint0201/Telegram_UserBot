@@ -128,6 +128,14 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
+        "DO $$ BEGIN "
+        "IF EXISTS (SELECT 1 FROM outbound_delivery_groups "
+        "WHERE proactive_decision_id IS NOT NULL) OR "
+        "EXISTS (SELECT 1 FROM copilot_drafts WHERE proactive_decision_id IS NOT NULL) THEN "
+        "RAISE EXCEPTION 'cannot downgrade M7: proactive side-effect provenance exists'; "
+        "END IF; END $$"
+    )
+    op.execute(
         "ALTER TABLE proactive_budget_reservations DROP CONSTRAINT IF EXISTS "
         "ck_proactive_budget_reservations_target_side_effect"
     )
@@ -171,6 +179,10 @@ def downgrade() -> None:
     op.execute(
         "ALTER TABLE context_preview_deliveries DROP CONSTRAINT IF EXISTS "
         "ck_context_preview_deliveries_delete_lease_state_match"
+    )
+    op.execute(
+        "UPDATE context_preview_deliveries SET state = 'delete_failed', "
+        "last_error_code = 'delete_claim_downgrade_recovered' WHERE state = 'delete_pending'"
     )
     op.execute(
         "ALTER TABLE context_preview_deliveries DROP CONSTRAINT IF EXISTS "
