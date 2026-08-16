@@ -33,6 +33,7 @@ from telegram_userbot.domain.proactive.models import (
     ReservationState,
     membership_digest,
 )
+from telegram_userbot.domain.shared.time import require_aware
 
 
 class ProactiveRepository:
@@ -42,7 +43,7 @@ class ProactiveRepository:
         self._session = session
 
     async def enqueue_candidate(self, candidate: Candidate, *, now: datetime) -> UUID:
-        current_time = now.astimezone(UTC)
+        current_time = require_aware(now, "now")
         occurrence_keys = [occurrence.occurrence_key for occurrence in candidate.occurrences]
         if (
             any(
@@ -191,7 +192,8 @@ class ProactiveRepository:
             "budget_reaper",
         }:
             raise ValueError("proactive job identity is invalid")
-        available_time = available_at.astimezone(UTC)
+        available_time = require_aware(available_at, "available_at")
+        created_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         job_id = uuid5(account_id, f"proactive-job:{job_kind}:{idempotency_key.hex()}")
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
@@ -238,7 +240,7 @@ class ProactiveRepository:
                 available_at=available_time,
                 state="pending",
                 attempt_count=0,
-                created_at=(now or datetime.now(UTC)).astimezone(UTC),
+                created_at=created_time,
             )
             .on_conflict_do_nothing(constraint="uq_proactive_jobs_idempotency")
         )
@@ -259,7 +261,7 @@ class ProactiveRepository:
     ) -> DueJob | None:
         if lease <= timedelta(0) or max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("proactive lease policy is invalid")
-        current_time = now.astimezone(UTC)
+        current_time = require_aware(now, "now")
         await self.recover_expired(
             now=current_time,
             max_attempts=max_attempts,
@@ -328,6 +330,7 @@ class ProactiveRepository:
     ) -> bool:
         if fencing_token <= 0 or max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("proactive completion policy is invalid")
+        current_time = require_aware(now, "now")
         next_state = (
             "succeeded"
             if succeeded
@@ -343,7 +346,7 @@ class ProactiveRepository:
                     proactive_jobs.c.attempt_count >= max_attempts,
                     proactive_jobs.c.available_at,
                 ),
-                else_=now.astimezone(UTC) + retry_delay,
+                else_=current_time + retry_delay,
             )
         result = cast(
             CursorResult[Any],
@@ -354,13 +357,13 @@ class ProactiveRepository:
                     proactive_jobs.c.state == "leased",
                     proactive_jobs.c.lease_owner == owner,
                     proactive_jobs.c.fencing_token == fencing_token,
-                    proactive_jobs.c.lease_expires_at > now.astimezone(UTC),
+                    proactive_jobs.c.lease_expires_at > current_time,
                 )
                 .values(
                     state=next_state,
                     lease_owner=None,
                     lease_expires_at=None,
-                    completed_at=now.astimezone(UTC) if succeeded else None,
+                    completed_at=current_time if succeeded else None,
                     available_at=next_available_at,
                 )
             ),
@@ -397,7 +400,7 @@ class ProactiveRepository:
     ) -> int:
         if max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("proactive recovery policy is invalid")
-        current_time = now.astimezone(UTC)
+        current_time = require_aware(now, "now")
         result = cast(
             CursorResult[Any],
             await self._session.execute(
@@ -437,8 +440,9 @@ class ProactiveRepository:
         candidate_id: UUID | None = None,
         bypass: bool = False,
     ) -> BudgetReservation | None:
-        if len(reservation_key) != 32 or expires_at.tzinfo is None:
+        if len(reservation_key) != 32:
             raise ValueError("budget reservation identity is invalid")
+        expiry = require_aware(expires_at, "expires_at")
         if bypass and limits.bypass_daily == 0:
             return None
         await self._session.execute(
@@ -463,7 +467,7 @@ class ProactiveRepository:
                 or existing["local_date"] != local_date
                 or existing["bypass"] != bypass
                 or existing["candidate_id"] != candidate_id
-                or existing["expires_at"] != expires_at.astimezone(UTC)
+                or existing["expires_at"] != expiry
             ):
                 raise ValueError("budget reservation key belongs to another scope")
             reservation = _reservation(existing)
@@ -483,7 +487,7 @@ class ProactiveRepository:
         ]
         if bypass:
             scopes.append((contact_id, "contact_bypass", limits.bypass_daily))
-        buckets: list[Any] = []
+        buckets: list[tuple[Any, int]] = []
         for scoped_contact, scope, limit in scopes:
             await self._session.execute(
                 postgresql_insert(proactive_budget_buckets)
@@ -518,8 +522,25 @@ class ProactiveRepository:
                 .mappings()
                 .one()
             )
-            buckets.append(row)
-        if any(row["held_count"] + row["committed_count"] >= row["limit_value"] for row in buckets):
+            used = row["held_count"] + row["committed_count"]
+            effective_limit = min(row["limit_value"], limit)
+            if effective_limit < row["limit_value"] and used <= effective_limit:
+                await self._session.execute(
+                    update(proactive_budget_buckets)
+                    .where(
+                        proactive_budget_buckets.c.id == row["id"],
+                        proactive_budget_buckets.c.limit_value == row["limit_value"],
+                    )
+                    .values(
+                        limit_value=effective_limit,
+                        version=proactive_budget_buckets.c.version + 1,
+                    )
+                )
+            buckets.append((row, effective_limit))
+        if any(
+            row["held_count"] + row["committed_count"] >= effective_limit
+            for row, effective_limit in buckets
+        ):
             return None
         reservation_id = uuid5(account_id, f"proactive-reservation:{reservation_key.hex()}")
         await self._session.execute(
@@ -532,10 +553,10 @@ class ProactiveRepository:
                 local_date=local_date,
                 bypass=bypass,
                 state="held",
-                expires_at=expires_at.astimezone(UTC),
+                expires_at=expiry,
             )
         )
-        for row in buckets:
+        for row, _effective_limit in buckets:
             await self._session.execute(
                 update(proactive_budget_buckets)
                 .where(proactive_budget_buckets.c.id == row["id"])
@@ -552,7 +573,7 @@ class ProactiveRepository:
             local_date,
             bypass,
             ReservationState.HELD,
-            expires_at.astimezone(UTC),
+            expiry,
         )
 
     async def settle_budget(
@@ -570,6 +591,7 @@ class ProactiveRepository:
             ReservationState.SEND_UNKNOWN,
         }:
             raise ValueError("invalid budget settlement")
+        current_time = require_aware(now, "now")
         row = (
             (
                 await self._session.execute(
@@ -595,7 +617,7 @@ class ProactiveRepository:
         }:
             return _reservation(row)
         if (
-            cast(datetime, row["expires_at"]) <= now.astimezone(UTC)
+            cast(datetime, row["expires_at"]) <= current_time
             and target is ReservationState.RELEASED
         ):
             target = ReservationState.EXPIRED
@@ -606,9 +628,7 @@ class ProactiveRepository:
                 proactive_budget_reservations.c.id == row["id"],
                 proactive_budget_reservations.c.state == "held",
             )
-            .values(
-                state=target.value, committed_at=now.astimezone(UTC) if delta_committed else None
-            )
+            .values(state=target.value, committed_at=current_time if delta_committed else None)
         )
         scopes = [(None, "account_daily"), (row["contact_id"], "contact_daily")]
         if row["bypass"]:
@@ -663,6 +683,7 @@ class ProactiveRepository:
         )
 
     async def reap_budget(self, *, now: datetime) -> int:
+        current_time = require_aware(now, "now")
         reservations = tuple(
             (
                 await self._session.execute(
@@ -680,7 +701,7 @@ class ProactiveRepository:
                     )
                     .where(
                         proactive_budget_reservations.c.state == "held",
-                        proactive_budget_reservations.c.expires_at <= now.astimezone(UTC),
+                        proactive_budget_reservations.c.expires_at <= current_time,
                         proactive_candidates.c.state.in_(
                             ("evaluated_none", "failed_model", "superseded", "expired")
                         ),
@@ -697,7 +718,7 @@ class ProactiveRepository:
                 await self.release_budget(
                     account_id=reservation["account_id"],
                     reservation_key=reservation["reservation_key"],
-                    now=now,
+                    now=current_time,
                     expired=True,
                 )
                 is not None
@@ -715,6 +736,7 @@ class ProactiveRepository:
     ) -> UUID:
         if decision.candidate_id != candidate.id or len(output_hash) != 32:
             raise ValueError("decision does not bind candidate")
+        current_time = require_aware(now, "now")
         candidate_occurrence_ids = {occurrence.id for occurrence in candidate.occurrences}
         if not set(decision.selected_occurrence_ids) <= candidate_occurrence_ids:
             raise ValueError("decision selects an occurrence outside the candidate")
@@ -776,7 +798,7 @@ class ProactiveRepository:
                 defer_until=decision.defer_until,
                 output_hash=output_hash,
                 state="accepted",
-                created_at=now.astimezone(UTC),
+                created_at=current_time,
             )
             .on_conflict_do_nothing(constraint="uq_proactive_decisions_candidate")
         )
@@ -815,7 +837,7 @@ class ProactiveRepository:
                 event="agent_decision",
                 reason=decision.decision_code,
                 actor="agent",
-                created_at=now.astimezone(UTC),
+                created_at=current_time,
             )
         )
         return decision_id

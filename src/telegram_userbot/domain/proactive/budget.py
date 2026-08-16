@@ -17,6 +17,7 @@ from telegram_userbot.domain.proactive.models import (
     BudgetReservation,
     ReservationState,
 )
+from telegram_userbot.domain.shared.time import require_aware
 
 
 @dataclass(slots=True)
@@ -49,8 +50,9 @@ class BudgetLedger:
         reservation_key: bytes,
         bypass: bool = False,
     ) -> BudgetReservation | None:
-        if expires_at.tzinfo is None or len(reservation_key) != 32:
+        if len(reservation_key) != 32:
             raise ValueError("reservation expiry and key are required")
+        expiry = require_aware(expires_at, "expires_at")
         if limits.bypass_daily == 0 and bypass:
             return None
         with self._lock:
@@ -97,7 +99,7 @@ class BudgetLedger:
                 local_date=local_date,
                 bypass=bypass,
                 state=ReservationState.HELD,
-                expires_at=expires_at,
+                expires_at=expiry,
             )
             self._reservations[reservation_key] = reservation
             return reservation
@@ -132,12 +134,14 @@ class BudgetLedger:
             return updated
 
     def reap(self, *, now: datetime) -> tuple[BudgetReservation, ...]:
-        if now.tzinfo is None:
-            raise ValueError("reaper time must be aware")
+        current_time = require_aware(now, "now")
         with self._lock:
             expired: list[BudgetReservation] = []
             for key, reservation in tuple(self._reservations.items()):
-                if reservation.state is ReservationState.HELD and reservation.expires_at <= now:
+                if (
+                    reservation.state is ReservationState.HELD
+                    and reservation.expires_at <= current_time
+                ):
                     self._move_counts(reservation, held_delta=-1, committed_delta=0)
                     updated = replace(reservation, state=ReservationState.EXPIRED)
                     self._reservations[key] = updated

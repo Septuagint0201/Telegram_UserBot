@@ -1,6 +1,6 @@
 """Fake-first tests for proactive persistence boundary validation."""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -27,6 +27,17 @@ from telegram_userbot.domain.proactive.models import (
 )
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+
+
+class _NoOffset(tzinfo):
+    def utcoffset(self, _value: datetime | None) -> timedelta | None:
+        return None
+
+    def dst(self, _value: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, _value: datetime | None) -> str | None:
+        return "no-offset"
 
 
 class _Result:
@@ -122,6 +133,52 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
             reservation_key=b"k" * 32,
             target=cast(ReservationState, "invalid"),
             now=NOW,
+        )
+
+    naive = NOW.replace(tzinfo=None)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.enqueue_job(
+            account_id=account_id,
+            idempotency_key=b"n" * 32,
+            available_at=naive,
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.enqueue_job(
+            account_id=account_id,
+            idempotency_key=b"o" * 32,
+            available_at=NOW,
+            now=naive,
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.claim_next(now=naive, owner=uuid4())
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.recover_expired(now=naive)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(1, 1),
+            expires_at=naive,
+            reservation_key=b"p" * 32,
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.settle_budget(
+            account_id=account_id,
+            reservation_key=b"k" * 32,
+            target=ReservationState.COMMITTED,
+            now=naive,
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.reap_budget(now=naive)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(1, 1),
+            expires_at=datetime(2026, 8, 16, 12, tzinfo=_NoOffset()),
+            reservation_key=b"q" * 32,
         )
 
 

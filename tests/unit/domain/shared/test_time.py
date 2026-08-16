@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -21,6 +21,23 @@ def test_utc_timestamp_round_trip(value: datetime) -> None:
 def test_timestamp_rejects_naive_datetime() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         UtcTimestamp(datetime(2030, 1, 1))  # noqa: DTZ001 - deliberately naive input
+
+
+class _NoOffset(tzinfo):
+    def utcoffset(self, _value: datetime | None) -> timedelta | None:
+        return None
+
+    def dst(self, _value: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, _value: datetime | None) -> str | None:
+        return "no-offset"
+
+
+@pytest.mark.unit
+def test_timestamp_rejects_timezone_without_offset() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        UtcTimestamp(datetime(2030, 1, 1, tzinfo=_NoOffset()))
 
 
 @pytest.mark.unit

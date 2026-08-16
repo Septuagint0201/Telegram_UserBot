@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 from threading import Lock
 from uuid import UUID, uuid4
+
+from telegram_userbot.domain.shared.time import require_aware
 
 
 class DueJobState(StrEnum):
@@ -31,8 +33,11 @@ class DueJob:
     fencing_token: int = 0
 
     def __post_init__(self) -> None:
-        if len(self.idempotency_key) != 32 or self.available_at.tzinfo is None:
+        if len(self.idempotency_key) != 32:
             raise ValueError("due job identity/time is invalid")
+        require_aware(self.available_at, "available_at")
+        if self.lease_expires_at is not None:
+            require_aware(self.lease_expires_at, "lease_expires_at")
         if self.attempt_count < 0 or self.fencing_token < 0:
             raise ValueError("attempt count and fencing token cannot be negative")
 
@@ -49,11 +54,12 @@ class DurableDueJobStore:
     ) -> DueJob:
         if len(idempotency_key) != 32:
             raise ValueError("due job key must be 32 bytes")
+        available_time = require_aware(available_at, "available_at")
         with self._lock:
             current = self._jobs.get(idempotency_key)
             if current is not None:
                 return current
-            job = DueJob(uuid4(), account_id, idempotency_key, available_at.astimezone(UTC))
+            job = DueJob(uuid4(), account_id, idempotency_key, available_time)
             self._jobs[idempotency_key] = job
             return job
 
@@ -67,6 +73,7 @@ class DurableDueJobStore:
     ) -> DueJob | None:
         if lease <= timedelta(0) or max_attempts <= 0:
             raise ValueError("lease policy is invalid")
+        current_time = require_aware(now, "now")
         with self._lock:
             for key, current in tuple(self._jobs.items()):
                 if (
@@ -78,7 +85,7 @@ class DurableDueJobStore:
                 item
                 for item in self._jobs.values()
                 if item.state in {DueJobState.PENDING, DueJobState.RETRY_WAIT}
-                and item.available_at <= now.astimezone(UTC)
+                and item.available_at <= current_time
                 and item.attempt_count < max_attempts
             ]
             if not candidates:
@@ -88,7 +95,7 @@ class DurableDueJobStore:
                 current,
                 state=DueJobState.LEASED,
                 lease_owner=owner,
-                lease_expires_at=now.astimezone(UTC) + lease,
+                lease_expires_at=current_time + lease,
                 attempt_count=current.attempt_count + 1,
                 fencing_token=current.fencing_token + 1,
             )
@@ -108,6 +115,7 @@ class DurableDueJobStore:
     ) -> bool:
         if fencing_token <= 0 or max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("completion policy is invalid")
+        current_time = require_aware(now, "now")
         with self._lock:
             current = self._jobs.get(idempotency_key)
             if (
@@ -116,7 +124,7 @@ class DurableDueJobStore:
                 or current.lease_owner != owner
                 or current.fencing_token != fencing_token
                 or current.lease_expires_at is None
-                or current.lease_expires_at <= now.astimezone(UTC)
+                or current.lease_expires_at <= current_time
             ):
                 return False
             if succeeded:
@@ -127,7 +135,7 @@ class DurableDueJobStore:
                 available_at = current.available_at
             else:
                 state = DueJobState.RETRY_WAIT
-                available_at = now.astimezone(UTC) + retry_delay
+                available_at = current_time + retry_delay
             self._jobs[idempotency_key] = replace(
                 current,
                 state=state,
@@ -147,7 +155,7 @@ class DurableDueJobStore:
         """Recover expired leases with bounded retries; no model is called here."""
         if max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("compensation policy is invalid")
-        current_time = now.astimezone(UTC)
+        current_time = require_aware(now, "now")
         with self._lock:
             for key, current in tuple(self._jobs.items()):
                 if (
@@ -179,10 +187,12 @@ class DurableDueJobStore:
             )
 
     def expire(self, *, now: datetime, window_end: datetime) -> int:
+        current_time = require_aware(now, "now")
+        end_time = require_aware(window_end, "window_end")
         with self._lock:
             changed = 0
             for key, current in tuple(self._jobs.items()):
-                if current.state is DueJobState.PENDING and window_end <= now.astimezone(UTC):
+                if current.state is DueJobState.PENDING and end_time <= current_time:
                     self._jobs[key] = replace(current, state=DueJobState.EXPIRED)
                     changed += 1
             return changed

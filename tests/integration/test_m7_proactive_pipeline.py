@@ -250,3 +250,81 @@ async def test_m7_concurrent_budget_replay_counts_one_hold(postgres_engine: Asyn
             )
         )
         assert counts == (1, 1)
+
+
+@pytest.mark.integration
+async def test_m7_budget_limits_only_shrink_without_breaking_count_constraint(
+    postgres_engine: AsyncEngine,
+) -> None:
+    factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
+    async with factory() as setup, setup.begin():
+        account_id, conversation_id, _account_peer_id = await seed_conversation(setup)
+        contact_id = await setup.scalar(
+            select(conversations.c.contact_id).where(conversations.c.id == conversation_id)
+        )
+    assert contact_id is not None
+
+    first_key = b"s" * 32
+    async with factory() as worker, worker.begin():
+        first = await ProactiveRepository(worker).reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(5, 5),
+            expires_at=NOW + timedelta(minutes=5),
+            reservation_key=first_key,
+        )
+    assert first is not None
+
+    async with factory() as worker, worker.begin():
+        assert (
+            await ProactiveRepository(worker).reserve_budget(
+                account_id=account_id,
+                contact_id=contact_id,
+                local_date=NOW.date(),
+                limits=BudgetLimits(1, 1),
+                expires_at=NOW + timedelta(minutes=5),
+                reservation_key=b"t" * 32,
+            )
+            is None
+        )
+
+    async with factory() as verification:
+        rows = list(
+            (
+                await verification.execute(
+                    select(
+                        proactive_budget_buckets.c.scope,
+                        proactive_budget_buckets.c.limit_value,
+                        proactive_budget_buckets.c.held_count,
+                    ).where(proactive_budget_buckets.c.account_id == account_id)
+                )
+            ).mappings()
+        )
+    assert {(row["scope"], row["limit_value"], row["held_count"]) for row in rows} == {
+        ("account_daily", 1, 1),
+        ("contact_daily", 1, 1),
+    }
+
+    async with factory() as worker, worker.begin():
+        assert (
+            await ProactiveRepository(worker).reserve_budget(
+                account_id=account_id,
+                contact_id=contact_id,
+                local_date=NOW.date(),
+                limits=BudgetLimits(0, 0),
+                expires_at=NOW + timedelta(minutes=5),
+                reservation_key=b"u" * 32,
+            )
+            is None
+        )
+
+    async with factory() as verification:
+        limits = tuple(
+            await verification.scalars(
+                select(proactive_budget_buckets.c.limit_value).where(
+                    proactive_budget_buckets.c.account_id == account_id
+                )
+            )
+        )
+    assert limits == (1, 1)

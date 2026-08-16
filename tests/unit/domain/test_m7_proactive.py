@@ -384,6 +384,46 @@ def test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged() -> None:
         thread.join()
     assert sum(item is not None for item in outcomes) == 1
 
+    shrinking = BudgetLedger()
+    shrinking_key = sha256(b"shrinking-first").digest()
+    assert (
+        shrinking.reserve(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(3, 3),
+            expires_at=NOW + timedelta(minutes=1),
+            reservation_key=shrinking_key,
+        )
+        is not None
+    )
+    assert (
+        shrinking.reserve(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(1, 1),
+            expires_at=NOW + timedelta(minutes=1),
+            reservation_key=sha256(b"shrinking-second").digest(),
+        )
+        is None
+    )
+    assert shrinking.snapshot(account_id=account_id, contact_id=contact_id, local_date=NOW.date())[
+        "account_daily"
+    ] == (1, 1, 0)
+    shrinking.release(shrinking_key)
+    assert (
+        shrinking.reserve(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(1, 1),
+            expires_at=NOW + timedelta(minutes=1),
+            reservation_key=sha256(b"shrinking-third").digest(),
+        )
+        is not None
+    )
+
 
 @pytest.mark.unit
 def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:

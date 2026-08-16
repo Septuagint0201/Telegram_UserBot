@@ -401,7 +401,11 @@ class BudgetReservation:
         _check_uuid(self.id, "id")
         _check_uuid(self.account_id, "account_id")
         _check_uuid(self.contact_id, "contact_id")
-        if len(self.reservation_key) != 32 or self.expires_at.tzinfo is None:
+        if (
+            len(self.reservation_key) != 32
+            or self.expires_at.tzinfo is None
+            or self.expires_at.utcoffset() is None
+        ):
             raise ValueError("reservation identity or expiry is invalid")
 
 

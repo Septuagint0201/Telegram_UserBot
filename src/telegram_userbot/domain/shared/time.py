@@ -6,14 +6,20 @@ from datetime import UTC, datetime, timedelta
 from typing import Self
 
 
+def require_aware(value: datetime, name: str = "timestamp") -> datetime:
+    """Reject naive and pathological timezone objects before UTC conversion."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(UTC)
+
+
 @dataclass(frozen=True, slots=True, order=True)
 class UtcTimestamp:
     value: datetime
 
     def __post_init__(self) -> None:
-        if self.value.tzinfo is None or self.value.utcoffset() is None:
-            raise ValueError("timestamp must be timezone-aware")
-        object.__setattr__(self, "value", self.value.astimezone(UTC))
+        object.__setattr__(self, "value", require_aware(self.value))
 
     @classmethod
     def from_iso(cls, raw: str) -> Self:
