@@ -675,6 +675,165 @@ async def test_accept_proposal_uses_recorded_target_snapshot() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_accept_merge_rejects_target_identity_drift() -> None:
+    repo, session = _repository()
+    account_id, conversation_id = uuid4(), uuid4()
+    source = _source()
+    first_target, second_target = uuid4(), uuid4()
+    base = _proposal(account_id, conversation_id, source)
+    validated = replace(
+        base,
+        proposal=replace(
+            base.proposal,
+            operation=MemoryOperation.MERGE,
+            target_memory_ids=(first_target, second_target),
+        ),
+    )
+    recorded_id = uuid4()
+    repo._proposal_row = AsyncMock(  # type: ignore[method-assign]
+        return_value={"id": recorded_id, "state": "candidate"}
+    )
+    session.execute.side_effect = [
+        _Result(
+            rows=[
+                {
+                    "target_memory_id": first_target,
+                    "target_version_no_snapshot": 1,
+                    "target_role": "primary",
+                },
+                {
+                    "target_memory_id": second_target,
+                    "target_version_no_snapshot": 1,
+                    "target_role": "merge_source",
+                },
+            ]
+        ),
+        _Result(
+            rows=[
+                {
+                    "message_revision_id": source.source_id,
+                    "evidence_role": "primary",
+                    "quoted_span_start": None,
+                    "quoted_span_end": None,
+                    "source_content_sha256": source.content_sha256,
+                    "trust_class": source.trust.value,
+                }
+            ]
+        ),
+        _Result(
+            rows=[
+                {
+                    "id": first_target,
+                    "current_version_no": 1,
+                    "status": "active",
+                    "memory_type": "preference",
+                    "semantic_key_hash": validated.proposal.semantic_key_hash,
+                },
+                {
+                    "id": second_target,
+                    "current_version_no": 1,
+                    "status": "active",
+                    "memory_type": "fact",
+                    "semantic_key_hash": validated.proposal.semantic_key_hash,
+                },
+            ]
+        ),
+    ]
+    session.scalar.return_value = 0
+    with pytest.raises(MemoryConflictError, match="target memory identity"):
+        await repo.accept_validated_proposal(
+            validated,
+            recorded_proposal_id=recorded_id,
+            allow_candidate=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_accept_supersede_releases_same_key_before_insert() -> None:
+    repo, session = _repository()
+    account_id, conversation_id, target_id = uuid4(), uuid4(), uuid4()
+    source = _source()
+    base = _proposal(account_id, conversation_id, source)
+    validated = replace(
+        base,
+        proposal=replace(
+            base.proposal,
+            operation=MemoryOperation.SUPERSEDE,
+            target_memory_ids=(target_id,),
+        ),
+    )
+    recorded_id, contact_id = uuid4(), uuid4()
+    repo._proposal_row = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "id": recorded_id,
+            "state": "candidate",
+            "model_run_id": uuid4(),
+            "validator_policy_version": 1,
+            "contact_id": contact_id,
+        }
+    )
+    session.execute.side_effect = [
+        _Result(
+            rows=[
+                {
+                    "target_memory_id": target_id,
+                    "target_version_no_snapshot": 1,
+                    "target_role": "superseded",
+                }
+            ]
+        ),
+        _Result(
+            rows=[
+                {
+                    "message_revision_id": source.source_id,
+                    "evidence_role": "primary",
+                    "quoted_span_start": None,
+                    "quoted_span_end": None,
+                    "source_content_sha256": source.content_sha256,
+                    "trust_class": source.trust.value,
+                }
+            ]
+        ),
+        _Result(
+            rows=[
+                {
+                    "id": target_id,
+                    "current_version_no": 1,
+                    "status": "active",
+                    "memory_type": validated.proposal.memory_type.value,
+                    "semantic_key_hash": validated.proposal.semantic_key_hash,
+                }
+            ]
+        ),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+    ]
+    session.scalar.side_effect = [0, target_id]
+    result = await repo.accept_validated_proposal(
+        validated,
+        recorded_proposal_id=recorded_id,
+        allow_candidate=True,
+        now=NOW,
+    )
+    assert result.state is ProposalState.ACCEPTED
+    statements = [str(call.args[0]) for call in session.execute.await_args_list]
+    first_release = next(
+        index
+        for index, statement in enumerate(statements)
+        if "UPDATE memories" in statement and "superseded_by_memory_id" in statement
+    )
+    memory_insert = next(
+        index for index, statement in enumerate(statements) if "INSERT INTO memories" in statement
+    )
+    assert first_release < memory_insert
+
+
 def _summary(
     conversation_summary_id: UUID,
     *,
@@ -756,10 +915,13 @@ async def test_publish_summary_covers_initial_replay_and_watermark_cas() -> None
         _Result(durable_summary_version),
         _Result(rows=durable_sources),
     ]
+    repo._require_summary_source_current.side_effect = ValueError("source stale")
     replay = await repo.publish_summary(
         first, account_id=account_id, conversation_id=conversation_id, now=NOW
     )
     assert replay.last_summary_version_id == first.id
+    assert repo._require_summary_source_current.await_count == 1
+    repo._require_summary_source_current.side_effect = None
 
     session.execute.side_effect = [
         _Result(),

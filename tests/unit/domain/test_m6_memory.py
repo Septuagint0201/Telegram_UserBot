@@ -247,6 +247,33 @@ def test_memory_store_acceptance_is_idempotent_and_forget_redacts_every_version(
     assert forgotten.current.rendered_text is None
 
 
+def test_memory_store_replay_identity_and_candidate_upgrade_are_scoped() -> None:
+    manifest, source_id = _manifest()
+    candidate_payload = _payload(source_id, confidence=0.7, semantic_key="manual preference")
+    candidate = validate_proposal(
+        parse_agent_response(
+            candidate_payload,
+            account_id=ACCOUNT,
+            conversation_id=CONVERSATION,
+        )[0],
+        manifest,
+    )
+    assert candidate.state is ProposalState.CANDIDATE
+    store = MemoryStore()
+    first = store.accept(candidate)
+    assert first.state is ProposalState.CANDIDATE
+    assert store.accept(candidate).idempotent
+
+    mutated = replace(candidate.proposal, payload={"value": "coffee"})
+    with pytest.raises(MemoryConflictError, match="immutable identity"):
+        store.accept(ValidatedProposal(mutated, ProposalState.CANDIDATE))
+
+    promoted = store.accept(ValidatedProposal(candidate.proposal, ProposalState.ACCEPTED))
+    assert promoted.state is ProposalState.ACCEPTED
+    assert promoted.memory_id is not None
+    assert store.accept(ValidatedProposal(candidate.proposal, ProposalState.ACCEPTED)).idempotent
+
+
 def test_summary_membership_period_and_late_source_invalidation() -> None:
     source_id = uuid4()
     conversation_id = uuid4()
@@ -1092,6 +1119,7 @@ def test_memory_store_rejects_cross_scope_merge_targets() -> None:
     )
     store = MemoryStore()
     first_result = store.accept(first)
+    second = ValidatedProposal(second.proposal, ProposalState.ACCEPTED)
     second_result = store.accept(second)
     assert first_result.memory_id is not None
     assert second_result.memory_id is not None

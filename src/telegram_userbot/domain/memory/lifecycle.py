@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from telegram_userbot.domain.memory.models import (
     ProposalState,
 )
 from telegram_userbot.domain.memory.validation import ValidatedProposal
+from telegram_userbot.domain.shared.hashing import stable_json_bytes
 from telegram_userbot.domain.shared.time import require_aware
 
 
@@ -45,7 +47,8 @@ class MemoryStore:
 
     def __init__(self) -> None:
         self._records: dict[UUID, MemoryRecord] = {}
-        self._proposal_results: dict[UUID, AcceptanceResult] = {}
+        self._proposal_results: dict[tuple[UUID, UUID, UUID], AcceptanceResult] = {}
+        self._proposal_fingerprints: dict[tuple[UUID, UUID, UUID], bytes] = {}
         self._semantic_index: dict[tuple[UUID, UUID, bytes], UUID] = {}
 
     @property
@@ -77,21 +80,36 @@ class MemoryStore:
         allow_candidate: bool = False,
     ) -> AcceptanceResult:
         current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
-        prior = self._proposal_results.get(validated.proposal.id)
-        if prior is not None:
-            return AcceptanceResult(
-                prior.proposal_id,
-                prior.state,
-                prior.memory_id,
-                prior.memory_version_id,
-                idempotent=True,
-            )
         proposal = validated.proposal
+        proposal_key = (proposal.account_id, proposal.conversation_id, proposal.id)
+        fingerprint = _proposal_fingerprint(proposal)
+        prior_fingerprint = self._proposal_fingerprints.get(proposal_key)
+        if prior_fingerprint is not None and prior_fingerprint != fingerprint:
+            raise MemoryConflictError("proposal replay does not match immutable identity")
+        prior = self._proposal_results.get(proposal_key)
+        if prior is not None:
+            if prior.state is not ProposalState.CANDIDATE:
+                return AcceptanceResult(
+                    prior.proposal_id,
+                    prior.state,
+                    prior.memory_id,
+                    prior.memory_version_id,
+                    idempotent=True,
+                )
+            if not allow_candidate and validated.state is ProposalState.CANDIDATE:
+                return AcceptanceResult(
+                    prior.proposal_id,
+                    prior.state,
+                    prior.memory_id,
+                    prior.memory_version_id,
+                    idempotent=True,
+                )
+        self._proposal_fingerprints.setdefault(proposal_key, fingerprint)
         if validated.state is not ProposalState.ACCEPTED and not (
             allow_candidate and validated.state is ProposalState.CANDIDATE
         ):
             result = AcceptanceResult(proposal.id, validated.state, None, None)
-            self._proposal_results[proposal.id] = result
+            self._proposal_results[proposal_key] = result
             return result
         if acceptance_kind not in {"automatic", "manual", "reconciliation", "migration"}:
             raise ValueError("unknown acceptance kind")
@@ -206,7 +224,7 @@ class MemoryStore:
                     )
             memory_id = target.id
         result = AcceptanceResult(proposal.id, ProposalState.ACCEPTED, memory_id, version.id)
-        self._proposal_results[proposal.id] = result
+        self._proposal_results[proposal_key] = result
         return result
 
     @staticmethod
@@ -302,3 +320,37 @@ class MemoryStore:
             (record.account_id, record.conversation_id, record.semantic_key_hash), None
         )
         return forgotten
+
+
+def _proposal_fingerprint(proposal: MemoryProposal) -> bytes:
+    """Hash the immutable proposal fields used by acceptance replay."""
+
+    payload = {
+        "account_id": str(proposal.account_id),
+        "conversation_id": str(proposal.conversation_id),
+        "operation": proposal.operation.value,
+        "memory_type": proposal.memory_type.value,
+        "semantic_key_hash": proposal.semantic_key_hash.hex(),
+        "payload": proposal.payload,
+        "rendered_text": proposal.rendered_text,
+        "confidence": proposal.confidence,
+        "importance": proposal.importance,
+        "evidence": [
+            {
+                "source_id": str(evidence.source_id),
+                "source_revision": evidence.source_revision,
+                "source_content_sha256": evidence.source_content_sha256.hex(),
+                "role": evidence.role.value,
+                "trust": evidence.trust.value,
+                "span_start": evidence.span_start,
+                "span_end": evidence.span_end,
+                "visual_only": evidence.visual_only,
+            }
+            for evidence in proposal.evidence
+        ],
+        "target_memory_ids": [str(memory_id) for memory_id in proposal.target_memory_ids],
+        "valid_from": proposal.valid_from.isoformat() if proposal.valid_from is not None else None,
+        "valid_to": proposal.valid_to.isoformat() if proposal.valid_to is not None else None,
+        "visual_only": proposal.visual_only,
+    }
+    return hashlib.sha256(stable_json_bytes(payload)).digest()

@@ -1319,7 +1319,11 @@ class MemoryRepository:
             expected = target_snapshots[target_id]
             if row["current_version_no"] != expected or row["status"] != "active":
                 raise MemoryConflictError("target version changed before acceptance")
-            if proposal.operation in {MemoryOperation.UPDATE, MemoryOperation.INVALIDATE} and (
+            if proposal.operation in {
+                MemoryOperation.UPDATE,
+                MemoryOperation.INVALIDATE,
+                MemoryOperation.MERGE,
+            } and (
                 row["memory_type"] != proposal.memory_type.value
                 or row["semantic_key_hash"] != proposal.semantic_key_hash
             ):
@@ -1365,6 +1369,20 @@ class MemoryRepository:
             )
             version_no = 1
             version_id = uuid5(memory_id, "memory-version:1")
+            if (
+                proposal.operation is MemoryOperation.SUPERSEDE
+                and target_rows
+                and collision == target_rows[0]["id"]
+            ):
+                await self._session.execute(
+                    update(memories)
+                    .where(memories.c.id == target_rows[0]["id"])
+                    .values(
+                        status="superseded",
+                        superseded_by_memory_id=memory_id,
+                        updated_at=current_time,
+                    )
+                )
             await self._session.execute(
                 postgresql_insert(memories)
                 .values(
@@ -1493,12 +1511,6 @@ class MemoryRepository:
             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
             {"lock_key": (f"summary:{account_id}:{conversation_id}:{summary.kind.value}")},
         )
-        for source in summary.sources:
-            await self._require_summary_source_current(
-                source,
-                account_id=account_id,
-                conversation_id=conversation_id,
-            )
         watermark_row = (
             (
                 await self._session.execute(
@@ -1519,10 +1531,6 @@ class MemoryRepository:
         else:
             last_included = cast(int, watermark_row["last_included_event_id"])
             watermark_version = cast(int, watermark_row["version"])
-        if summary.range_start_event_id > last_included + 1:
-            raise SummaryCoverageError("summary watermark cannot skip an uncovered event")
-        if summary.range_end_event_id < last_included:
-            raise SummaryCoverageError("summary watermark cannot move backwards")
         summary_row = (
             (
                 await self._session.execute(
@@ -1538,26 +1546,7 @@ class MemoryRepository:
             .mappings()
             .one_or_none()
         )
-        if summary_row is None:
-            if summary.version_no != 1:
-                raise SummaryCoverageError("first summary version must be one")
-            await self._session.execute(
-                insert(summaries).values(
-                    id=summary.summary_id,
-                    account_id=account_id,
-                    conversation_id=conversation_id,
-                    summary_kind=summary.kind.value,
-                    period_key=period_key or f"{summary.kind.value}:{summary.range_start_event_id}",
-                    timezone_snapshot=timezone_snapshot,
-                    period_start_at=None,
-                    period_end_at=None,
-                    status=summary.status.value,
-                    current_version_no=summary.version_no,
-                    created_at=current_time,
-                    updated_at=current_time,
-                )
-            )
-        else:
+        if summary_row is not None:
             if summary_row["summary_kind"] != summary.kind.value:
                 raise SummaryCoverageError("summary kind does not match its durable identity")
             existing_version = (
@@ -1607,6 +1596,36 @@ class MemoryRepository:
                     if watermark_row is not None
                     else None,
                 )
+        for source in summary.sources:
+            await self._require_summary_source_current(
+                source,
+                account_id=account_id,
+                conversation_id=conversation_id,
+            )
+        if summary.range_start_event_id > last_included + 1:
+            raise SummaryCoverageError("summary watermark cannot skip an uncovered event")
+        if summary.range_end_event_id < last_included:
+            raise SummaryCoverageError("summary watermark cannot move backwards")
+        if summary_row is None:
+            if summary.version_no != 1:
+                raise SummaryCoverageError("first summary version must be one")
+            await self._session.execute(
+                insert(summaries).values(
+                    id=summary.summary_id,
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    summary_kind=summary.kind.value,
+                    period_key=period_key or f"{summary.kind.value}:{summary.range_start_event_id}",
+                    timezone_snapshot=timezone_snapshot,
+                    period_start_at=None,
+                    period_end_at=None,
+                    status=summary.status.value,
+                    current_version_no=summary.version_no,
+                    created_at=current_time,
+                    updated_at=current_time,
+                )
+            )
+        else:
             if (
                 expected_version is not None
                 and summary_row["current_version_no"] != expected_version
