@@ -188,7 +188,9 @@ class BuiltContext:
     ordered_sources: tuple[ContextSource, ...] = field(repr=False)
 
 
-def validate_manifest_integrity(manifest: ContextManifest) -> None:
+def validate_manifest_integrity(  # noqa: PLR0912 - integrity branches are explicit
+    manifest: ContextManifest,
+) -> None:
     """Fail closed when a persisted or replayed manifest is internally inconsistent."""
 
     if (
@@ -213,6 +215,17 @@ def validate_manifest_integrity(manifest: ContextManifest) -> None:
     for item in manifest.items:
         if item.token_estimate < 0 or item.estimated_image_tokens < 0:
             raise ValueError("context_manifest_estimate_mismatch")
+        if item.image_detail not in {None, "auto"}:
+            raise ValueError("context_manifest_image_metadata_invalid")
+        if item.source_type == "media_object":
+            if (
+                item.layer != ContextLayer.CURRENT.value
+                or item.image_detail != "auto"
+                or item.estimated_image_tokens <= 0
+            ):
+                raise ValueError("context_manifest_image_metadata_invalid")
+        elif item.image_detail is not None or item.estimated_image_tokens != 0:
+            raise ValueError("context_manifest_image_metadata_invalid")
         _require_sha256_hex(item.content_sha256)
         _require_sha256_hex(item.rendered_part_sha256)
     instruction_tokens = sum(

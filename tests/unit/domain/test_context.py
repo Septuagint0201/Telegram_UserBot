@@ -254,6 +254,27 @@ def test_context_soft_quotas_borrow_deterministically_and_image_reserve_must_mat
             capability_snapshot_sha256="b" * 64,
         )
 
+    recent_item, media_item = built.manifest.items
+    with pytest.raises(ValueError, match="image_metadata"):
+        rebuild_context(
+            replace(
+                built.manifest,
+                items=(
+                    replace(recent_item, image_detail="auto", estimated_image_tokens=1),
+                    media_item,
+                ),
+            ),
+            (recent, required),
+        )
+    with pytest.raises(ValueError, match="image_metadata"):
+        rebuild_context(
+            replace(
+                built.manifest,
+                items=(recent_item, replace(media_item, image_detail=None)),
+            ),
+            (recent, required),
+        )
+
 
 @pytest.mark.unit
 def test_context_policy_and_source_contracts_fail_closed() -> None:
