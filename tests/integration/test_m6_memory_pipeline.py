@@ -264,8 +264,8 @@ async def test_m6_embedding_indexes_and_dimension_binding_match_architecture(
         cast(str, row["conname"]): cast(str, row["definition"]) for row in constraint_rows
     }
     assert (
-        "FOREIGN KEY (embedding_space_id, dimensions)"
-        in constraints["fk_embedding_records_space_dimensions"]
+        "FOREIGN KEY (embedding_space_id, account_id, dimensions)"
+        in constraints["fk_embedding_records_space_scope"]
     )
     assert (
         "FOREIGN KEY (config_version_id, model_profile_id)"
