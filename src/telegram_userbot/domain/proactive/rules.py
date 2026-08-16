@@ -119,6 +119,8 @@ def _occurrence(  # noqa: PLR0913 - immutable occurrence requires all source sna
     secret: bytes,
     quiet_bypass_possible: bool = False,
     policy: ProactivePolicy | None = None,
+    contact_setting_version: int | None = None,
+    relationship_state_version: int | None = None,
 ) -> RuleOccurrence:
     if not evidence or any(not item.valid for item in evidence):
         raise ValueError("occurrence requires current evidence")
@@ -132,6 +134,9 @@ def _occurrence(  # noqa: PLR0913 - immutable occurrence requires all source sna
         start.isoformat(),
         end.isoformat(),
         str(policy.version_id if policy is not None else "none"),
+        str(contact_setting_version if contact_setting_version is not None else "none"),
+        str(relationship_state_version if relationship_state_version is not None else "none"),
+        timezone_name,
     )
     occurrence_id = uuid5(OCCURRENCE_NAMESPACE, key.hex())
     return RuleOccurrence(
@@ -155,15 +160,19 @@ def _occurrence(  # noqa: PLR0913 - immutable occurrence requires all source sna
         source_version=str(source_version),
         quiet_bypass_possible=quiet_bypass_possible,
         policy_version_id=policy.version_id if policy is not None else None,
+        contact_setting_version=contact_setting_version,
+        relationship_state_version=relationship_state_version,
     )
 
 
-def materialize_life_event(
+def materialize_life_event(  # noqa: PLR0913 - snapshot inputs are explicit and immutable
     fact: LifeEventFact,
     *,
     now: datetime,
     policy: ProactivePolicy,
     secret: bytes,
+    contact_setting_version: int | None = None,
+    relationship_state_version: int | None = None,
 ) -> tuple[RuleOccurrence, ...]:
     now_utc = require_aware(now, "now")
     if fact.status != "active" or fact.importance < 0 or fact.importance > 1:
@@ -190,6 +199,8 @@ def materialize_life_event(
                     secret=secret,
                     quiet_bypass_possible=fact.importance >= policy.bypass_importance_threshold,
                     policy=policy,
+                    contact_setting_version=contact_setting_version,
+                    relationship_state_version=relationship_state_version,
                 )
             )
         if fact.followup_allowed:
@@ -211,6 +222,8 @@ def materialize_life_event(
                         evidence=fact.evidence,
                         secret=secret,
                         policy=policy,
+                        contact_setting_version=contact_setting_version,
+                        relationship_state_version=relationship_state_version,
                     )
                 )
     elif fact.start_at is not None:
@@ -238,6 +251,8 @@ def materialize_life_event(
                     secret=secret,
                     quiet_bypass_possible=fact.importance >= policy.bypass_importance_threshold,
                     policy=policy,
+                    contact_setting_version=contact_setting_version,
+                    relationship_state_version=relationship_state_version,
                 )
             )
         if fact.followup_allowed:
@@ -267,17 +282,21 @@ def materialize_life_event(
                         evidence=fact.evidence,
                         secret=secret,
                         policy=policy,
+                        contact_setting_version=contact_setting_version,
+                        relationship_state_version=relationship_state_version,
                     )
                 )
     return tuple(results)
 
 
-def materialize_intention(
+def materialize_intention(  # noqa: PLR0913 - snapshot inputs are explicit and immutable
     fact: IntentionFact,
     *,
     now: datetime,
     policy: ProactivePolicy,
     secret: bytes,
+    contact_setting_version: int | None = None,
+    relationship_state_version: int | None = None,
 ) -> tuple[RuleOccurrence, ...]:
     now_utc = require_aware(now, "now")
     if (
@@ -307,16 +326,20 @@ def materialize_intention(
             secret=secret,
             quiet_bypass_possible=fact.importance >= policy.bypass_importance_threshold,
             policy=policy,
+            contact_setting_version=contact_setting_version,
+            relationship_state_version=relationship_state_version,
         ),
     )
 
 
-def materialize_explicit_followup(
+def materialize_explicit_followup(  # noqa: PLR0913 - snapshot inputs are explicit and immutable
     fact: ExplicitFollowupFact,
     *,
     now: datetime,
     policy: ProactivePolicy,
     secret: bytes,
+    contact_setting_version: int | None = None,
+    relationship_state_version: int | None = None,
 ) -> tuple[RuleOccurrence, ...]:
     now_utc = require_aware(now, "now")
     if fact.status != "active" or fact.expected_at is None:
@@ -340,16 +363,20 @@ def materialize_explicit_followup(
             evidence=fact.evidence,
             secret=secret,
             policy=policy,
+            contact_setting_version=contact_setting_version,
+            relationship_state_version=relationship_state_version,
         ),
     )
 
 
-def materialize_reconnect(
+def materialize_reconnect(  # noqa: PLR0913 - snapshot inputs are explicit and immutable
     fact: RelationshipFact,
     *,
     now: datetime,
     policy: ProactivePolicy,
     secret: bytes,
+    contact_setting_version: int | None = None,
+    relationship_state_version: int | None = None,
 ) -> tuple[RuleOccurrence, ...]:
     now_utc = require_aware(now, "now")
     if (
@@ -384,6 +411,8 @@ def materialize_reconnect(
             evidence=fact.evidence,
             secret=secret,
             policy=policy,
+            contact_setting_version=contact_setting_version,
+            relationship_state_version=relationship_state_version,
         ),
     )
 
@@ -473,7 +502,9 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
     """Aggregate only overlapping windows; never merge unrelated time windows."""
 
     now_utc = require_aware(now, "now")
-    grouped: dict[tuple[UUID, UUID, UUID, str, UUID | None], list[RuleOccurrence]] = {}
+    grouped: dict[
+        tuple[UUID, UUID, UUID, str, UUID | None, int | None, int | None], list[RuleOccurrence]
+    ] = {}
     for occurrence in occurrences:
         scope = (
             occurrence.account_id,
@@ -481,11 +512,21 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
             occurrence.conversation_id,
             occurrence.timezone_name,
             occurrence.policy_version_id,
+            occurrence.contact_setting_version,
+            occurrence.relationship_state_version,
         )
         grouped.setdefault(scope, []).append(occurrence)
     candidates: list[Candidate] = []
     for scope, values in grouped.items():
-        account_id, contact_id, conversation_id, timezone_name, policy_version_id = scope
+        (
+            account_id,
+            contact_id,
+            conversation_id,
+            timezone_name,
+            policy_version_id,
+            contact_setting_version,
+            relationship_state_version,
+        ) = scope
         ordered = sorted(
             values,
             key=lambda item: (
@@ -544,6 +585,8 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
                     window_start_at=max(start, now_utc),
                     window_end_at=end,
                     policy_version_id=policy_version_id,
+                    contact_setting_version=contact_setting_version,
+                    relationship_state_version=relationship_state_version,
                     timezone_name=timezone_name,
                     mode_version=(mode_versions or {}).get(contact_id, 1),
                     content_revision=(content_revisions or {}).get(contact_id, 0),

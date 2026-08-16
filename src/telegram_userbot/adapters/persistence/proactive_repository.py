@@ -76,6 +76,10 @@ class ProactiveRepository:
                 or occurrence.conversation_id != candidate.conversation_id
                 or occurrence.timezone_name != candidate.timezone_name
                 or occurrence.policy_version_id != candidate.policy_version_id
+                or getattr(occurrence, "contact_setting_version", None)
+                != getattr(candidate, "contact_setting_version", None)
+                or getattr(occurrence, "relationship_state_version", None)
+                != getattr(candidate, "relationship_state_version", None)
                 for occurrence in candidate.occurrences
             )
             or len({occurrence.id for occurrence in candidate.occurrences})
@@ -111,6 +115,10 @@ class ProactiveRepository:
                     source_id=occurrence.source_id,
                     source_version=occurrence.source_version,
                     policy_version_id=occurrence.policy_version_id,
+                    contact_setting_version=getattr(occurrence, "contact_setting_version", None),
+                    relationship_state_version=getattr(
+                        occurrence, "relationship_state_version", None
+                    ),
                     quiet_bypass_possible=occurrence.quiet_bypass_possible,
                     created_at=current_time,
                 )
@@ -181,6 +189,8 @@ class ProactiveRepository:
                 window_end_at=candidate.window_end_at,
                 due_at=candidate.window_start_at,
                 policy_version_id=candidate.policy_version_id,
+                contact_setting_version=getattr(candidate, "contact_setting_version", None),
+                relationship_state_version=getattr(candidate, "relationship_state_version", None),
                 timezone_name=candidate.timezone_name,
                 mode_version=candidate.mode_version,
                 content_revision=candidate.content_revision,
@@ -1610,7 +1620,7 @@ def _reservation(row: Any) -> BudgetReservation:
 
 def _occurrence_matches(row: Any, occurrence: Any) -> bool:
     return all(
-        row[column] == value
+        row.get(column) == value
         for column, value in {
             "id": occurrence.id,
             "account_id": occurrence.account_id,
@@ -1629,6 +1639,8 @@ def _occurrence_matches(row: Any, occurrence: Any) -> bool:
             "source_id": occurrence.source_id,
             "source_version": occurrence.source_version,
             "policy_version_id": occurrence.policy_version_id,
+            "contact_setting_version": getattr(occurrence, "contact_setting_version", None),
+            "relationship_state_version": getattr(occurrence, "relationship_state_version", None),
             "quiet_bypass_possible": occurrence.quiet_bypass_possible,
         }.items()
     )
@@ -1636,7 +1648,7 @@ def _occurrence_matches(row: Any, occurrence: Any) -> bool:
 
 def _candidate_matches(row: Any, candidate: Candidate) -> bool:
     return all(
-        row[column] == value
+        row.get(column) == value
         for column, value in {
             "id": candidate.id,
             "account_id": candidate.account_id,
@@ -1648,6 +1660,8 @@ def _candidate_matches(row: Any, candidate: Candidate) -> bool:
             "window_start_at": candidate.window_start_at,
             "window_end_at": candidate.window_end_at,
             "policy_version_id": candidate.policy_version_id,
+            "contact_setting_version": getattr(candidate, "contact_setting_version", None),
+            "relationship_state_version": getattr(candidate, "relationship_state_version", None),
             "timezone_name": candidate.timezone_name,
             "mode_version": candidate.mode_version,
             "content_revision": candidate.content_revision,

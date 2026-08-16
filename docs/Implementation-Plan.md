@@ -339,7 +339,7 @@ deploy/
 
 ## 12. M7 — Proactive Pipeline
 
-当前状态：M7 Proactive Pipeline domain、migration、least-privilege roles、strict decision validation、budget reservation、DST/quiet policy、AUTO/COPILOT final-gate contract 与 content-free evidence mapping 已完成。Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build 与 Disclosure static checks 为 `PASS`；quiet 默认 `22:00–08:00`，absolute no-send 固定 `00:00–07:00`。当前迁移 head 为 `0022_m7_job_scope_and_deadline`；GitHub Actions Linux service acceptance for current HEAD 为 `NOT RUN`，历史提交的运行结果不绑定当前提交。本机无 Docker，Windows 本地 PostgreSQL/Redis service 仍为 `NOT RUN`。真实 Telegram/provider、真实 proactive send、Control Bot polling、Ubuntu production、backup/restore、load 与 soak 仍为 `NOT RUN`。
+当前状态：M7 Proactive Pipeline domain、migration、least-privilege roles、strict decision validation、budget reservation、DST/quiet policy、AUTO/COPILOT final-gate contract 与 content-free evidence mapping 已完成。Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build 与 Disclosure static checks 为 `PASS`；quiet 默认 `22:00–08:00`，absolute no-send 固定 `00:00–07:00`。`0022_m7_job_scope_and_deadline` 为前一迁移，当前迁移 head 为 `0023_m7_proactive_snapshot`，补齐 occurrence/candidate 的 contact-setting 与 relationship-state 快照；GitHub Actions Linux service acceptance for current HEAD 为 `NOT RUN`，历史提交的运行结果不绑定当前提交。本机无 Docker，Windows 本地 PostgreSQL/Redis service 仍为 `NOT RUN`。真实 Telegram/provider、真实 proactive send、Control Bot polling、Ubuntu production、backup/restore、load 与 soak 仍为 `NOT RUN`。
 
 ### 12.1 目标
 

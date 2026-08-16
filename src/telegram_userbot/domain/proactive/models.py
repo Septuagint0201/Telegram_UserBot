@@ -302,6 +302,10 @@ class RuleOccurrence:
             or self.importance < 0.90
         ):
             raise ValueError("quiet bypass is not allowed for this occurrence")
+        if (self.contact_setting_version is not None and self.contact_setting_version < 1) or (
+            self.relationship_state_version is not None and self.relationship_state_version < 1
+        ):
+            raise ValueError("occurrence relationship/settings snapshots are invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +325,8 @@ class Candidate:
     mode_version: int
     content_revision: int
     activity_revision: int
+    contact_setting_version: int | None = None
+    relationship_state_version: int | None = None
     state: CandidateState = CandidateState.OPEN
 
     def __post_init__(self) -> None:
@@ -339,6 +345,8 @@ class Candidate:
             or item.conversation_id != self.conversation_id
             or item.timezone_name != self.timezone_name
             or item.policy_version_id != self.policy_version_id
+            or item.contact_setting_version != self.contact_setting_version
+            or item.relationship_state_version != self.relationship_state_version
             for item in self.occurrences
         ):
             raise ValueError("candidate must contain same-contact occurrences")
@@ -354,6 +362,10 @@ class Candidate:
         )
         if self.window_start_at >= self.window_end_at:
             raise ValueError("candidate window is invalid")
+        if (self.contact_setting_version is not None and self.contact_setting_version < 1) or (
+            self.relationship_state_version is not None and self.relationship_state_version < 1
+        ):
+            raise ValueError("candidate relationship/settings snapshots are invalid")
         if self.mode_version < 1 or self.content_revision < 0 or self.activity_revision < 0:
             raise ValueError("candidate snapshots are invalid")
 

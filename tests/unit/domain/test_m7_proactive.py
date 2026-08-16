@@ -179,6 +179,37 @@ def test_m7_rules_materialize_allowlisted_facts_and_group_only_overlaps() -> Non
     )
     assert candidates
     assert all(item.occurrences for item in candidates)
+
+
+@pytest.mark.unit
+def test_m7_candidate_grouping_separates_contact_and_relationship_snapshots() -> None:
+    p = policy()
+    fact = intention()
+    first = materialize_intention(
+        fact,
+        now=NOW,
+        policy=p,
+        secret=PROACTIVE_TEST_SECRET,
+        contact_setting_version=1,
+        relationship_state_version=1,
+    )[0]
+    second = materialize_intention(
+        fact,
+        now=NOW,
+        policy=p,
+        secret=PROACTIVE_TEST_SECRET,
+        contact_setting_version=2,
+        relationship_state_version=1,
+    )[0]
+
+    candidates = aggregate_candidates(
+        (first, second), now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET
+    )
+
+    assert len(candidates) == 2
+    assert {
+        (item.contact_setting_version, item.relationship_state_version) for item in candidates
+    } == {(1, 1), (2, 1)}
     assert membership_digest(candidates[0].occurrences) == candidates[0].membership_hash
     assert derive_key(PROACTIVE_TEST_SECRET, "a", "bc") != derive_key(
         PROACTIVE_TEST_SECRET, "ab", "c"

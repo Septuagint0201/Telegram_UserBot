@@ -29,7 +29,7 @@ def test_alembic_head_fits_default_version_column() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     head = ScriptDirectory.from_config(config).get_current_head()
-    assert head == "0022_m7_job_scope_and_deadline"
+    assert head == "0023_m7_proactive_snapshot"
     assert len(head) <= 32
 
 

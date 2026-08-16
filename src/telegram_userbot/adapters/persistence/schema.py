@@ -3975,6 +3975,8 @@ proactive_occurrences = Table(
     Column("source_id", UUID_TYPE, nullable=False),
     Column("source_version", Text, nullable=False),
     Column("policy_version_id", UUID_TYPE),
+    Column("contact_setting_version", Integer),
+    Column("relationship_state_version", Integer),
     Column("quiet_bypass_possible", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_occurrences_account"),
@@ -4008,9 +4010,17 @@ proactive_occurrences = Table(
     CheckConstraint(
         "window_start_at < window_end_at AND hard_deadline_at >= window_start_at "
         "AND hard_deadline_at <= window_end_at",
-        name="window_values",
+        name="ck_proactive_occurrences_window_values",
     ),
     CheckConstraint("importance >= 0 AND importance <= 1", name="importance_bounded"),
+    CheckConstraint(
+        "contact_setting_version IS NULL OR contact_setting_version > 0",
+        name="ck_proactive_occurrences_contact_setting_version_positive",
+    ),
+    CheckConstraint(
+        "relationship_state_version IS NULL OR relationship_state_version > 0",
+        name="ck_proactive_occurrences_relationship_state_version_positive",
+    ),
     UniqueConstraint("occurrence_key", name="uq_proactive_occurrences_key"),
     UniqueConstraint("id", "account_id", name="uq_proactive_occurrences_id_account"),
 )
@@ -4060,6 +4070,8 @@ proactive_candidates = Table(
     Column("window_end_at", UTC_TIMESTAMP, nullable=False),
     Column("due_at", UTC_TIMESTAMP, nullable=False),
     Column("policy_version_id", UUID_TYPE),
+    Column("contact_setting_version", Integer),
+    Column("relationship_state_version", Integer),
     Column("timezone_name", Text, nullable=False),
     Column("mode_version", BigInteger, nullable=False),
     Column("content_revision", BigInteger, nullable=False),
@@ -4086,6 +4098,14 @@ proactive_candidates = Table(
     CheckConstraint(
         "generation > 0 AND mode_version > 0 AND content_revision >= 0 AND activity_revision >= 0",
         name="snapshot_values",
+    ),
+    CheckConstraint(
+        "contact_setting_version IS NULL OR contact_setting_version > 0",
+        name="ck_proactive_candidates_contact_setting_version_positive",
+    ),
+    CheckConstraint(
+        "relationship_state_version IS NULL OR relationship_state_version > 0",
+        name="ck_proactive_candidates_relationship_state_version_positive",
     ),
     CheckConstraint(
         "state IN ('open','evaluating','send_selected','deferred_once',"

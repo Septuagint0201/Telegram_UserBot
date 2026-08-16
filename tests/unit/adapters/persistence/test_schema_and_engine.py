@@ -475,6 +475,25 @@ def test_m7_job_scope_and_deadline_migration_is_recoverable() -> None:
 
 
 @pytest.mark.unit
+def test_m7_proactive_snapshot_closure_migration_is_recoverable() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0023_m7_proactive_snapshot.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'down_revision: str | Sequence[str] | None = "0022_m7_job_scope_and_deadline"' in migration
+    )
+    assert "proactive_occurrences" in migration
+    assert "proactive_candidates" in migration
+    assert "contact_setting_version" in migration
+    assert "relationship_state_version" in migration
+    assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable
