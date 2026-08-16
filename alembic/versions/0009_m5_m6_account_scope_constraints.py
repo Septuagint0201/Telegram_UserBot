@@ -731,6 +731,20 @@ def downgrade() -> None:
             ("id",),
         ),
         (
+            "fk_context_manifest_items_memory_version",
+            "context_manifest_items",
+            "memory_versions",
+            ("memory_version_id",),
+            ("id",),
+        ),
+        (
+            "fk_context_manifest_items_summary_version",
+            "context_manifest_items",
+            "summary_versions",
+            ("summary_version_id",),
+            ("id",),
+        ),
+        (
             "fk_context_preview_requests_context_manifest_id_context_4e1c",
             "context_preview_requests",
             "context_manifests",

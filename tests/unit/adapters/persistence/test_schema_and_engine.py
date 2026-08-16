@@ -193,6 +193,24 @@ def test_m5_m6_scope_migration_uses_postgres_safe_constraint_names() -> None:
 
 
 @pytest.mark.unit
+def test_m5_m6_scope_downgrade_restores_m6_external_foreign_keys() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0009_m5_m6_account_scope_constraints.py"
+    ).read_text(encoding="utf-8")
+    restore_section = migration[
+        migration.index("old_fks = (") : migration.index(
+            "for name, table, referred_table, local_columns, remote_columns in old_fks:"
+        )
+    ]
+
+    assert '"fk_context_manifest_items_memory_version"' in restore_section
+    assert '"fk_context_manifest_items_summary_version"' in restore_section
+
+
+@pytest.mark.unit
 def test_durable_settings_are_strict_and_safe() -> None:
     settings = DurableStateSettings.from_mapping(
         {
