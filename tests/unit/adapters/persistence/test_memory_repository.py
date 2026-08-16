@@ -1319,6 +1319,11 @@ async def test_forget_and_erasure_are_account_scoped_and_idempotently_shaped() -
     session.execute.side_effect = [_Result({"id": memory_id}), _Result(), _Result(), _Result()]
     assert await repo.forget_memory(account_id=account_id, memory_id=memory_id, now=NOW)
 
+    session.execute.reset_mock()
+    session.execute.side_effect = [_Result({"id": memory_id, "status": "forgotten"})]
+    assert await repo.forget_memory(account_id=account_id, memory_id=memory_id, now=NOW)
+    assert session.execute.await_count == 1
+
     repo._require_erasure_derived_scope = AsyncMock()  # type: ignore[method-assign]
     repo.forget_memory = AsyncMock(return_value=True)  # type: ignore[method-assign]
     embedding_id, summary_id = uuid4(), uuid4()

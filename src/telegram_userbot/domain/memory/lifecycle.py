@@ -286,6 +286,8 @@ class MemoryStore:
     def forget(self, memory_id: UUID, *, now: datetime | None = None) -> MemoryRecord:
         record = self.get(memory_id)
         current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
+        if record.status is MemoryStatus.FORGOTTEN:
+            return record
         forgotten = MemoryRecord(
             id=record.id,
             account_id=record.account_id,

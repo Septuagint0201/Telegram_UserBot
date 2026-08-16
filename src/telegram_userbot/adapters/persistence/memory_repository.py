@@ -2039,6 +2039,8 @@ class MemoryRepository:
         )
         if row is None:
             return False
+        if row.get("status") == "forgotten":
+            return True
         await self._session.execute(
             update(memories)
             .where(memories.c.id == memory_id, memories.c.account_id == account_id)
