@@ -72,11 +72,13 @@ def test_proactive_persistence_row_converters_preserve_durable_state() -> None:
             "lease_owner": owner,
             "lease_expires_at": NOW + timedelta(minutes=1),
             "attempt_count": 2,
+            "fencing_token": 3,
         }
     )
     assert due.account_id == account_id
     assert due.lease_owner == owner
     assert due.attempt_count == 2
+    assert due.fencing_token == 3
     reservation = _reservation(
         {
             "id": uuid4(),
@@ -188,7 +190,7 @@ async def test_proactive_persistence_success_paths_are_transaction_shaped() -> N
         idempotency_key=b"a" * 32,
         available_at=NOW,
     )
-    assert await repo.complete_job(idempotency_key=key, owner=uuid4(), now=NOW)
+    assert await repo.complete_job(idempotency_key=key, owner=uuid4(), fencing_token=1, now=NOW)
     assert await repo.recover_expired(now=NOW) == 1
     assert await repo.reap_budget(now=NOW) == 0
     repo.settle_budget = AsyncMock(return_value=None)  # type: ignore[method-assign]
@@ -254,9 +256,15 @@ async def test_proactive_persistence_claim_updates_a_pending_job_with_a_lease() 
         "lease_owner": owner,
         "lease_expires_at": NOW + timedelta(minutes=2),
         "attempt_count": 1,
+        "fencing_token": 1,
     }
     session = AsyncMock()
-    session.execute.side_effect = [_Result(rowcount=0), _Result(row), _Result(row)]
+    session.execute.side_effect = [
+        _Result(rowcount=0),
+        _Result(rowcount=0),
+        _Result(row),
+        _Result(row),
+    ]
     claimed = await ProactiveRepository(cast(AsyncSession, session)).claim_next(
         now=NOW,
         owner=owner,
@@ -265,6 +273,7 @@ async def test_proactive_persistence_claim_updates_a_pending_job_with_a_lease() 
     assert claimed.id == job_id
     assert claimed.lease_owner == owner
     assert claimed.attempt_count == 1
+    assert claimed.fencing_token == 1
 
 
 @pytest.mark.asyncio

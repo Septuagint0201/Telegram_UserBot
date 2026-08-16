@@ -29,7 +29,7 @@ def test_alembic_head_fits_default_version_column() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     head = ScriptDirectory.from_config(config).get_current_head()
-    assert head == "0011_scope_context_erasure"
+    assert head == "0012_worker_lease_retry"
     assert len(head) <= 32
 
 

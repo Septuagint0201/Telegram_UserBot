@@ -169,11 +169,26 @@ async def test_m6_threshold_retry_and_expired_lease_are_runnable(
     assert first is not None
     assert first.id == job_id
 
+    assert not await repository.complete_job(
+        job_id=job_id,
+        owner=first_owner,
+        fencing_token=first.fencing_token,
+        now=NOW + timedelta(seconds=30),
+        succeeded=False,
+    )
     replacement_owner = uuid7()
+    assert (
+        await repository.claim_next(
+            conversation_id=conversation_id,
+            owner=replacement_owner,
+            now=NOW + timedelta(seconds=30),
+        )
+        is None
+    )
     replacement = await repository.claim_next(
         conversation_id=conversation_id,
         owner=replacement_owner,
-        now=NOW + timedelta(seconds=30),
+        now=NOW + timedelta(seconds=35),
     )
     assert replacement is not None
     assert replacement.id == job_id
@@ -182,23 +197,52 @@ async def test_m6_threshold_retry_and_expired_lease_are_runnable(
         job_id=job_id,
         owner=first_owner,
         fencing_token=first.fencing_token,
-        now=NOW + timedelta(seconds=31),
+        now=NOW + timedelta(seconds=36),
         succeeded=False,
     )
     assert await repository.complete_job(
         job_id=job_id,
         owner=replacement_owner,
         fencing_token=replacement.fencing_token,
-        now=NOW + timedelta(seconds=31),
+        now=NOW + timedelta(seconds=36),
         succeeded=False,
     )
+    assert (
+        await repository.claim_next(
+            conversation_id=conversation_id,
+            owner=uuid7(),
+            now=NOW + timedelta(seconds=36),
+        )
+        is None
+    )
+    retry_owner = uuid7()
     retry = await repository.claim_next(
         conversation_id=conversation_id,
-        owner=uuid7(),
-        now=NOW + timedelta(seconds=31),
+        owner=retry_owner,
+        now=NOW + timedelta(seconds=41),
     )
     assert retry is not None
     assert retry.id == job_id
+    assert await repository.complete_job(
+        job_id=job_id,
+        owner=retry_owner,
+        fencing_token=retry.fencing_token,
+        now=NOW + timedelta(seconds=42),
+        succeeded=False,
+        max_attempts=3,
+    )
+    assert (
+        await repository.claim_next(
+            conversation_id=conversation_id,
+            owner=uuid7(),
+            now=NOW + timedelta(days=1),
+        )
+        is None
+    )
+    assert (
+        await db_session.scalar(select(memory_jobs.c.state).where(memory_jobs.c.id == job_id))
+        == "dead_letter"
+    )
 
 
 @pytest.mark.integration

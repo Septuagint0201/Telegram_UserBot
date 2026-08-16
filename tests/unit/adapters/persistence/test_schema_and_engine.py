@@ -276,6 +276,23 @@ def test_context_erasure_scope_migration_is_safe_and_keeps_candidate_key() -> No
 
 
 @pytest.mark.unit
+def test_worker_retry_migration_is_fenced_bounded_and_reversible() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0012_worker_lease_retry.py"
+    ).read_text(encoding="utf-8")
+    constraint_names = re.findall(r'"(ck_[^"]+)"', migration)
+    downgrade = migration[migration.index("def downgrade() -> None:") :]
+
+    assert constraint_names
+    assert all(len(name) <= 63 for name in constraint_names)
+    assert "fencing_token bigint NOT NULL DEFAULT 0" in migration
+    assert "attempt_count integer NOT NULL DEFAULT 0" in migration
+    assert "dead_letter" in migration
+    assert 'op.drop_column("proactive_jobs", "fencing_token")' in downgrade
+    assert 'op.drop_column("memory_jobs", "attempt_count")' in downgrade
+
+
+@pytest.mark.unit
 def test_durable_settings_are_strict_and_safe() -> None:
     settings = DurableStateSettings.from_mapping(
         {

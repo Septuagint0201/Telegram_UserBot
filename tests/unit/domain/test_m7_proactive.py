@@ -395,21 +395,56 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     lease = store.claim(now=NOW, owner=owner, lease=timedelta(seconds=1))
     assert lease is not None
     assert lease.state is DueJobState.LEASED
-    assert store.complete(idempotency_key=key, owner=uuid4(), now=NOW) is False
-    assert store.compensate(now=NOW + timedelta(seconds=1))
-    lease2 = store.claim(now=NOW + timedelta(seconds=1), owner=owner)
+    assert lease.fencing_token == 1
+    assert (
+        store.complete(
+            idempotency_key=key,
+            owner=uuid4(),
+            fencing_token=lease.fencing_token,
+            now=NOW,
+        )
+        is False
+    )
+    assert store.compensate(now=NOW + timedelta(seconds=1)) == ()
+    assert store.claim(now=NOW + timedelta(seconds=1), owner=owner) is None
+    lease2 = store.claim(now=NOW + timedelta(seconds=6), owner=owner)
     assert lease2 is not None
     assert lease2.attempt_count == 2
-    assert store.complete(idempotency_key=key, owner=owner, now=NOW) is True
+    assert lease2.fencing_token == 2
+    assert (
+        store.complete(
+            idempotency_key=key,
+            owner=owner,
+            fencing_token=lease.fencing_token,
+            now=NOW + timedelta(seconds=6),
+        )
+        is False
+    )
+    assert (
+        store.complete(
+            idempotency_key=key,
+            owner=owner,
+            fencing_token=lease2.fencing_token,
+            now=NOW + timedelta(seconds=6),
+        )
+        is True
+    )
     late_key = sha256(b"late-lease").digest()
     store.enqueue(account_id=account_id, idempotency_key=late_key, available_at=NOW)
     late = store.claim(now=NOW, owner=owner, lease=timedelta(seconds=1))
     assert late is not None
     assert (
-        store.complete(idempotency_key=late_key, owner=owner, now=NOW + timedelta(seconds=2))
+        store.complete(
+            idempotency_key=late_key,
+            owner=owner,
+            fencing_token=late.fencing_token,
+            now=NOW + timedelta(seconds=2),
+        )
         is False
     )
     assert store.claim(now=NOW + timedelta(days=1), owner=uuid4()) is None
+    assert store.compensate(now=NOW + timedelta(days=1), max_attempts=1) == ()
+    assert store.claim(now=NOW + timedelta(days=1, seconds=5), owner=uuid4()) is None
     expired = store.enqueue(
         account_id=account_id, idempotency_key=sha256(b"late").digest(), available_at=NOW
     )
@@ -992,7 +1027,13 @@ def test_m7_validation_and_fake_store_edge_cases() -> None:
     with pytest.raises(ValueError, match="lease"):
         store.claim(now=NOW, owner=uuid4(), lease=timedelta(0))
     assert (
-        store.complete(idempotency_key=sha256(b"missing").digest(), owner=uuid4(), now=NOW) is False
+        store.complete(
+            idempotency_key=sha256(b"missing").digest(),
+            owner=uuid4(),
+            fencing_token=1,
+            now=NOW,
+        )
+        is False
     )
     with pytest.raises(KeyError, match="unknown budget"):
         BudgetLedger().commit(sha256(b"missing-budget").digest())

@@ -2662,6 +2662,7 @@ memory_jobs = Table(
     Column("range_end_event_id", BigInteger, nullable=False),
     Column("eligible_revision_count", Integer, nullable=False, server_default=text("0")),
     Column("estimated_input_tokens", Integer, nullable=False, server_default=text("0")),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
     Column("completed_turn_watermark", UUID_TYPE),
     Column("idempotency_key", LargeBinary, nullable=False),
     Column("quiet_until", UTC_TIMESTAMP, nullable=False),
@@ -2702,7 +2703,7 @@ memory_jobs = Table(
     CheckConstraint("generation > 0 AND job_version > 0", name="generation_positive"),
     CheckConstraint("range_end_event_id >= range_start_event_id", name="range_values"),
     CheckConstraint(
-        "eligible_revision_count >= 0 AND estimated_input_tokens >= 0",
+        "eligible_revision_count >= 0 AND estimated_input_tokens >= 0 AND attempt_count >= 0",
         name="estimates_nonnegative",
     ),
     CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_key_32_bytes"),
@@ -3984,6 +3985,7 @@ proactive_jobs = Table(
     Column("lease_owner", UUID_TYPE),
     Column("lease_expires_at", UTC_TIMESTAMP),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("fencing_token", BigInteger, nullable=False, server_default=text("0")),
     Column("completed_at", UTC_TIMESTAMP),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_jobs_account"),
@@ -3996,8 +3998,17 @@ proactive_jobs = Table(
     CheckConstraint(
         "job_kind IN ('candidate_due','compensation_scan','budget_reaper')", name="job_kind_values"
     ),
-    CheckConstraint("state IN ('pending','leased','succeeded','expired')", name="state_values"),
+    CheckConstraint(
+        "state IN ('pending','leased','retry_wait','succeeded','expired','dead_letter')",
+        name="state_values",
+    ),
     CheckConstraint("attempt_count >= 0", name="attempt_nonnegative"),
+    CheckConstraint("fencing_token >= 0", name="fencing_token_nonnegative"),
+    CheckConstraint(
+        "(state = 'leased' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR "
+        "(state <> 'leased' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+        name="lease_fields_match",
+    ),
     UniqueConstraint("idempotency_key", name="uq_proactive_jobs_idempotency"),
 )
 Index("ix_proactive_jobs_due", proactive_jobs.c.state, proactive_jobs.c.available_at)

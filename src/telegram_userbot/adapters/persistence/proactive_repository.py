@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import case, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -193,6 +193,10 @@ class ProactiveRepository:
             raise ValueError("proactive job identity is invalid")
         available_time = available_at.astimezone(UTC)
         job_id = uuid5(account_id, f"proactive-job:{job_kind}:{idempotency_key.hex()}")
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": f"proactive_job:{idempotency_key.hex()}"},
+        )
         existing = (
             (
                 await self._session.execute(
@@ -250,17 +254,33 @@ class ProactiveRepository:
         now: datetime,
         owner: UUID,
         lease: timedelta = timedelta(minutes=2),
+        max_attempts: int = 5,
+        retry_delay: timedelta = timedelta(seconds=5),
     ) -> DueJob | None:
-        if lease <= timedelta(0):
-            raise ValueError("lease must be positive")
-        await self.recover_expired(now=now)
+        if lease <= timedelta(0) or max_attempts <= 0 or retry_delay <= timedelta(0):
+            raise ValueError("proactive lease policy is invalid")
+        current_time = now.astimezone(UTC)
+        await self.recover_expired(
+            now=current_time,
+            max_attempts=max_attempts,
+            retry_delay=retry_delay,
+        )
+        await self._session.execute(
+            update(proactive_jobs)
+            .where(
+                proactive_jobs.c.state.in_(("pending", "retry_wait")),
+                proactive_jobs.c.attempt_count >= max_attempts,
+            )
+            .values(state="dead_letter")
+        )
         row = (
             (
                 await self._session.execute(
                     select(proactive_jobs)
                     .where(
-                        proactive_jobs.c.state == "pending",
-                        proactive_jobs.c.available_at <= now.astimezone(UTC),
+                        proactive_jobs.c.state.in_(("pending", "retry_wait")),
+                        proactive_jobs.c.available_at <= current_time,
+                        proactive_jobs.c.attempt_count < max_attempts,
                     )
                     .order_by(proactive_jobs.c.available_at, proactive_jobs.c.id)
                     .limit(1)
@@ -276,12 +296,16 @@ class ProactiveRepository:
             (
                 await self._session.execute(
                     update(proactive_jobs)
-                    .where(proactive_jobs.c.id == row["id"], proactive_jobs.c.state == "pending")
+                    .where(
+                        proactive_jobs.c.id == row["id"],
+                        proactive_jobs.c.state == row["state"],
+                    )
                     .values(
                         state="leased",
                         lease_owner=owner,
-                        lease_expires_at=now.astimezone(UTC) + lease,
+                        lease_expires_at=current_time + lease,
                         attempt_count=proactive_jobs.c.attempt_count + 1,
+                        fencing_token=proactive_jobs.c.fencing_token + 1,
                     )
                     .returning(proactive_jobs)
                 )
@@ -291,9 +315,36 @@ class ProactiveRepository:
         )
         return _due_job(updated)
 
-    async def complete(
-        self, *, idempotency_key: bytes, owner: UUID, now: datetime, succeeded: bool = True
+    async def complete(  # noqa: PLR0913 - lease and retry policy are explicit
+        self,
+        *,
+        idempotency_key: bytes,
+        owner: UUID,
+        fencing_token: int,
+        now: datetime,
+        succeeded: bool = True,
+        max_attempts: int = 5,
+        retry_delay: timedelta = timedelta(seconds=5),
     ) -> bool:
+        if fencing_token <= 0 or max_attempts <= 0 or retry_delay <= timedelta(0):
+            raise ValueError("proactive completion policy is invalid")
+        next_state = (
+            "succeeded"
+            if succeeded
+            else case(
+                (proactive_jobs.c.attempt_count >= max_attempts, "dead_letter"),
+                else_="retry_wait",
+            )
+        )
+        next_available_at: Any = proactive_jobs.c.available_at
+        if not succeeded:
+            next_available_at = case(
+                (
+                    proactive_jobs.c.attempt_count >= max_attempts,
+                    proactive_jobs.c.available_at,
+                ),
+                else_=now.astimezone(UTC) + retry_delay,
+            )
         result = cast(
             CursorResult[Any],
             await self._session.execute(
@@ -302,38 +353,74 @@ class ProactiveRepository:
                     proactive_jobs.c.idempotency_key == idempotency_key,
                     proactive_jobs.c.state == "leased",
                     proactive_jobs.c.lease_owner == owner,
+                    proactive_jobs.c.fencing_token == fencing_token,
                     proactive_jobs.c.lease_expires_at > now.astimezone(UTC),
                 )
                 .values(
-                    state="succeeded" if succeeded else "pending",
+                    state=next_state,
                     lease_owner=None,
                     lease_expires_at=None,
                     completed_at=now.astimezone(UTC) if succeeded else None,
+                    available_at=next_available_at,
                 )
             ),
         )
         return result.rowcount == 1
 
-    async def complete_job(
-        self, *, idempotency_key: bytes, owner: UUID, now: datetime, succeeded: bool = True
+    async def complete_job(  # noqa: PLR0913 - compatibility alias preserves policy
+        self,
+        *,
+        idempotency_key: bytes,
+        owner: UUID,
+        fencing_token: int,
+        now: datetime,
+        succeeded: bool = True,
+        max_attempts: int = 5,
+        retry_delay: timedelta = timedelta(seconds=5),
     ) -> bool:
         return await self.complete(
             idempotency_key=idempotency_key,
             owner=owner,
+            fencing_token=fencing_token,
             now=now,
             succeeded=succeeded,
+            max_attempts=max_attempts,
+            retry_delay=retry_delay,
         )
 
-    async def recover_expired(self, *, now: datetime) -> int:
+    async def recover_expired(
+        self,
+        *,
+        now: datetime,
+        max_attempts: int = 5,
+        retry_delay: timedelta = timedelta(seconds=5),
+    ) -> int:
+        if max_attempts <= 0 or retry_delay <= timedelta(0):
+            raise ValueError("proactive recovery policy is invalid")
+        current_time = now.astimezone(UTC)
         result = cast(
             CursorResult[Any],
             await self._session.execute(
                 update(proactive_jobs)
                 .where(
                     proactive_jobs.c.state == "leased",
-                    proactive_jobs.c.lease_expires_at <= now.astimezone(UTC),
+                    proactive_jobs.c.lease_expires_at <= current_time,
                 )
-                .values(state="pending", lease_owner=None, lease_expires_at=None)
+                .values(
+                    state=case(
+                        (proactive_jobs.c.attempt_count >= max_attempts, "dead_letter"),
+                        else_="retry_wait",
+                    ),
+                    available_at=case(
+                        (
+                            proactive_jobs.c.attempt_count >= max_attempts,
+                            proactive_jobs.c.available_at,
+                        ),
+                        else_=current_time + retry_delay,
+                    ),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
             ),
         )
         return result.rowcount
@@ -354,6 +441,10 @@ class ProactiveRepository:
             raise ValueError("budget reservation identity is invalid")
         if bypass and limits.bypass_daily == 0:
             return None
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": f"proactive_budget:{reservation_key.hex()}"},
+        )
         existing = (
             (
                 await self._session.execute(
@@ -711,6 +802,7 @@ def _due_job(row: Any) -> DueJob:
         lease_owner=cast(UUID | None, row["lease_owner"]),
         lease_expires_at=cast(datetime | None, row["lease_expires_at"]),
         attempt_count=cast(int, row["attempt_count"]),
+        fencing_token=cast(int, row["fencing_token"]),
     )
 
 

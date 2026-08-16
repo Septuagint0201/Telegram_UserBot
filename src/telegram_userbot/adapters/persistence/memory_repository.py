@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import func, insert, select, text, update
+from sqlalchemy import case, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -375,24 +375,63 @@ class MemoryRepository:
         lease_duration: timedelta = timedelta(seconds=60),
         revision_threshold: int = 20,
         token_threshold: int = 6_000,
+        max_attempts: int = 5,
+        retry_delay: timedelta = timedelta(seconds=5),
     ) -> MemoryJobLease | None:
-        if lease_duration <= timedelta(0) or revision_threshold <= 0 or token_threshold <= 0:
+        if (
+            lease_duration <= timedelta(0)
+            or revision_threshold <= 0
+            or token_threshold <= 0
+            or max_attempts <= 0
+            or retry_delay <= timedelta(0)
+        ):
             raise ValueError("memory lease policy is invalid")
+        await self._session.execute(
+            update(memory_jobs)
+            .where(
+                memory_jobs.c.conversation_id == conversation_id,
+                memory_jobs.c.state == "running",
+                memory_jobs.c.lease_expires_at <= now,
+            )
+            .values(
+                state=case(
+                    (memory_jobs.c.attempt_count >= max_attempts, "dead_letter"),
+                    else_="retry_wait",
+                ),
+                lease_owner=None,
+                lease_expires_at=None,
+                quiet_until=case(
+                    (memory_jobs.c.attempt_count >= max_attempts, memory_jobs.c.quiet_until),
+                    else_=now + retry_delay,
+                ),
+                job_version=memory_jobs.c.job_version + 1,
+                updated_at=now,
+            )
+        )
+        await self._session.execute(
+            update(memory_jobs)
+            .where(
+                memory_jobs.c.conversation_id == conversation_id,
+                memory_jobs.c.state.in_(("pending", "retry_wait")),
+                memory_jobs.c.attempt_count >= max_attempts,
+            )
+            .values(state="dead_letter", updated_at=now)
+        )
         pending_due = (memory_jobs.c.state == "pending") & (
             (memory_jobs.c.quiet_until <= now)
             | (memory_jobs.c.hard_due_at <= now)
             | (memory_jobs.c.eligible_revision_count >= revision_threshold)
             | (memory_jobs.c.estimated_input_tokens >= token_threshold)
         )
-        retry_due = memory_jobs.c.state == "retry_wait"
-        expired_lease = (memory_jobs.c.state == "running") & (memory_jobs.c.lease_expires_at <= now)
+        retry_due = (memory_jobs.c.state == "retry_wait") & (memory_jobs.c.quiet_until <= now)
         row = (
             (
                 await self._session.execute(
                     select(memory_jobs)
                     .where(
                         memory_jobs.c.conversation_id == conversation_id,
-                        pending_due | retry_due | expired_lease,
+                        pending_due | retry_due,
+                        memory_jobs.c.attempt_count < max_attempts,
                     )
                     .order_by(memory_jobs.c.hard_due_at, memory_jobs.c.generation)
                     .limit(1)
@@ -417,6 +456,7 @@ class MemoryRepository:
                         state="running",
                         lease_owner=owner,
                         lease_expires_at=now + lease_duration,
+                        attempt_count=memory_jobs.c.attempt_count + 1,
                         job_version=memory_jobs.c.job_version + 1,
                         updated_at=now,
                     )
@@ -449,25 +489,48 @@ class MemoryRepository:
             input_manifest_id=cast(UUID | None, updated["input_manifest_id"]),
         )
 
-    async def complete_job(
-        self, *, job_id: UUID, owner: UUID, fencing_token: int, now: datetime, succeeded: bool
+    async def complete_job(  # noqa: PLR0913 - lease and retry policy are explicit
+        self,
+        *,
+        job_id: UUID,
+        owner: UUID,
+        fencing_token: int,
+        now: datetime,
+        succeeded: bool,
+        max_attempts: int = 5,
+        retry_delay: timedelta = timedelta(seconds=5),
     ) -> bool:
+        if max_attempts <= 0 or retry_delay <= timedelta(0):
+            raise ValueError("memory retry policy is invalid")
         statement = update(memory_jobs).where(
             memory_jobs.c.id == job_id,
             memory_jobs.c.state == "running",
             memory_jobs.c.lease_owner == owner,
             memory_jobs.c.job_version == fencing_token,
+            memory_jobs.c.lease_expires_at > now,
         )
         if succeeded:
             statement = statement.where(memory_jobs.c.input_manifest_id.is_not(None))
+        state: Any = "succeeded" if succeeded else "retry_wait"
+        if not succeeded:
+            state = case(
+                (memory_jobs.c.attempt_count >= max_attempts, "dead_letter"),
+                else_="retry_wait",
+            )
         result = cast(
             CursorResult[Any],
             await self._session.execute(
                 statement.values(
-                    state="succeeded" if succeeded else "retry_wait",
+                    state=state,
                     lease_owner=None,
                     lease_expires_at=None,
                     completed_at=now if succeeded else None,
+                    quiet_until=case(
+                        (memory_jobs.c.attempt_count >= max_attempts, memory_jobs.c.quiet_until),
+                        else_=now + retry_delay,
+                    )
+                    if not succeeded
+                    else memory_jobs.c.quiet_until,
                     job_version=memory_jobs.c.job_version + 1,
                     updated_at=now,
                 )
@@ -551,6 +614,7 @@ class MemoryRepository:
                     memory_jobs.c.state == "running",
                     memory_jobs.c.lease_owner == lease.lease_owner,
                     memory_jobs.c.job_version == lease.fencing_token,
+                    memory_jobs.c.lease_expires_at > now,
                     memory_jobs.c.input_manifest_id.is_(None),
                 )
                 .values(input_manifest_id=manifest.id, sealed_at=now, updated_at=now)
