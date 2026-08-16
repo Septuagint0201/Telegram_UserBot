@@ -1249,7 +1249,7 @@ class MemoryRepository:
                     created_at=current_time,
                     updated_at=current_time,
                 )
-                .on_conflict_do_nothing(constraint="memories_pkey")
+                .on_conflict_do_nothing(constraint="pk_memories")
             )
             if proposal.operation is MemoryOperation.SUPERSEDE and target_rows:
                 await self._session.execute(
@@ -1293,7 +1293,7 @@ class MemoryRepository:
                 acceptance_kind=acceptance_kind,
                 created_at=current_time,
             )
-            .on_conflict_do_nothing(constraint="memory_versions_pkey")
+            .on_conflict_do_nothing(constraint="pk_memory_versions")
         )
         await self._session.execute(
             update(memories)
@@ -1648,7 +1648,7 @@ class MemoryRepository:
                 generation=space.generation,
                 created_at=current_time,
             )
-            .on_conflict_do_nothing(constraint="embedding_spaces_pkey")
+            .on_conflict_do_nothing(constraint="pk_embedding_spaces")
         )
         persisted_space = (
             (
