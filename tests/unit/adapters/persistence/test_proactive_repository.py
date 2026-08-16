@@ -507,6 +507,7 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
                 source_hash=b"h" * 32,
                 summary="synthetic",
                 current=True,
+                active=True,
                 explicit=True,
             ),
         ),
@@ -581,6 +582,7 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
         "source_hash": evidence.source_hash,
         "summary": evidence.summary,
         "current": evidence.current,
+        "active": evidence.active,
         "explicit": evidence.explicit,
     }
     membership_row = {
@@ -649,6 +651,23 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
     )
     with pytest.raises(ValueError, match="scope"):
         await repo.enqueue_candidate(bad_hash, now=NOW)
+
+    inactive_evidence = SimpleNamespace(**{**evidence.__dict__, "active": False})
+    inactive_occurrence = SimpleNamespace(
+        **{**occurrence.__dict__, "evidence": (inactive_evidence,)}
+    )
+    inactive_candidate = cast(
+        Candidate,
+        SimpleNamespace(
+            **{
+                **candidate.__dict__,
+                "occurrences": (inactive_occurrence,),
+                "membership_hash": membership_digest(cast(tuple[Any, ...], (inactive_occurrence,))),
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="evidence is invalid"):
+        await repo.enqueue_candidate(inactive_candidate, now=NOW)
 
 
 @pytest.mark.asyncio

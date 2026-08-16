@@ -102,7 +102,7 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
     )
     assert set(rows) == set(M7_TABLES)
     assert await db_session.scalar(text("SELECT version_num FROM alembic_version")) == (
-        "0020_m5_m7_review_hardening"
+        "0021_m7_evidence_activity"
     )
     indexes = set(
         await db_session.scalars(
@@ -134,6 +134,19 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
         "ck_proactive_occurrences_state_values",
         "ck_proactive_occurrences_window_values",
     } <= constraints
+    evidence_columns = {
+        cast(str, row["column_name"])
+        for row in (
+            await db_session.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = "
+                    "'proactive_occurrence_evidence'"
+                )
+            )
+        ).mappings()
+    }
+    assert {"current", "active", "explicit"} <= evidence_columns
     recovery_constraints = {
         cast(str, row["conname"]): cast(bool, row["convalidated"])
         for row in (

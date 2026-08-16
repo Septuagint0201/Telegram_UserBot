@@ -4031,6 +4031,7 @@ proactive_occurrence_evidence = Table(
     Column("source_hash", LargeBinary, nullable=False),
     Column("summary", Text, nullable=False),
     Column("current", Boolean, nullable=False, server_default=text("true")),
+    Column("active", Boolean, nullable=False, server_default=text("true")),
     Column("explicit", Boolean, nullable=False, server_default=text("true")),
     ForeignKeyConstraint(
         ["occurrence_id", "account_id"],

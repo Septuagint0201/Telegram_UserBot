@@ -438,6 +438,21 @@ def test_m5_m7_review_hardening_migration_is_recoverable() -> None:
 
 
 @pytest.mark.unit
+def test_m7_occurrence_evidence_activity_migration_is_recoverable() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0021_m7_evidence_activity.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'down_revision: str | Sequence[str] | None = "0020_m5_m7_review_hardening"' in migration
+    assert "proactive_occurrence_evidence" in migration
+    assert "active boolean NOT NULL DEFAULT true" in migration
+    assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable

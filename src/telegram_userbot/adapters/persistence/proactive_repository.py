@@ -85,6 +85,11 @@ class ProactiveRepository:
         ):
             raise ValueError("candidate occurrence scope or membership snapshot is invalid")
         for occurrence in candidate.occurrences:
+            if not occurrence.evidence or any(
+                not evidence.current or not evidence.active or not evidence.source_hash
+                for evidence in occurrence.evidence
+            ):
+                raise ValueError("candidate occurrence evidence is invalid")
             await self._session.execute(
                 postgresql_insert(proactive_occurrences)
                 .values(
@@ -139,6 +144,7 @@ class ProactiveRepository:
                         source_hash=evidence.source_hash,
                         summary=evidence.summary,
                         current=evidence.current,
+                        active=evidence.active,
                         explicit=evidence.explicit,
                     )
                     .on_conflict_do_nothing(constraint="pk_proactive_occurrence_evidence")
@@ -1659,6 +1665,7 @@ def _occurrence_evidence_matches(rows: Sequence[Any], occurrence: Any) -> bool:
                 "source_hash": evidence.source_hash,
                 "summary": evidence.summary,
                 "current": evidence.current,
+                "active": evidence.active,
                 "explicit": evidence.explicit,
             }.items()
         )

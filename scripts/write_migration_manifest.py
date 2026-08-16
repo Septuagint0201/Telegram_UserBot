@@ -13,7 +13,7 @@ import redis
 EXPECTED_POSTGRES_MAJOR = "17"
 EXPECTED_VECTOR_VERSION = "0.8.6"
 EXPECTED_REDIS_VERSION = "8.2.8"
-EXPECTED_REVISION = "0020_m5_m7_review_hardening"
+EXPECTED_REVISION = "0021_m7_evidence_activity"
 
 
 def _hash(path: Path) -> str:
@@ -66,7 +66,7 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
     return {
         "schema_version": 2,
         "revision": EXPECTED_REVISION,
-        "migration_sha256": _hash(root / "alembic" / "versions" / "0020_m5_m7_review_hardening.py"),
+        "migration_sha256": _hash(root / "alembic" / "versions" / "0021_m7_evidence_activity.py"),
         "migration_chain_sha256": {
             "0001_m1_durable_state": _hash(
                 root / "alembic" / "versions" / "0001_m1_durable_state.py"
@@ -127,6 +127,9 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
             ),
             "0020_m5_m7_review_hardening": _hash(
                 root / "alembic" / "versions" / "0020_m5_m7_review_hardening.py"
+            ),
+            "0021_m7_evidence_activity": _hash(
+                root / "alembic" / "versions" / "0021_m7_evidence_activity.py"
             ),
         },
         "roles_sha256": _hash(root / "deploy" / "postgres" / "m7_roles.sql"),
