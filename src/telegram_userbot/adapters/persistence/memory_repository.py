@@ -24,6 +24,7 @@ from telegram_userbot.adapters.persistence.schema import (
     embedding_records,
     embedding_spaces,
     erasure_ledger,
+    media_objects,
     memories,
     memory_evidence,
     memory_input_manifest_items,
@@ -34,6 +35,9 @@ from telegram_userbot.adapters.persistence.schema import (
     memory_proposals,
     memory_review_actions,
     memory_versions,
+    message_revisions,
+    messages,
+    model_runs,
     summaries,
     summary_version_sources,
     summary_versions,
@@ -86,6 +90,177 @@ class ReviewAction:
 class MemoryRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def _require_message_revision_scope(
+        self, source_id: UUID, *, account_id: UUID, conversation_id: UUID
+    ) -> None:
+        found = await self._session.scalar(
+            select(message_revisions.c.id)
+            .join(messages, messages.c.id == message_revisions.c.message_id)
+            .where(
+                message_revisions.c.id == source_id,
+                message_revisions.c.account_id == account_id,
+                messages.c.account_id == account_id,
+                messages.c.conversation_id == conversation_id,
+            )
+        )
+        if found is None:
+            raise ValueError("message revision is outside the requested scope")
+
+    async def _require_manifest_source_scope(
+        self, source: Any, *, account_id: UUID, conversation_id: UUID
+    ) -> None:
+        if source.source_type == "message_revision":
+            await self._require_message_revision_scope(
+                source.source_id, account_id=account_id, conversation_id=conversation_id
+            )
+            return
+        if source.source_type == "media_object":
+            found = await self._session.scalar(
+                select(media_objects.c.id).where(
+                    media_objects.c.id == source.source_id,
+                    media_objects.c.account_id == account_id,
+                )
+            )
+        elif source.source_type == "memory_version":
+            found = await self._session.scalar(
+                select(memory_versions.c.id)
+                .join(memories, memories.c.id == memory_versions.c.memory_id)
+                .where(
+                    memory_versions.c.id == source.source_id,
+                    memory_versions.c.account_id == account_id,
+                    memories.c.account_id == account_id,
+                    memories.c.conversation_id == conversation_id,
+                )
+            )
+        elif source.source_type == "summary_version":
+            found = await self._session.scalar(
+                select(summary_versions.c.id)
+                .join(summaries, summaries.c.id == summary_versions.c.summary_id)
+                .where(
+                    summary_versions.c.id == source.source_id,
+                    summary_versions.c.account_id == account_id,
+                    summaries.c.account_id == account_id,
+                    summaries.c.conversation_id == conversation_id,
+                )
+            )
+        else:
+            raise ValueError("unsupported manifest source type")
+        if found is None:
+            raise ValueError("manifest source is outside the requested scope")
+
+    async def _require_embedding_target_scope(
+        self, record: EmbeddingRecord, *, account_id: UUID | None
+    ) -> None:
+        if record.target_kind == "memory_version":
+            query = (
+                select(memory_versions.c.id)
+                .join(memories, memories.c.id == memory_versions.c.memory_id)
+                .where(
+                    memory_versions.c.id == record.target_id,
+                    memories.c.id == memory_versions.c.memory_id,
+                )
+            )
+            if account_id is not None:
+                query = query.where(
+                    memory_versions.c.account_id == account_id,
+                    memories.c.account_id == account_id,
+                )
+        elif record.target_kind == "summary_version":
+            query = (
+                select(summary_versions.c.id)
+                .join(summaries, summaries.c.id == summary_versions.c.summary_id)
+                .where(
+                    summary_versions.c.id == record.target_id,
+                    summaries.c.id == summary_versions.c.summary_id,
+                )
+            )
+            if account_id is not None:
+                query = query.where(
+                    summary_versions.c.account_id == account_id,
+                    summaries.c.account_id == account_id,
+                )
+        else:
+            query = (
+                select(message_revisions.c.id)
+                .join(messages, messages.c.id == message_revisions.c.message_id)
+                .where(
+                    message_revisions.c.id == record.target_id,
+                    messages.c.id == message_revisions.c.message_id,
+                )
+            )
+            if account_id is not None:
+                query = query.where(
+                    message_revisions.c.account_id == account_id,
+                    messages.c.account_id == account_id,
+                )
+        if await self._session.scalar(query) is None:
+            raise ValueError("embedding target is outside the requested account scope")
+
+    async def _embedding_record_belongs_to_account(self, record: Any, *, account_id: UUID) -> bool:
+        if record["memory_version_id"] is not None:
+            query = select(memory_versions.c.id).where(
+                memory_versions.c.id == record["memory_version_id"],
+                memory_versions.c.account_id == account_id,
+            )
+        elif record["summary_version_id"] is not None:
+            query = select(summary_versions.c.id).where(
+                summary_versions.c.id == record["summary_version_id"],
+                summary_versions.c.account_id == account_id,
+            )
+        else:
+            query = select(message_revisions.c.id).where(
+                message_revisions.c.id == record["message_revision_id"],
+                message_revisions.c.account_id == account_id,
+            )
+        return await self._session.scalar(query) is not None
+
+    async def _require_erasure_derived_scope(
+        self,
+        derived_ids: dict[str, set[UUID]] | None,
+        *,
+        account_id: UUID,
+        conversation_id: UUID | None,
+    ) -> None:
+        supported_derived_kinds = {"embedding", "summary"}
+        if set(derived_ids or ()) - supported_derived_kinds:
+            raise ValueError("erasure derived target kind is unsupported")
+        for kind, targets in (derived_ids or {}).items():
+            for target_id in targets:
+                if kind == "embedding":
+                    record = (
+                        (
+                            await self._session.execute(
+                                select(embedding_records).where(
+                                    embedding_records.c.id == target_id,
+                                )
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                    if (
+                        record is None
+                        or record["account_id"] not in {None, account_id}
+                        or not await self._embedding_record_belongs_to_account(
+                            record, account_id=account_id
+                        )
+                    ):
+                        raise ValueError("erasure embedding target is outside account scope")
+                    continue
+                query = (
+                    select(summary_versions.c.id)
+                    .join(summaries, summaries.c.id == summary_versions.c.summary_id)
+                    .where(
+                        summary_versions.c.id == target_id,
+                        summary_versions.c.account_id == account_id,
+                        summaries.c.account_id == account_id,
+                    )
+                )
+                if conversation_id is not None:
+                    query = query.where(summaries.c.conversation_id == conversation_id)
+                if await self._session.scalar(query) is None:
+                    raise ValueError("erasure summary target is outside account scope")
 
     async def refresh_pending_job(  # noqa: PLR0913 - job snapshot fields are explicit
         self,
@@ -318,6 +493,12 @@ class MemoryRepository:
             or lease.input_manifest_id is not None
         ):
             raise ValueError("manifest does not match the claimed memory generation")
+        for source in manifest.sources:
+            await self._require_manifest_source_scope(
+                source,
+                account_id=manifest.account_id,
+                conversation_id=manifest.conversation_id,
+            )
         await self._session.execute(
             insert(memory_input_manifests).values(
                 id=manifest.id,
@@ -397,6 +578,26 @@ class MemoryRepository:
             or proposal.conversation_id != manifest.conversation_id
         ):
             raise ValueError("proposal and manifest scope differ")
+        persisted_job = await self._session.scalar(
+            select(memory_jobs.c.id).where(
+                memory_jobs.c.id == job_id,
+                memory_jobs.c.account_id == proposal.account_id,
+                memory_jobs.c.conversation_id == proposal.conversation_id,
+                memory_jobs.c.input_manifest_id == manifest.id,
+            )
+        )
+        if persisted_job is None:
+            raise ValueError("proposal job and manifest are outside the requested scope")
+        persisted_run = await self._session.scalar(
+            select(model_runs.c.id).where(
+                model_runs.c.id == model_run_id,
+                model_runs.c.account_id == proposal.account_id,
+                model_runs.c.conversation_id == proposal.conversation_id,
+                model_runs.c.logical_role == "memory_agent",
+            )
+        )
+        if persisted_run is None:
+            raise ValueError("proposal model run is outside the requested scope")
         idempotency_key = hashlib.sha256(
             stable_json_bytes(
                 {"model_run_id": str(model_run_id), "proposal_ordinal": proposal_ordinal}
@@ -463,6 +664,11 @@ class MemoryRepository:
             source = manifest.source(evidence.source_id)
             if source is None or source.source_type != "message_revision":
                 raise ValueError("proposal evidence lacks a canonical message root")
+            await self._require_message_revision_scope(
+                evidence.source_id,
+                account_id=proposal.account_id,
+                conversation_id=proposal.conversation_id,
+            )
             await self._session.execute(
                 insert(memory_proposal_evidence).values(
                     proposal_id=persisted_proposal_id,
@@ -501,6 +707,12 @@ class MemoryRepository:
         if proposal_row is None:
             raise ValueError("proposal has not been recorded")
         proposal_id = cast(UUID, proposal_row["id"])
+        for evidence in proposal.evidence:
+            await self._require_message_revision_scope(
+                evidence.source_id,
+                account_id=proposal.account_id,
+                conversation_id=proposal.conversation_id,
+            )
         if proposal_row["state"] == ProposalState.ACCEPTED.value:
             prior_version_id = cast(UUID | None, proposal_row["accepted_memory_version_id"])
             prior_memory_id = None
@@ -731,6 +943,26 @@ class MemoryRepository:
         now: datetime | None = None,
     ) -> SummaryWatermark:
         current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        for source in summary.sources:
+            if source.source_kind == "message_revision":
+                await self._require_message_revision_scope(
+                    source.source_id,
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                )
+                continue
+            found = await self._session.scalar(
+                select(summary_versions.c.id)
+                .join(summaries, summaries.c.id == summary_versions.c.summary_id)
+                .where(
+                    summary_versions.c.id == source.source_id,
+                    summary_versions.c.account_id == account_id,
+                    summaries.c.account_id == account_id,
+                    summaries.c.conversation_id == conversation_id,
+                )
+            )
+            if found is None:
+                raise ValueError("prior summary source is outside the requested scope")
         watermark_row = (
             (
                 await self._session.execute(
@@ -790,10 +1022,14 @@ class MemoryRepository:
                 )
             )
         else:
+            if summary_row["summary_kind"] != summary.kind.value:
+                raise SummaryCoverageError("summary kind does not match its durable identity")
             existing_version = (
                 await self._session.execute(
                     select(summary_versions.c.manifest_sha256).where(
-                        summary_versions.c.id == summary.id
+                        summary_versions.c.id == summary.id,
+                        summary_versions.c.account_id == account_id,
+                        summary_versions.c.summary_id == summary.summary_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -888,21 +1124,26 @@ class MemoryRepository:
                 )
             )
         else:
-            await self._session.execute(
-                update(summary_watermarks)
-                .where(
-                    summary_watermarks.c.account_id == account_id,
-                    summary_watermarks.c.conversation_id == conversation_id,
-                    summary_watermarks.c.summary_kind == summary.kind.value,
-                    summary_watermarks.c.version == watermark_version,
-                )
-                .values(
-                    last_included_event_id=summary.range_end_event_id,
-                    last_summary_version_id=summary.id,
-                    version=watermark_version + 1,
-                    updated_at=current_time,
-                )
+            moved = cast(
+                CursorResult[Any],
+                await self._session.execute(
+                    update(summary_watermarks)
+                    .where(
+                        summary_watermarks.c.account_id == account_id,
+                        summary_watermarks.c.conversation_id == conversation_id,
+                        summary_watermarks.c.summary_kind == summary.kind.value,
+                        summary_watermarks.c.version == watermark_version,
+                    )
+                    .values(
+                        last_included_event_id=summary.range_end_event_id,
+                        last_summary_version_id=summary.id,
+                        version=watermark_version + 1,
+                        updated_at=current_time,
+                    )
+                ),
             )
+            if moved.rowcount != 1:
+                raise SummaryCoverageError("summary watermark changed during publication")
         return SummaryWatermark(
             conversation_id,
             summary.kind,
@@ -928,6 +1169,8 @@ class MemoryRepository:
             for record in records
         ):
             raise ValueError("embedding record dimension or space mismatch")
+        for record in records:
+            await self._require_embedding_target_scope(record, account_id=account_id)
         await self._session.execute(
             postgresql_insert(embedding_spaces)
             .values(
@@ -947,6 +1190,29 @@ class MemoryRepository:
             )
             .on_conflict_do_nothing(constraint="embedding_spaces_pkey")
         )
+        persisted_space = (
+            (
+                await self._session.execute(
+                    select(embedding_spaces)
+                    .where(embedding_spaces.c.id == space.id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one()
+        )
+        if (
+            persisted_space["account_id"] != account_id
+            or persisted_space["model_profile_id"] != model_profile_id
+            or persisted_space["config_version_id"] != config_version_id
+            or persisted_space["model_name_snapshot"] != space.model_name
+            or persisted_space["dimensions"] != space.dimensions
+            or persisted_space["distance_metric"] != space.distance_metric
+            or persisted_space["normalization"] != space.normalization
+            or persisted_space["chunker_version"] != space.chunker_version
+            or persisted_space["generation"] != space.generation
+        ):
+            raise ValueError("embedding space replay does not match durable identity")
         for record in records:
             target_columns: dict[str, object] = {
                 "memory_version_id": record.target_id
@@ -1042,12 +1308,15 @@ class MemoryRepository:
             return False
         await self._session.execute(
             update(memories)
-            .where(memories.c.id == memory_id)
+            .where(memories.c.id == memory_id, memories.c.account_id == account_id)
             .values(status="forgotten", forgotten_at=current_time, updated_at=current_time)
         )
         await self._session.execute(
             update(memory_versions)
-            .where(memory_versions.c.memory_id == memory_id)
+            .where(
+                memory_versions.c.memory_id == memory_id,
+                memory_versions.c.account_id == account_id,
+            )
             .values(
                 payload={}, rendered_text=None, redacted_at=current_time, redaction_reason=reason
             )
@@ -1056,7 +1325,10 @@ class MemoryRepository:
             update(embedding_records)
             .where(
                 embedding_records.c.memory_version_id.in_(
-                    select(memory_versions.c.id).where(memory_versions.c.memory_id == memory_id)
+                    select(memory_versions.c.id).where(
+                        memory_versions.c.memory_id == memory_id,
+                        memory_versions.c.account_id == account_id,
+                    )
                 )
             )
             .values(state="invalidated", invalidated_at=current_time)
@@ -1082,6 +1354,25 @@ class MemoryRepository:
         if memory_id is None:
             raise ValueError("erasure source is required")
         current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        memory_row = (
+            (
+                await self._session.execute(
+                    select(memories.c.id, memories.c.conversation_id).where(
+                        memories.c.id == memory_id,
+                        memories.c.account_id == account_id,
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if memory_row is None:
+            raise ValueError("erasure memory is outside the requested account scope")
+        await self._require_erasure_derived_scope(
+            derived_ids,
+            account_id=account_id,
+            conversation_id=cast(UUID | None, memory_row["conversation_id"]),
+        )
         key = hmac.new(
             scope_secret, account_id.bytes + memory_id.bytes + reason.encode(), "sha256"
         ).digest()
@@ -1125,13 +1416,20 @@ class MemoryRepository:
             if kind == "embedding":
                 await self._session.execute(
                     update(embedding_records)
-                    .where(embedding_records.c.id.in_(targets))
+                    .where(
+                        embedding_records.c.id.in_(targets),
+                        (embedding_records.c.account_id == account_id)
+                        | embedding_records.c.account_id.is_(None),
+                    )
                     .values(state="invalidated", invalidated_at=current_time)
                 )
             elif kind == "summary":
                 await self._session.execute(
                     update(summary_versions)
-                    .where(summary_versions.c.id.in_(targets))
+                    .where(
+                        summary_versions.c.id.in_(targets),
+                        summary_versions.c.account_id == account_id,
+                    )
                     .values(invalidation_state="invalidated", redacted_at=current_time)
                 )
         return request_id

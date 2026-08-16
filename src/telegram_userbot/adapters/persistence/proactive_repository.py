@@ -31,6 +31,7 @@ from telegram_userbot.domain.proactive.models import (
     Candidate,
     ProactiveAction,
     ReservationState,
+    membership_digest,
 )
 
 
@@ -42,6 +43,18 @@ class ProactiveRepository:
 
     async def enqueue_candidate(self, candidate: Candidate, *, now: datetime) -> UUID:
         current_time = now.astimezone(UTC)
+        if (
+            any(
+                occurrence.account_id != candidate.account_id
+                or occurrence.contact_id != candidate.contact_id
+                or occurrence.conversation_id != candidate.conversation_id
+                for occurrence in candidate.occurrences
+            )
+            or len({occurrence.id for occurrence in candidate.occurrences})
+            != len(candidate.occurrences)
+            or candidate.membership_hash != membership_digest(candidate.occurrences)
+        ):
+            raise ValueError("candidate occurrence scope or membership snapshot is invalid")
         for occurrence in candidate.occurrences:
             await self._session.execute(
                 postgresql_insert(proactive_occurrences)
@@ -299,6 +312,13 @@ class ProactiveRepository:
             .one_or_none()
         )
         if existing is not None:
+            if (
+                existing["account_id"] != account_id
+                or existing["contact_id"] != contact_id
+                or existing["local_date"] != local_date
+                or existing["bypass"] != bypass
+            ):
+                raise ValueError("budget reservation key belongs to another scope")
             return _reservation(existing)
         scopes = [
             (None, "account_daily", limits.account_daily),

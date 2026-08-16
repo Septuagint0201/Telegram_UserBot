@@ -18,8 +18,12 @@ from telegram_userbot.domain.proactive.models import (
     AgentDecision,
     BudgetLimits,
     Candidate,
+    CandidateState,
+    OccurrenceState,
     ProactiveAction,
+    ReasonCode,
     ReservationState,
+    membership_digest,
 )
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
@@ -236,3 +240,148 @@ async def test_proactive_persistence_claim_updates_a_pending_job_with_a_lease() 
     assert claimed.id == job_id
     assert claimed.lease_owner == owner
     assert claimed.attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_proactive_candidate_enqueue_validates_scope_membership_and_persists_snapshot() -> (
+    None
+):
+    account_id, contact_id, conversation_id = uuid4(), uuid4(), uuid4()
+    occurrence_id = uuid4()
+    occurrence = SimpleNamespace(
+        id=occurrence_id,
+        account_id=account_id,
+        contact_id=contact_id,
+        conversation_id=conversation_id,
+        occurrence_key=b"o" * 32,
+        generation=1,
+        reason=ReasonCode.PROMISE_DUE,
+        state=OccurrenceState.SCHEDULED,
+        window_start_at=NOW,
+        window_end_at=NOW + timedelta(hours=1),
+        hard_deadline_at=NOW + timedelta(hours=1),
+        timezone_name="UTC",
+        local_date=NOW.date(),
+        importance=0.8,
+        source_type="rule",
+        source_id=uuid4(),
+        source_version="v1",
+        policy_version_id=None,
+        quiet_bypass_possible=False,
+        evidence=(
+            SimpleNamespace(
+                source_type="rule",
+                source_id=uuid4(),
+                source_version="v1",
+                source_hash=b"h" * 32,
+                summary="synthetic",
+                current=True,
+                explicit=True,
+            ),
+        ),
+    )
+    occurrences = cast(tuple[Any, ...], (occurrence,))
+    candidate = cast(
+        Candidate,
+        SimpleNamespace(
+            id=uuid4(),
+            account_id=account_id,
+            contact_id=contact_id,
+            conversation_id=conversation_id,
+            candidate_key=b"c" * 32,
+            generation=1,
+            membership_hash=membership_digest(occurrences),
+            occurrences=occurrences,
+            window_start_at=NOW,
+            window_end_at=NOW + timedelta(hours=1),
+            policy_version_id=None,
+            timezone_name="UTC",
+            mode_version=1,
+            content_revision=0,
+            activity_revision=0,
+            state=CandidateState.OPEN,
+        ),
+    )
+    session = AsyncMock()
+    session.scalar.return_value = candidate.id
+    repo = ProactiveRepository(cast(AsyncSession, session))
+    repo.enqueue_job = AsyncMock(return_value=uuid4())  # type: ignore[method-assign]
+    assert await repo.enqueue_candidate(candidate, now=NOW) == candidate.id
+    assert repo.enqueue_job.await_count == 1
+
+    bad_scope = cast(Candidate, SimpleNamespace(**{**candidate.__dict__, "contact_id": uuid4()}))
+    with pytest.raises(ValueError, match="scope"):
+        await repo.enqueue_candidate(bad_scope, now=NOW)
+    duplicate = cast(
+        Candidate,
+        SimpleNamespace(**{**candidate.__dict__, "occurrences": (occurrence, occurrence)}),
+    )
+    with pytest.raises(ValueError, match="scope"):
+        await repo.enqueue_candidate(duplicate, now=NOW)
+    bad_hash = cast(
+        Candidate, SimpleNamespace(**{**candidate.__dict__, "membership_hash": b"x" * 32})
+    )
+    with pytest.raises(ValueError, match="scope"):
+        await repo.enqueue_candidate(bad_hash, now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal() -> None:
+    account_id, contact_id = uuid4(), uuid4()
+    key = b"r" * 32
+    row = {
+        "id": uuid4(),
+        "reservation_key": key,
+        "account_id": account_id,
+        "contact_id": contact_id,
+        "local_date": NOW.date(),
+        "bypass": False,
+        "state": "held",
+        "expires_at": NOW + timedelta(hours=1),
+    }
+    session = AsyncMock()
+    session.execute.return_value = _Result(row)
+    repo = ProactiveRepository(cast(AsyncSession, session))
+    with pytest.raises(ValueError, match="another scope"):
+        await repo.reserve_budget(
+            account_id=uuid4(),
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(1, 1),
+            expires_at=NOW + timedelta(hours=1),
+            reservation_key=key,
+        )
+    replay = await repo.reserve_budget(
+        account_id=account_id,
+        contact_id=contact_id,
+        local_date=NOW.date(),
+        limits=BudgetLimits(1, 1),
+        expires_at=NOW + timedelta(hours=1),
+        reservation_key=key,
+    )
+    assert replay is not None
+    assert replay.state is ReservationState.HELD
+    session.execute.return_value = _Result(None)
+    assert (
+        await repo.settle_budget(reservation_key=key, target=ReservationState.COMMITTED, now=NOW)
+        is None
+    )
+    terminal = dict(row, state="committed")
+    session.execute.return_value = _Result(terminal)
+    result = await repo.settle_budget(
+        reservation_key=key, target=ReservationState.RELEASED, now=NOW
+    )
+    assert result is not None
+    assert result.state is ReservationState.COMMITTED
+
+    session.execute.side_effect = [
+        _Result(row),
+        _Result(rowcount=1),
+        _Result(rowcount=1),
+        _Result(rowcount=1),
+    ]
+    expired = await repo.settle_budget(
+        reservation_key=key, target=ReservationState.COMMITTED, now=NOW + timedelta(hours=2)
+    )
+    assert expired is not None
+    assert expired.state is ReservationState.EXPIRED
