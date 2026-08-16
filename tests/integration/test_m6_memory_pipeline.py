@@ -191,7 +191,14 @@ async def test_m6_stale_summary_source_does_not_advance_watermark(
             message_revisions.c.id == revision_id,
             message_revisions.c.account_id == account_id,
         )
-        .values(content_sha256=b"x" * 32)
+        .values(
+            text_content=None,
+            caption=None,
+            entities=None,
+            content_sha256=None,
+            redacted_at=NOW + timedelta(seconds=1),
+            redaction_reason="policy",
+        )
     )
     second = SummaryVersion(
         id=uuid4(),
