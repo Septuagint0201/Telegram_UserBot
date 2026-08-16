@@ -520,6 +520,19 @@ class MemoryRepository:
                 prior_version_id,
                 True,
             )
+        if proposal_row["state"] in {
+            ProposalState.REJECTED.value,
+            ProposalState.INVALIDATED.value,
+            ProposalState.EXPIRED.value,
+            ProposalState.ERROR.value,
+        }:
+            return AcceptanceResult(
+                proposal.id,
+                ProposalState(proposal_row["state"]),
+                None,
+                None,
+                True,
+            )
         if validated.state is not ProposalState.ACCEPTED and not (
             allow_candidate and validated.state is ProposalState.CANDIDATE
         ):
@@ -745,7 +758,13 @@ class MemoryRepository:
         summary_row = (
             (
                 await self._session.execute(
-                    select(summaries).where(summaries.c.id == summary.summary_id).with_for_update()
+                    select(summaries)
+                    .where(
+                        summaries.c.id == summary.summary_id,
+                        summaries.c.account_id == account_id,
+                        summaries.c.conversation_id == conversation_id,
+                    )
+                    .with_for_update()
                 )
             )
             .mappings()
@@ -1135,6 +1154,34 @@ class MemoryRepository:
         )
         if row is not None:
             return row
+        exact = (
+            (
+                await self._session.execute(
+                    select(memory_proposals)
+                    .where(
+                        memory_proposals.c.account_id == proposal.account_id,
+                        memory_proposals.c.conversation_id == proposal.conversation_id,
+                        memory_proposals.c.semantic_key_hash == proposal.semantic_key_hash,
+                        memory_proposals.c.operation == proposal.operation.value,
+                        memory_proposals.c.memory_type == proposal.memory_type.value,
+                        memory_proposals.c.proposed_payload == dict(proposal.payload),
+                        memory_proposals.c.proposed_text == proposal.rendered_text,
+                        memory_proposals.c.proposed_confidence == proposal.confidence,
+                        memory_proposals.c.proposed_importance == proposal.importance,
+                        memory_proposals.c.state.in_(
+                            ("received", "validating", "candidate", "accepted")
+                        ),
+                    )
+                    .order_by(memory_proposals.c.created_at.desc(), memory_proposals.c.id.desc())
+                    .limit(1)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if exact is not None:
+            return exact
         return (
             (
                 await self._session.execute(

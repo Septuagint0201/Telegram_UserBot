@@ -413,6 +413,8 @@ class ProactiveRepository:
             ReservationState.EXPIRED,
         }:
             return _reservation(row)
+        if cast(datetime, row["expires_at"]) <= now.astimezone(UTC):
+            target = ReservationState.EXPIRED
         delta_committed = target in {ReservationState.COMMITTED, ReservationState.SEND_UNKNOWN}
         await self._session.execute(
             update(proactive_budget_reservations)
@@ -503,6 +505,33 @@ class ProactiveRepository:
         if not set(decision.selected_occurrence_ids) <= candidate_occurrence_ids:
             raise ValueError("decision selects an occurrence outside the candidate")
         decision_id = uuid5(candidate.id, f"proactive-decision:{output_hash.hex()}")
+        existing = await self._session.scalar(
+            select(proactive_decisions.c.id).where(
+                proactive_decisions.c.id == decision_id,
+                proactive_decisions.c.account_id == candidate.account_id,
+            )
+        )
+        if existing is not None:
+            return cast(UUID, existing)
+        current_candidate = (
+            (
+                await self._session.execute(
+                    select(proactive_candidates)
+                    .where(
+                        proactive_candidates.c.id == candidate.id,
+                        proactive_candidates.c.account_id == candidate.account_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if current_candidate is None or (
+            current_candidate["generation"] != candidate.generation
+            or current_candidate["membership_hash"] != candidate.membership_hash
+        ):
+            raise ValueError("candidate snapshot is stale")
         await self._session.execute(
             postgresql_insert(proactive_decisions)
             .values(
@@ -547,7 +576,7 @@ class ProactiveRepository:
                 id=uuid4(),
                 account_id=candidate.account_id,
                 candidate_id=candidate.id,
-                from_state=candidate.state.value,
+                from_state=cast(str, current_candidate["state"]),
                 to_state=target_state,
                 event="agent_decision",
                 reason=decision.decision_code,
