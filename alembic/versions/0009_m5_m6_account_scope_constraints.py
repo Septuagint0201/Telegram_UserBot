@@ -203,7 +203,7 @@ def _create_scope_constraints() -> None:
             "fk_context_manifest_items_summary_version_scope",
         ),
         "context_preview_requests": (
-            "fk_context_preview_requests_context_manifest_id_context_manifests",
+            "fk_context_preview_requests_context_manifest_id_context_4e1c",
             "fk_context_preview_requests_manifest_scope",
         ),
         "memory_jobs": ("fk_memory_jobs_input_manifest", "fk_memory_jobs_input_manifest_scope"),
@@ -731,7 +731,7 @@ def downgrade() -> None:
             ("id",),
         ),
         (
-            "fk_context_preview_requests_context_manifest_id_context_manifests",
+            "fk_context_preview_requests_context_manifest_id_context_4e1c",
             "context_preview_requests",
             "context_manifests",
             ("context_manifest_id",),

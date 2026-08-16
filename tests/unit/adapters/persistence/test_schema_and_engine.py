@@ -1,3 +1,4 @@
+import re
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
@@ -174,6 +175,21 @@ def test_m5_m6_scope_migration_drops_dependent_fks_before_candidate_keys() -> No
 
     assert drop_fks < create_keys < create_fks
     assert "_drop_constraints(table, (name,))\n        _create_unique" not in migration
+
+
+@pytest.mark.unit
+def test_m5_m6_scope_migration_uses_postgres_safe_constraint_names() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0009_m5_m6_account_scope_constraints.py"
+    ).read_text(encoding="utf-8")
+
+    constraint_names = re.findall(r'"(fk_[^"]+)"', migration)
+
+    assert constraint_names
+    assert all(len(name) <= 63 for name in constraint_names)
 
 
 @pytest.mark.unit
