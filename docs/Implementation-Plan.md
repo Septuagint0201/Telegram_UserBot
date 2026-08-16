@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M6已经取得精确GitLab证据；M7实现及 Linux service acceptance 已由签名提交与 GitHub Actions 证据关闭。Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M6已经取得精确GitLab证据；M7实现已完成，但当前 HEAD 的 Linux service acceptance 仍为`NOT RUN`，不能复用失败运行或历史提交结果。Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -72,7 +72,7 @@ deploy/
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M5 | Media与Context Contract | fake provider；测试图片 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | COMPLETE — WINDOWS STATIC/UNIT PASS; LINUX SERVICE ACCEPTANCE PASS |
+| M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | IN REVIEW — WINDOWS STATIC/UNIT PASS; CURRENT HEAD GITHUB LINUX SERVICE ACCEPTANCE NOT RUN |
 | M8 | Production Compose、backup与运维加固 | 测试backup/alert targets | NOT STARTED |
 | M9 | Release candidate验证 | 受保护live smoke与授权测试peer | NOT STARTED |
 
@@ -465,4 +465,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0—M6已经关闭并取得精确GitLab证据，M7实现及 Linux service acceptance 已关闭。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。
+M0—M6已经关闭并取得精确GitLab证据，M7实现已完成但当前 HEAD 的 Linux service acceptance 仍为`NOT RUN`。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。

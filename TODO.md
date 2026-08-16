@@ -46,7 +46,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M5 | Media 与 Context Contract | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M7 | Proactive Pipeline | COMPLETE | WINDOWS STATIC/UNIT PASS; LINUX SERVICE ACCEPTANCE PASS |
+| M7 | Proactive Pipeline | IN REVIEW | WINDOWS STATIC/UNIT PASS; CURRENT HEAD GITHUB LINUX SERVICE ACCEPTANCE NOT RUN |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
 | M9 | Release candidate 验证 | WAITING | NOT RUN |
 
@@ -275,7 +275,7 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 - [x] **M7-009 实现 AUTO final gate 与 COPILOT draft**（依赖：M4-005、M7-005—M7-008）— AUTO 才能创建 outbound intent；COPILOT 只产生待批准 draft；HUMAN/PAUSED 不发送。
 - [x] **M7-010 实现 send-unknown 保守结算**（依赖：M3-009、M7-005、M7-009）— unknown 暂按已消费预算处理，reconciliation 后修正；禁止盲目重发。
 - [x] **M7-011 实现审计、设置与 Control Bot 命令**（依赖：M7-002—M7-010）— 管理 enable、时区、quiet hours、预算、候选和状态；每次变更版本化并可追责。
-- [x] **M7-012 关闭 M7**（依赖：M7-001—M7-011）— DST、预算并发、quiet bypass、takeover 和 crash state-machine test 为 `PASS`；GitHub Actions Linux service acceptance 为 `PASS`；真实主动发送仍 disabled。
+- [ ] **M7-012 关闭 M7**（依赖：M7-001—M7-011）— DST、预算并发、quiet bypass、takeover 和 crash state-machine test 为 `PASS`；当前 HEAD 的 GitHub Actions Linux service acceptance 尚未取得 `PASS`，不能复用失败运行或历史提交结果；真实主动发送仍 disabled。
 
 ### M7 退出门禁
 
@@ -368,4 +368,4 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ## 17. 下一步
 
-M0—M6已经关闭，M7 Proactive Pipeline及其 Linux service acceptance 已关闭。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
+M0—M6已经关闭，M7 Proactive Pipeline实现已完成但仍在等待当前 HEAD 的 Linux service acceptance。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。

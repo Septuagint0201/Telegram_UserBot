@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0—M6已经完成，M7 Proactive Pipeline 也已完成；M7 Linux PostgreSQL/Redis service acceptance 已通过 GitHub Actions 验证。M6保留原有签名 GitLab/GitHub 证据；M7 Windows static/unit 门禁已通过。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+V1架构设计与M0—M6已经完成，M7 Proactive Pipeline实现也已完成；当前 HEAD 的 M7 Linux PostgreSQL/Redis service acceptance 仍为`NOT RUN`。此前绑定旧 HEAD 的 GitHub Actions 运行曾因迁移约束重复创建而失败，不能作为当前 HEAD 的通过证据。M6保留原有签名 GitLab/GitHub 证据；M7 Windows static/unit 门禁已通过。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 

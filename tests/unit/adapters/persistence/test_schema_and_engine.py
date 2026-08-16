@@ -464,7 +464,13 @@ def test_m7_job_scope_and_deadline_migration_is_recoverable() -> None:
     assert 'down_revision: str | Sequence[str] | None = "0021_m7_evidence_activity"' in migration
     assert "uq_proactive_jobs_idempotency" in migration
     assert "uq_proactive_jobs_account_idempotency" in migration
+    assert "DROP CONSTRAINT IF EXISTS window_values" in migration
+    assert "IF NOT EXISTS" in migration
     assert "hard_deadline_at >= window_start_at" in migration
+    assert "hard_deadline_at <= window_end_at);" in migration
+    assert (
+        "ALTER TABLE proactive_jobs ADD CONSTRAINT uq_proactive_jobs_idempotency" not in migration
+    )
     assert "def downgrade() -> None:" in migration
 
 

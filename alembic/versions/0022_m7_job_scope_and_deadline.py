@@ -11,35 +11,42 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TABLE proactive_jobs DROP CONSTRAINT IF EXISTS uq_proactive_jobs_idempotency")
     op.execute(
-        "ALTER TABLE proactive_jobs ADD CONSTRAINT uq_proactive_jobs_account_idempotency "
-        "UNIQUE (account_id, idempotency_key)"
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE proactive_jobs DROP CONSTRAINT IF EXISTS uq_proactive_jobs_idempotency;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conrelid = 'proactive_jobs'::regclass
+                  AND conname = 'uq_proactive_jobs_account_idempotency'
+            ) THEN
+                ALTER TABLE proactive_jobs ADD CONSTRAINT uq_proactive_jobs_account_idempotency
+                    UNIQUE (account_id, idempotency_key);
+            END IF;
+        END
+        $$;
+        """
     )
     op.execute(
-        "ALTER TABLE proactive_occurrences DROP CONSTRAINT IF EXISTS "
-        "ck_proactive_occurrences_window_values"
-    )
-    op.execute(
-        "ALTER TABLE proactive_occurrences ADD CONSTRAINT ck_proactive_occurrences_window_values "
-        "CHECK (window_start_at < window_end_at AND hard_deadline_at >= window_start_at "
-        "AND hard_deadline_at <= window_end_at)"
+        """
+        ALTER TABLE proactive_occurrences
+            DROP CONSTRAINT IF EXISTS window_values,
+            DROP CONSTRAINT IF EXISTS ck_proactive_occurrences_window_values;
+        ALTER TABLE proactive_occurrences ADD CONSTRAINT ck_proactive_occurrences_window_values
+            CHECK (window_start_at < window_end_at AND hard_deadline_at >= window_start_at
+                   AND hard_deadline_at <= window_end_at);
+        """
     )
 
 
 def downgrade() -> None:
     op.execute(
-        "ALTER TABLE proactive_occurrences DROP CONSTRAINT IF EXISTS "
-        "ck_proactive_occurrences_window_values"
-    )
-    op.execute(
-        "ALTER TABLE proactive_occurrences ADD CONSTRAINT ck_proactive_occurrences_window_values "
-        "CHECK (window_start_at < window_end_at AND hard_deadline_at <= window_end_at)"
-    )
-    op.execute(
-        "ALTER TABLE proactive_jobs DROP CONSTRAINT IF EXISTS uq_proactive_jobs_account_idempotency"
-    )
-    op.execute(
-        "ALTER TABLE proactive_jobs ADD CONSTRAINT uq_proactive_jobs_idempotency "
-        "UNIQUE (idempotency_key)"
+        """
+        ALTER TABLE proactive_occurrences
+            DROP CONSTRAINT IF EXISTS ck_proactive_occurrences_window_values,
+            DROP CONSTRAINT IF EXISTS window_values;
+        ALTER TABLE proactive_occurrences ADD CONSTRAINT window_values
+            CHECK (window_start_at < window_end_at AND hard_deadline_at <= window_end_at);
+        """
     )

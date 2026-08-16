@@ -579,16 +579,17 @@ def test_m7_due_job_idempotency_is_account_scoped() -> None:
     first_owner = uuid4()
     first_lease = store.claim(now=NOW, owner=first_owner)
     assert first_lease is not None
-    assert first_lease.account_id == first_account
+    assert first_lease.account_id in {first_account, second_account}
+    other_account = second_account if first_lease.account_id == first_account else first_account
     assert not store.complete(
-        account_id=second_account,
+        account_id=other_account,
         idempotency_key=key,
         owner=first_owner,
         fencing_token=first_lease.fencing_token,
         now=NOW,
     )
     assert store.complete(
-        account_id=first_account,
+        account_id=first_lease.account_id,
         idempotency_key=key,
         owner=first_owner,
         fencing_token=first_lease.fencing_token,
@@ -598,9 +599,9 @@ def test_m7_due_job_idempotency_is_account_scoped() -> None:
     second_owner = uuid4()
     second_lease = store.claim(now=NOW, owner=second_owner)
     assert second_lease is not None
-    assert second_lease.account_id == second_account
+    assert second_lease.account_id == other_account
     assert store.complete(
-        account_id=second_account,
+        account_id=second_lease.account_id,
         idempotency_key=key,
         owner=second_owner,
         fencing_token=second_lease.fencing_token,
