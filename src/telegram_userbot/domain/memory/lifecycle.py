@@ -98,6 +98,11 @@ class MemoryStore:
         expected_versions = expected_versions or {}
         targets = [self.get(memory_id) for memory_id in proposal.target_memory_ids]
         for target in targets:
+            if (
+                target.account_id != proposal.account_id
+                or target.conversation_id != proposal.conversation_id
+            ):
+                raise MemoryConflictError("target memory scope mismatch")
             expected = expected_versions.get(target.id, target.current_version_no)
             if target.current_version_no != expected:
                 raise MemoryConflictError("target version changed before acceptance")

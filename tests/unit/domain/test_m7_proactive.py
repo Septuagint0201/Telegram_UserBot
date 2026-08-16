@@ -516,6 +516,24 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     )
     assert store.expire(now=NOW + timedelta(days=1), window_end=NOW) == 1
     assert expired.state is DueJobState.PENDING
+    retry_key = sha256(b"retry-window").digest()
+    retry_job = store.enqueue(
+        account_id=account_id,
+        idempotency_key=retry_key,
+        available_at=NOW,
+        expires_at=NOW + timedelta(minutes=1),
+    )
+    retry_lease = store.claim(now=NOW, owner=owner)
+    assert retry_lease is not None
+    assert retry_lease.id == retry_job.id
+    assert store.complete(
+        idempotency_key=retry_key,
+        owner=owner,
+        fencing_token=retry_lease.fencing_token,
+        now=NOW + timedelta(seconds=1),
+        succeeded=False,
+    )
+    assert store.claim(now=NOW + timedelta(minutes=2), owner=uuid4()) is None
 
 
 @pytest.mark.unit
@@ -1035,6 +1053,14 @@ def test_m7_value_objects_cover_validation_boundaries() -> None:
                 "defer_until": NOW,
             },
             "only defer_once",
+        ),
+        (
+            {
+                "action": ProactiveAction.SEND_NOW,
+                "selected_occurrence_ids": (valid_id, valid_id),
+                "topic": "x",
+            },
+            "unique",
         ),
     )
     for decision_changes, message in invalid_decision_cases:

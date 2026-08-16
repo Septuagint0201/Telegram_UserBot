@@ -4,10 +4,12 @@ import hashlib
 import io
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from threading import RLock
 from uuid import UUID
 
 from PIL import Image, ImageOps
@@ -15,6 +17,9 @@ from PIL import Image, ImageOps
 from telegram_userbot.adapters.media.validation import ValidatedImage
 
 MIME_EXTENSION = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+
+_ROOT_LOCK_GUARD = RLock()
+_ROOT_LOCKS: dict[Path, RLock] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,14 +65,12 @@ class PrivateMediaStore:
         root.chmod(0o700)
         self._root = root.resolve(strict=True)
         self._quota_bytes = quota_bytes
+        with _ROOT_LOCK_GUARD:
+            self._quota_thread_lock = _ROOT_LOCKS.setdefault(self._root, RLock())
 
     def quota(self) -> MediaQuota:
-        used = sum(
-            path.stat().st_size
-            for path in self._root.rglob("*")
-            if path.is_file() and not path.is_symlink()
-        )
-        return MediaQuota(used, self._quota_bytes)
+        with self._quota_guard():
+            return MediaQuota(self._used_bytes(), self._quota_bytes)
 
     def store_original(
         self, *, account_id: UUID, object_id: UUID, image: ValidatedImage
@@ -107,31 +110,74 @@ class PrivateMediaStore:
         height: int,
         metadata_cleared: bool,
     ) -> StoredMedia:
-        if len(payload) > self.quota().available_bytes:
-            raise RuntimeError("media_quota_exceeded")
         digest = hashlib.sha256(payload).digest()
         key = PurePosixPath(
             str(account_id), digest.hex()[:2], f"{object_id}{MIME_EXTENSION[mime_type]}"
         )
-        target = self.resolve_key(key.as_posix(), must_exist=False)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.parent.chmod(0o700)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".ingest-", dir=target.parent)
-        temporary = Path(temporary_name)
-        try:
-            temporary.chmod(0o600)
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.replace(target)
-            _verify_persisted_file(target, payload, digest)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
+        with self._quota_guard():
+            target = self.resolve_key(key.as_posix(), must_exist=False)
+            existing_size = (
+                target.stat().st_size
+                if target.is_file() and not target.is_symlink()
+                else 0
+            )
+            required_delta = len(payload) - existing_size
+            if required_delta > self._quota_bytes - self._used_bytes():
+                raise RuntimeError("media_quota_exceeded")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.chmod(0o700)
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".ingest-", dir=target.parent)
+            temporary = Path(temporary_name)
+            try:
+                temporary.chmod(0o600)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                temporary.replace(target)
+                _verify_persisted_file(target, payload, digest)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
         return StoredMedia(
             key.as_posix(), digest, len(payload), mime_type, width, height, metadata_cleared
         )
+
+    def _used_bytes(self) -> int:
+        lock_path = self._root / ".quota.lock"
+        return sum(
+            path.stat().st_size
+            for path in self._root.rglob("*")
+            if path != lock_path and path.is_file() and not path.is_symlink()
+        )
+
+    @contextmanager
+    def _quota_guard(self) -> Iterator[None]:
+        """Serialize quota check and rename within this process and host."""
+
+        with self._quota_thread_lock:
+            lock_path = self._root / ".quota.lock"
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                if os.name == "nt":
+                    msvcrt = __import__("msvcrt")
+                    if lock_path.stat().st_size == 0:
+                        os.write(descriptor, b"\0")
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                else:
+                    fcntl = __import__("fcntl")
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                if os.name == "nt":
+                    msvcrt = __import__("msvcrt")
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl = __import__("fcntl")
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
     def resolve_key(self, storage_key: str, *, must_exist: bool = True) -> Path:
         key = PurePosixPath(storage_key)

@@ -1,6 +1,7 @@
 import asyncio
 import io
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid7
@@ -14,6 +15,7 @@ from telegram_userbot.adapters.media import (
     ImageIngestor,
     ImageLimits,
     PrivateMediaStore,
+    StoredMedia,
     ValidatedImage,
 )
 from telegram_userbot.domain.shared.redaction import SensitiveValue
@@ -219,3 +221,30 @@ def test_media_store_quota_read_limit_and_copy_formats_fail_closed(tmp_path: Pat
         store.store_provider_copy(account_id=uuid7(), object_id=uuid7(), image=webp).mime_type
         == "image/webp"
     )
+
+
+@pytest.mark.unit
+def test_media_quota_check_and_rename_are_one_critical_section(tmp_path: Path) -> None:
+    payload = image_bytes()
+    image = ImageIngestor().validate_bytes(payload, declared_mime="image/png")
+    root = tmp_path / "concurrent"
+    stores = [PrivateMediaStore(root, quota_bytes=len(payload)) for _ in range(2)]
+
+    def write(index: int) -> StoredMedia:
+        return stores[index].store_original(
+            account_id=uuid7(), object_id=uuid7(), image=image
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = tuple(executor.submit(write, index) for index in range(2))
+        results = []
+        errors = []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except RuntimeError as error:
+                errors.append(str(error))
+    assert len(results) == 1
+    assert errors == ["media_quota_exceeded"]
+    used = (stores[0].quota().used_bytes, stores[1].quota().used_bytes)
+    assert len(payload) in used

@@ -59,6 +59,8 @@ class SummaryStore:
         current_id = self.current.get(summary.summary_id)
         if current_id is not None:
             current = self.versions[current_id]
+            if summary.kind is not current.kind:
+                raise SummaryCoverageError("summary kind cannot change across versions")
             if expected_version is not None and current.version_no != expected_version:
                 raise SummaryCoverageError("summary current pointer changed")
             if summary.version_no != current.version_no + 1:

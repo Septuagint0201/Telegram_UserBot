@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import case, insert, select, text, update
+from sqlalchemy import and_, case, exists, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -312,18 +312,56 @@ class ProactiveRepository:
             update(proactive_jobs)
             .where(
                 proactive_jobs.c.state.in_(("pending", "retry_wait")),
-                proactive_jobs.c.attempt_count >= max_attempts,
             )
-            .values(state="dead_letter")
+            .values(
+                state=case(
+                    (
+                        and_(
+                            proactive_jobs.c.candidate_id.is_not(None),
+                            exists(
+                                select(1).where(
+                                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                                    proactive_candidates.c.account_id
+                                    == proactive_jobs.c.account_id,
+                                    proactive_candidates.c.window_end_at <= current_time,
+                                )
+                            ),
+                        ),
+                        "expired",
+                    ),
+                    (proactive_jobs.c.attempt_count >= max_attempts, "dead_letter"),
+                    else_=proactive_jobs.c.state,
+                )
+            )
+        )
+        candidate_window_open = or_(
+            proactive_jobs.c.candidate_id.is_(None),
+            ~exists(
+                select(1).where(
+                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                    proactive_candidates.c.account_id == proactive_jobs.c.account_id,
+                    proactive_candidates.c.window_end_at <= current_time,
+                )
+            ),
+        )
+        candidate_window_end = (
+            select(proactive_candidates.c.window_end_at)
+            .where(
+                proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                proactive_candidates.c.account_id == proactive_jobs.c.account_id,
+            )
+            .scalar_subquery()
+            .label("candidate_window_end_at")
         )
         row = (
             (
                 await self._session.execute(
-                    select(proactive_jobs)
+                    select(proactive_jobs, candidate_window_end)
                     .where(
                         proactive_jobs.c.state.in_(("pending", "retry_wait")),
                         proactive_jobs.c.available_at <= current_time,
                         proactive_jobs.c.attempt_count < max_attempts,
+                        candidate_window_open,
                     )
                     .order_by(proactive_jobs.c.available_at, proactive_jobs.c.id)
                     .limit(1)
@@ -356,7 +394,10 @@ class ProactiveRepository:
             .mappings()
             .one()
         )
-        return _due_job(updated)
+        return _due_job(
+            updated,
+            expires_at=cast(datetime | None, row.get("candidate_window_end_at")),
+        )
 
     async def complete(  # noqa: PLR0913 - lease and retry policy are explicit
         self,
@@ -372,10 +413,21 @@ class ProactiveRepository:
         if fencing_token <= 0 or max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("proactive completion policy is invalid")
         current_time = require_aware(now, "now")
+        candidate_window_closed = and_(
+            proactive_jobs.c.candidate_id.is_not(None),
+            exists(
+                select(1).where(
+                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                    proactive_candidates.c.account_id == proactive_jobs.c.account_id,
+                    proactive_candidates.c.window_end_at <= current_time,
+                )
+            ),
+        )
         next_state = (
-            "succeeded"
+            case((candidate_window_closed, "expired"), else_="succeeded")
             if succeeded
             else case(
+                (candidate_window_closed, "expired"),
                 (proactive_jobs.c.attempt_count >= max_attempts, "dead_letter"),
                 else_="retry_wait",
             )
@@ -383,6 +435,7 @@ class ProactiveRepository:
         next_available_at: Any = proactive_jobs.c.available_at
         if not succeeded:
             next_available_at = case(
+                (candidate_window_closed, proactive_jobs.c.available_at),
                 (
                     proactive_jobs.c.attempt_count >= max_attempts,
                     proactive_jobs.c.available_at,
@@ -404,7 +457,10 @@ class ProactiveRepository:
                     state=next_state,
                     lease_owner=None,
                     lease_expires_at=None,
-                    completed_at=current_time if succeeded else None,
+                    completed_at=case(
+                        (candidate_window_closed, None),
+                        else_=current_time if succeeded else None,
+                    ),
                     available_at=next_available_at,
                 )
             ),
@@ -442,6 +498,16 @@ class ProactiveRepository:
         if max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("proactive recovery policy is invalid")
         current_time = require_aware(now, "now")
+        candidate_window_closed = and_(
+            proactive_jobs.c.candidate_id.is_not(None),
+            exists(
+                select(1).where(
+                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                    proactive_candidates.c.account_id == proactive_jobs.c.account_id,
+                    proactive_candidates.c.window_end_at <= current_time,
+                )
+            ),
+        )
         result = cast(
             CursorResult[Any],
             await self._session.execute(
@@ -452,10 +518,12 @@ class ProactiveRepository:
                 )
                 .values(
                     state=case(
+                        (candidate_window_closed, "expired"),
                         (proactive_jobs.c.attempt_count >= max_attempts, "dead_letter"),
                         else_="retry_wait",
                     ),
                     available_at=case(
+                        (candidate_window_closed, proactive_jobs.c.available_at),
                         (
                             proactive_jobs.c.attempt_count >= max_attempts,
                             proactive_jobs.c.available_at,
@@ -1088,12 +1156,17 @@ class ProactiveRepository:
         return decision_id
 
 
-def _due_job(row: Any) -> DueJob:
+def _due_job(row: Any, *, expires_at: datetime | None = None) -> DueJob:
     return DueJob(
         id=cast(UUID, row["id"]),
         account_id=cast(UUID, row["account_id"]),
         idempotency_key=cast(bytes, row["idempotency_key"]),
         available_at=cast(datetime, row["available_at"]),
+        expires_at=(
+            expires_at
+            if expires_at is not None
+            else cast(datetime | None, row.get("candidate_window_end_at"))
+        ),
         state=DueJobState(row["state"]),
         lease_owner=cast(UUID | None, row["lease_owner"]),
         lease_expires_at=cast(datetime | None, row["lease_expires_at"]),

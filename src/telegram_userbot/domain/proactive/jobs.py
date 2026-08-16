@@ -26,6 +26,7 @@ class DueJob:
     account_id: UUID
     idempotency_key: bytes
     available_at: datetime
+    expires_at: datetime | None = None
     state: DueJobState = DueJobState.PENDING
     lease_owner: UUID | None = None
     lease_expires_at: datetime | None = None
@@ -36,6 +37,8 @@ class DueJob:
         if len(self.idempotency_key) != 32:
             raise ValueError("due job identity/time is invalid")
         require_aware(self.available_at, "available_at")
+        if self.expires_at is not None:
+            require_aware(self.expires_at, "expires_at")
         if self.lease_expires_at is not None:
             require_aware(self.lease_expires_at, "lease_expires_at")
         if self.attempt_count < 0 or self.fencing_token < 0:
@@ -50,16 +53,26 @@ class DurableDueJobStore:
         self._jobs: dict[bytes, DueJob] = {}
 
     def enqueue(
-        self, *, account_id: UUID, idempotency_key: bytes, available_at: datetime
+        self,
+        *,
+        account_id: UUID,
+        idempotency_key: bytes,
+        available_at: datetime,
+        expires_at: datetime | None = None,
     ) -> DueJob:
         if len(idempotency_key) != 32:
             raise ValueError("due job key must be 32 bytes")
         available_time = require_aware(available_at, "available_at")
+        expiry_time = None if expires_at is None else require_aware(expires_at, "expires_at")
+        if expiry_time is not None and expiry_time <= available_time:
+            raise ValueError("due job expiry must be after availability")
         with self._lock:
             current = self._jobs.get(idempotency_key)
             if current is not None:
                 return current
-            job = DueJob(uuid4(), account_id, idempotency_key, available_time)
+            job = DueJob(
+                uuid4(), account_id, idempotency_key, available_time, expires_at=expiry_time
+            )
             self._jobs[idempotency_key] = job
             return job
 
@@ -77,6 +90,19 @@ class DurableDueJobStore:
         with self._lock:
             for key, current in tuple(self._jobs.items()):
                 if (
+                    current.expires_at is not None
+                    and current.expires_at <= current_time
+                    and current.state
+                    not in {DueJobState.SUCCEEDED, DueJobState.EXPIRED, DueJobState.DEAD_LETTER}
+                ):
+                    self._jobs[key] = replace(
+                        current,
+                        state=DueJobState.EXPIRED,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                    continue
+                if (
                     current.state in {DueJobState.PENDING, DueJobState.RETRY_WAIT}
                     and current.attempt_count >= max_attempts
                 ):
@@ -87,6 +113,7 @@ class DurableDueJobStore:
                 if item.state in {DueJobState.PENDING, DueJobState.RETRY_WAIT}
                 and item.available_at <= current_time
                 and item.attempt_count < max_attempts
+                and (item.expires_at is None or item.expires_at > current_time)
             ]
             if not candidates:
                 return None
@@ -127,6 +154,14 @@ class DurableDueJobStore:
                 or current.lease_expires_at <= current_time
             ):
                 return False
+            if current.expires_at is not None and current.expires_at <= current_time:
+                self._jobs[idempotency_key] = replace(
+                    current,
+                    state=DueJobState.EXPIRED,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
+                return False
             if succeeded:
                 state = DueJobState.SUCCEEDED
                 available_at = current.available_at
@@ -159,6 +194,18 @@ class DurableDueJobStore:
         with self._lock:
             for key, current in tuple(self._jobs.items()):
                 if (
+                    current.expires_at is not None
+                    and current.expires_at <= current_time
+                    and current.state is DueJobState.LEASED
+                ):
+                    self._jobs[key] = replace(
+                        current,
+                        state=DueJobState.EXPIRED,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                    continue
+                if (
                     current.state is DueJobState.LEASED
                     and current.lease_expires_at is not None
                     and current.lease_expires_at <= current_time
@@ -181,6 +228,7 @@ class DurableDueJobStore:
                         if item.state in {DueJobState.PENDING, DueJobState.RETRY_WAIT}
                         and item.available_at <= current_time
                         and item.attempt_count < max_attempts
+                        and (item.expires_at is None or item.expires_at > current_time)
                     ),
                     key=lambda item: (item.available_at, str(item.id)),
                 )
@@ -192,7 +240,16 @@ class DurableDueJobStore:
         with self._lock:
             changed = 0
             for key, current in tuple(self._jobs.items()):
-                if current.state is DueJobState.PENDING and end_time <= current_time:
-                    self._jobs[key] = replace(current, state=DueJobState.EXPIRED)
+                if (
+                    current.state
+                    in {DueJobState.PENDING, DueJobState.LEASED, DueJobState.RETRY_WAIT}
+                    and end_time <= current_time
+                ):
+                    self._jobs[key] = replace(
+                        current,
+                        state=DueJobState.EXPIRED,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
                     changed += 1
             return changed

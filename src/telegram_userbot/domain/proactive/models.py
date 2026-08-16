@@ -386,6 +386,8 @@ class AgentDecision:
                 "defer_until",
                 require_aware(self.defer_until, "defer_until"),
             )
+        if len(set(self.selected_occurrence_ids)) != len(self.selected_occurrence_ids):
+            raise ValueError("selected occurrence IDs must be unique")
         if self.action is ProactiveAction.NONE:
             if (
                 self.selected_occurrence_ids

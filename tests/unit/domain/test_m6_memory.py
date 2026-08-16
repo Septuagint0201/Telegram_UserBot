@@ -104,7 +104,11 @@ def _manifest(*, visual_only: bool = False) -> tuple[InputManifest, UUID]:
 
 
 def _payload(
-    source_id: UUID, *, confidence: float = 0.9, visual_only: bool = False
+    source_id: UUID,
+    *,
+    confidence: float = 0.9,
+    visual_only: bool = False,
+    semantic_key: str = "beverage preference",
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -112,7 +116,7 @@ def _payload(
             {
                 "operation": "create",
                 "memory_type": "preference",
-                "semantic_key": "beverage preference",
+                "semantic_key": semantic_key,
                 "payload": {"value": "tea"},
                 "confidence": confidence,
                 "importance": 0.7,
@@ -726,6 +730,12 @@ def test_summary_version_watermark_and_period_guards() -> None:
     first = version(1, 1, 1)
     first_watermark = store.publish(first, conversation_id=conversation_id)
     assert first_watermark.conversation_id == conversation_id
+    with pytest.raises(SummaryCoverageError, match="kind"):
+        store.publish(
+            replace(version(2, 2, 2), kind=SummaryKind.DAILY),
+            conversation_id=conversation_id,
+            expected_version=1,
+        )
     with pytest.raises(SummaryCoverageError, match="another conversation"):
         store.publish(version(2, 2, 2), conversation_id=uuid4(), expected_version=1)
     with pytest.raises(SummaryCoverageError, match="pointer"):
@@ -1020,6 +1030,40 @@ def test_memory_store_rejects_invalid_acceptance_and_inactive_targets() -> None:
         store.accept(ValidatedProposal(update, ProposalState.ACCEPTED))
     assert not store.active(account_id=ACCOUNT, conversation_id=CONVERSATION)
     assert store.invalidate_sources({source_id}) == 0
+
+
+def test_memory_store_rejects_cross_scope_merge_targets() -> None:
+    manifest, source_id = _manifest()
+    first = validate_proposal(
+        parse_agent_response(
+            _payload(source_id), account_id=ACCOUNT, conversation_id=CONVERSATION
+        )[0],
+        manifest,
+    )
+    other_account, other_conversation = uuid4(), uuid4()
+    second = validate_proposal(
+        parse_agent_response(
+            _payload(source_id, semantic_key="other fact"),
+            account_id=other_account,
+            conversation_id=other_conversation,
+        )[0],
+        manifest,
+    )
+    store = MemoryStore()
+    first_result = store.accept(first)
+    second_result = store.accept(second)
+    assert first_result.memory_id is not None
+    assert second_result.memory_id is not None
+    merge = replace(
+        first.proposal,
+        id=uuid4(),
+        account_id=other_account,
+        conversation_id=other_conversation,
+        operation=MemoryOperation.MERGE,
+        target_memory_ids=(first_result.memory_id, second_result.memory_id),
+    )
+    with pytest.raises(MemoryConflictError, match="scope"):
+        store.accept(ValidatedProposal(merge, ProposalState.ACCEPTED))
 
 
 def test_memory_store_supersede_creates_a_new_identity_and_version_ids_do_not_collide() -> None:
