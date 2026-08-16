@@ -1,6 +1,8 @@
 """Fake-first tests for memory persistence scope and replay guards."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any, cast
@@ -14,6 +16,7 @@ from telegram_userbot.adapters.persistence.memory_repository import (
     MemoryJobLease,
     MemoryRepository,
 )
+from telegram_userbot.domain.memory.lifecycle import MemoryConflictError
 from telegram_userbot.domain.memory.models import (
     EmbeddingRecord,
     EmbeddingRecordState,
@@ -303,13 +306,14 @@ async def test_record_proposal_binds_job_run_manifest_and_evidence_scope() -> No
     repo._require_message_revision_scope = AsyncMock()  # type: ignore[method-assign]
     session.scalar.side_effect = [job_id, model_run_id]
     session.execute.return_value = _Result(rowcount=1)
-    assert await repo.record_proposal(
+    recorded_id = await repo.record_proposal(
         validated,
         job_id=job_id,
         model_run_id=model_run_id,
         proposal_ordinal=0,
         manifest=manifest,
     )
+    assert isinstance(recorded_id, UUID)
     repo._require_message_revision_scope.assert_awaited_once()
 
     session.scalar.side_effect = [job_id, model_run_id]
@@ -338,6 +342,112 @@ async def test_record_proposal_binds_job_run_manifest_and_evidence_scope() -> No
             model_run_id=model_run_id,
             proposal_ordinal=0,
             manifest=manifest,
+        )
+
+    mismatched = replace(
+        validated,
+        proposal=replace(
+            validated.proposal,
+            evidence=(replace(validated.proposal.evidence[0], source_revision="revision-2"),),
+        ),
+    )
+    session.scalar.side_effect = [job_id, model_run_id]
+    session.execute.return_value = _Result(rowcount=1)
+    with pytest.raises(ValueError, match="canonical message root"):
+        await repo.record_proposal(
+            mismatched,
+            job_id=job_id,
+            model_run_id=model_run_id,
+            proposal_ordinal=1,
+            manifest=manifest,
+        )
+
+
+@pytest.mark.asyncio
+async def test_proposal_lookup_normalizes_postgres_numeric_scores() -> None:
+    repo, session = _repository()
+    account_id, conversation_id = uuid4(), uuid4()
+    proposal = _proposal(account_id, conversation_id, _source()).proposal
+    recorded_id = uuid4()
+    row = {
+        "id": recorded_id,
+        "operation": proposal.operation.value,
+        "memory_type": proposal.memory_type.value,
+        "semantic_key_hash": proposal.semantic_key_hash,
+        "proposed_payload": dict(proposal.payload),
+        "proposed_text": proposal.rendered_text,
+        "proposed_confidence": Decimal("0.9500"),
+        "proposed_importance": Decimal("0.5000"),
+        "proposed_valid_from": proposal.valid_from,
+        "proposed_valid_to": proposal.valid_to,
+        "visual_only": proposal.visual_only,
+    }
+    session.execute.return_value = _Result(row)
+    assert await repo._proposal_row(recorded_id, proposal) == row
+
+    session.execute.return_value = _Result({**row, "proposed_importance": Decimal("0.5001")})
+    with pytest.raises(ValueError, match="does not match"):
+        await repo._proposal_row(recorded_id, proposal)
+
+
+@pytest.mark.asyncio
+async def test_accept_proposal_uses_recorded_target_snapshot() -> None:
+    repo, session = _repository()
+    account_id, conversation_id, target_id = uuid4(), uuid4(), uuid4()
+    source = _source()
+    base = _proposal(account_id, conversation_id, source)
+    validated = replace(
+        base,
+        proposal=replace(
+            base.proposal,
+            operation=MemoryOperation.UPDATE,
+            target_memory_ids=(target_id,),
+        ),
+    )
+    recorded_id = uuid4()
+    repo._proposal_row = AsyncMock(  # type: ignore[method-assign]
+        return_value={"id": recorded_id, "state": "candidate"}
+    )
+    session.execute.side_effect = [
+        _Result(
+            rows=[
+                {
+                    "target_memory_id": target_id,
+                    "target_version_no_snapshot": 1,
+                    "target_role": "primary",
+                }
+            ]
+        ),
+        _Result(
+            rows=[
+                {
+                    "message_revision_id": source.source_id,
+                    "evidence_role": "primary",
+                    "quoted_span_start": None,
+                    "quoted_span_end": None,
+                    "source_content_sha256": source.content_sha256,
+                    "trust_class": source.trust.value,
+                }
+            ]
+        ),
+        _Result(
+            rows=[
+                {
+                    "id": target_id,
+                    "current_version_no": 2,
+                    "status": "active",
+                    "memory_type": "fact",
+                    "semantic_key_hash": validated.proposal.semantic_key_hash,
+                }
+            ]
+        ),
+    ]
+    session.scalar.return_value = 0
+    with pytest.raises(MemoryConflictError, match="target version changed"):
+        await repo.accept_validated_proposal(
+            validated,
+            recorded_proposal_id=recorded_id,
+            allow_candidate=True,
         )
 
 

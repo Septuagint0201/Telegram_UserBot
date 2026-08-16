@@ -160,7 +160,7 @@ def parse_agent_decision(  # noqa: PLR0912 - strict schema branches fail closed
                 "defer_out_of_window", "defer must remain in candidate window"
             )
         quiet = quiet_decision(
-            now,
+            defer_until,
             timezone_name=candidate.timezone_name,
             policy=policy,
             occurrence=None,

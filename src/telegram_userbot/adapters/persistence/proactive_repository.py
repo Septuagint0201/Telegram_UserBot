@@ -466,7 +466,17 @@ class ProactiveRepository:
                 or existing["expires_at"] != expires_at.astimezone(UTC)
             ):
                 raise ValueError("budget reservation key belongs to another scope")
-            return _reservation(existing)
+            reservation = _reservation(existing)
+            return (
+                reservation
+                if reservation.state
+                in {
+                    ReservationState.HELD,
+                    ReservationState.COMMITTED,
+                    ReservationState.SEND_UNKNOWN,
+                }
+                else None
+            )
         scopes = [
             (None, "account_daily", limits.account_daily),
             (contact_id, "contact_daily", limits.contact_daily),

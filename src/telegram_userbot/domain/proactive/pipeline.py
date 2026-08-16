@@ -107,21 +107,19 @@ def preliminary_gate(value: AuthorizationInput) -> GateResult:  # noqa: PLR0911,
     )
     if not selected_occurrences:
         return GateResult(False, "SELECTED_OCCURRENCE_INVALID")
-    quiet = quiet_decision(
-        now,
-        timezone_name=candidate.timezone_name,
-        policy=value.policy,
-        occurrence=selected_occurrences[0],
+    quiet_results = tuple(
+        quiet_decision(
+            now,
+            timezone_name=candidate.timezone_name,
+            policy=value.policy,
+            occurrence=occurrence,
+        )
+        for occurrence in selected_occurrences
     )
-    if any(
-        occurrence.quiet_bypass_possible != selected_occurrences[0].quiet_bypass_possible
-        for occurrence in selected_occurrences[1:]
-    ):
-        return GateResult(False, "MIXED_QUIET_BYPASS")
-    if quiet.in_absolute_quiet:
+    if any(quiet.in_absolute_quiet for quiet in quiet_results):
         return GateResult(False, "ABSOLUTE_NO_SEND")
-    if quiet.in_quiet_hours:
-        if not quiet.bypass_allowed:
+    if any(quiet.in_quiet_hours for quiet in quiet_results):
+        if not all(quiet.bypass_allowed for quiet in quiet_results):
             return GateResult(False, "QUIET_HOURS")
         if not value.bypass_available:
             return GateResult(False, "BYPASS_BUDGET_EXHAUSTED")

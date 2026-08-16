@@ -470,6 +470,18 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
     )
     assert replay is not None
     assert replay.state is ReservationState.HELD
+    session.execute.return_value = _Result(dict(row, state="released"))
+    assert (
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(1, 1),
+            expires_at=NOW + timedelta(hours=1),
+            reservation_key=key,
+        )
+        is None
+    )
     session.execute.return_value = _Result(None)
     assert (
         await repo.settle_budget(

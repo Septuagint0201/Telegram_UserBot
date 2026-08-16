@@ -489,6 +489,36 @@ def test_m7_quiet_gate_uses_only_agent_selected_occurrences() -> None:
         == "QUIET_HOURS"
     )
 
+    bypass = replace(first, evidence=(evidence("intention"),))
+    non_explicit = replace(
+        first,
+        id=uuid4(),
+        occurrence_key=sha256(b"non-explicit-occurrence").digest(),
+        evidence=(evidence("intention", explicit=False),),
+    )
+    mixed = replace(
+        candidate,
+        occurrences=(bypass, non_explicit),
+        membership_hash=membership_digest((bypass, non_explicit)),
+    )
+    mixed_decision = replace(
+        decision,
+        candidate_id=mixed.id,
+        selected_occurrence_ids=(bypass.id, non_explicit.id),
+    )
+    assert (
+        preliminary_gate(
+            AuthorizationInput(
+                mixed,
+                mixed_decision,
+                datetime(2026, 8, 16, 23, tzinfo=UTC),
+                policy(),
+                EffectiveMode.AUTO,
+            )
+        ).reason
+        == "QUIET_HOURS"
+    )
+
 
 @pytest.mark.unit
 def test_m7_final_gate_binds_activity_snapshot_to_candidate() -> None:
@@ -1015,6 +1045,25 @@ def test_m7_validation_and_fake_store_edge_cases() -> None:
             absolute_payload,
             candidate=absolute,
             now=datetime(2026, 8, 16, 3, tzinfo=UTC),
+            policy=p,
+        )
+
+    before_quiet = candidate_for(now=datetime(2026, 8, 16, 21, tzinfo=UTC))
+    before_quiet = replace(
+        before_quiet,
+        window_end_at=datetime(2026, 8, 17, 2, tzinfo=UTC),
+    )
+    future_absolute_payload = {
+        **payload,
+        "selected_occurrence_ids": [str(before_quiet.occurrences[0].id)],
+        "action": "defer_once",
+        "defer_until": "2026-08-17T01:00:00Z",
+    }
+    with pytest.raises(ProactiveValidationError, match="absolute quiet"):
+        parse_agent_decision(
+            future_absolute_payload,
+            candidate=before_quiet,
+            now=datetime(2026, 8, 16, 21, tzinfo=UTC),
             policy=p,
         )
 

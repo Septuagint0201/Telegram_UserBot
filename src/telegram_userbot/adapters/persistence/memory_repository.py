@@ -11,6 +11,7 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
@@ -634,7 +635,7 @@ class MemoryRepository:
         proposal_ordinal: int,
         manifest: InputManifest,
         validator_policy_version: str = "m6-v1",
-    ) -> bool:
+    ) -> UUID | None:
         if proposal_ordinal < 0 or not validator_policy_version:
             raise ValueError("proposal persistence identity is invalid")
         proposal = validated.proposal
@@ -698,7 +699,7 @@ class MemoryRepository:
             .on_conflict_do_nothing(constraint="uq_memory_proposals_idempotency")
         )
         if cast(CursorResult[Any], result).rowcount != 1:
-            return False
+            return None
         for index, target_id in enumerate(proposal.target_memory_ids):
             target = (
                 (
@@ -727,7 +728,15 @@ class MemoryRepository:
             )
         for evidence in proposal.evidence:
             source = manifest.source(evidence.source_id)
-            if source is None or source.source_type != "message_revision":
+            if (
+                source is None
+                or source.source_type != "message_revision"
+                or source.revision != evidence.source_revision
+                or source.content_sha256 != evidence.source_content_sha256
+                or source.trust is not evidence.trust
+                or source.redacted
+                or source.visual_only != evidence.visual_only
+            ):
                 raise ValueError("proposal evidence lacks a canonical message root")
             await self._require_message_revision_scope(
                 evidence.source_id,
@@ -747,12 +756,13 @@ class MemoryRepository:
                     trust_class=source.trust.value,
                 )
             )
-        return True
+        return persisted_proposal_id
 
-    async def accept_validated_proposal(  # noqa: PLR0912, PLR0915 - transaction transitions are explicit
+    async def accept_validated_proposal(  # noqa: PLR0912, PLR0913, PLR0915 - transaction transitions are explicit
         self,
         validated: ValidatedProposal,
         *,
+        recorded_proposal_id: UUID,
         acceptance_kind: str = "automatic",
         expected_versions: dict[UUID, int] | None = None,
         now: datetime | None = None,
@@ -768,16 +778,10 @@ class MemoryRepository:
         current_time = (now or datetime.now(UTC)).astimezone(UTC)
         if acceptance_kind not in {"automatic", "manual", "reconciliation", "migration"}:
             raise ValueError("unknown acceptance kind")
-        proposal_row = await self._proposal_row(proposal)
+        proposal_row = await self._proposal_row(recorded_proposal_id, proposal)
         if proposal_row is None:
             raise ValueError("proposal has not been recorded")
         proposal_id = cast(UUID, proposal_row["id"])
-        for evidence in proposal.evidence:
-            await self._require_message_revision_scope(
-                evidence.source_id,
-                account_id=proposal.account_id,
-                conversation_id=proposal.conversation_id,
-            )
         if proposal_row["state"] == ProposalState.ACCEPTED.value:
             prior_version_id = cast(UUID | None, proposal_row["accepted_memory_version_id"])
             prior_memory_id = None
@@ -791,7 +795,7 @@ class MemoryRepository:
                     ),
                 )
             return AcceptanceResult(
-                proposal.id,
+                proposal_id,
                 ProposalState.ACCEPTED,
                 prior_memory_id,
                 prior_version_id,
@@ -804,7 +808,7 @@ class MemoryRepository:
             ProposalState.ERROR.value,
         }:
             return AcceptanceResult(
-                proposal.id,
+                proposal_id,
                 ProposalState(proposal_row["state"]),
                 None,
                 None,
@@ -823,10 +827,137 @@ class MemoryRepository:
                     decided_at=current_time,
                 )
             )
-            return AcceptanceResult(proposal.id, validated.state, None, None)
+            return AcceptanceResult(proposal_id, validated.state, None, None)
 
-        expected_versions = expected_versions or {}
         target_ids = proposal.target_memory_ids
+        persisted_target_rows = list(
+            (
+                await self._session.execute(
+                    select(
+                        memory_proposal_targets.c.target_memory_id,
+                        memory_proposal_targets.c.target_version_no_snapshot,
+                        memory_proposal_targets.c.target_role,
+                    )
+                    .where(
+                        memory_proposal_targets.c.proposal_id == proposal_id,
+                        memory_proposal_targets.c.account_id == proposal.account_id,
+                    )
+                    .order_by(memory_proposal_targets.c.target_memory_id)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        target_snapshots = {
+            cast(UUID, row["target_memory_id"]): cast(int, row["target_version_no_snapshot"])
+            for row in persisted_target_rows
+        }
+        target_roles = {
+            cast(UUID, row["target_memory_id"]): cast(str, row["target_role"])
+            for row in persisted_target_rows
+        }
+        expected_roles = {
+            target_id: _target_role(proposal.operation, index)
+            for index, target_id in enumerate(target_ids)
+        }
+        if (
+            len(target_snapshots) != len(target_ids)
+            or set(target_snapshots) != set(target_ids)
+            or target_roles != expected_roles
+        ):
+            raise MemoryConflictError("proposal target snapshot changed")
+        if expected_versions is not None and expected_versions != target_snapshots:
+            raise MemoryConflictError("caller target snapshot differs from recorded proposal")
+        persisted_evidence_rows = list(
+            (
+                await self._session.execute(
+                    select(
+                        memory_proposal_evidence.c.message_revision_id,
+                        memory_proposal_evidence.c.evidence_role,
+                        memory_proposal_evidence.c.quoted_span_start,
+                        memory_proposal_evidence.c.quoted_span_end,
+                        memory_proposal_evidence.c.source_content_sha256,
+                        memory_proposal_evidence.c.trust_class,
+                    )
+                    .where(
+                        memory_proposal_evidence.c.proposal_id == proposal_id,
+                        memory_proposal_evidence.c.account_id == proposal.account_id,
+                    )
+                    .order_by(
+                        memory_proposal_evidence.c.message_revision_id,
+                        memory_proposal_evidence.c.evidence_role,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        persisted_evidence = {
+            (
+                row["message_revision_id"],
+                row["evidence_role"],
+                row["quoted_span_start"],
+                row["quoted_span_end"],
+                row["source_content_sha256"],
+                row["trust_class"],
+            )
+            for row in persisted_evidence_rows
+        }
+        expected_evidence = {
+            (
+                evidence.source_id,
+                evidence.role.value,
+                evidence.span_start,
+                evidence.span_end,
+                evidence.source_content_sha256,
+                evidence.trust.value,
+            )
+            for evidence in proposal.evidence
+        }
+        if len(persisted_evidence_rows) != len(proposal.evidence) or (
+            persisted_evidence != expected_evidence
+        ):
+            raise MemoryConflictError("proposal evidence snapshot changed")
+        invalid_evidence = cast(
+            int,
+            await self._session.scalar(
+                select(func.count())
+                .select_from(
+                    memory_proposal_evidence.join(
+                        message_revisions,
+                        and_(
+                            message_revisions.c.id
+                            == memory_proposal_evidence.c.message_revision_id,
+                            message_revisions.c.account_id == memory_proposal_evidence.c.account_id,
+                        ),
+                    ).join(
+                        messages,
+                        and_(
+                            messages.c.id == message_revisions.c.message_id,
+                            messages.c.account_id == message_revisions.c.account_id,
+                        ),
+                    )
+                )
+                .where(
+                    memory_proposal_evidence.c.proposal_id == proposal_id,
+                    memory_proposal_evidence.c.account_id == proposal.account_id,
+                    or_(
+                        messages.c.conversation_id != proposal.conversation_id,
+                        messages.c.deleted_at.is_not(None),
+                        messages.c.is_tombstone.is_(True),
+                        messages.c.current_revision_no != message_revisions.c.revision_no,
+                        message_revisions.c.redacted_at.is_not(None),
+                        message_revisions.c.content_sha256.is_(None),
+                        message_revisions.c.content_sha256
+                        != memory_proposal_evidence.c.source_content_sha256,
+                    ),
+                )
+            ),
+        )
+        if invalid_evidence:
+            raise MemoryConflictError("proposal evidence changed before acceptance")
         target_rows = []
         if target_ids:
             target_rows = list(
@@ -851,7 +982,7 @@ class MemoryRepository:
         target_rows = [by_id[target_id] for target_id in target_ids]
         for target_id in target_ids:
             row = by_id[target_id]
-            expected = expected_versions.get(target_id, cast(int, row["current_version_no"]))
+            expected = target_snapshots[target_id]
             if row["current_version_no"] != expected or row["status"] != "active":
                 raise MemoryConflictError("target version changed before acceptance")
             if proposal.operation in {MemoryOperation.UPDATE, MemoryOperation.INVALIDATE} and (
@@ -993,7 +1124,7 @@ class MemoryRepository:
                 decided_at=current_time,
             )
         )
-        return AcceptanceResult(proposal.id, ProposalState.ACCEPTED, memory_id, version_id)
+        return AcceptanceResult(proposal_id, ProposalState.ACCEPTED, memory_id, version_id)
 
     async def publish_summary(  # noqa: PLR0912, PLR0913 - summary transitions are explicit
         self,
@@ -1554,13 +1685,13 @@ class MemoryRepository:
                 )
         return request_id
 
-    async def _proposal_row(self, proposal: Any) -> Any:
+    async def _proposal_row(self, recorded_proposal_id: UUID, proposal: Any) -> Any:
         row = (
             (
                 await self._session.execute(
                     select(memory_proposals)
                     .where(
-                        memory_proposals.c.id == proposal.id,
+                        memory_proposals.c.id == recorded_proposal_id,
                         memory_proposals.c.account_id == proposal.account_id,
                         memory_proposals.c.conversation_id == proposal.conversation_id,
                     )
@@ -1570,56 +1701,11 @@ class MemoryRepository:
             .mappings()
             .one_or_none()
         )
-        if row is not None:
-            return row
-        exact = (
-            (
-                await self._session.execute(
-                    select(memory_proposals)
-                    .where(
-                        memory_proposals.c.account_id == proposal.account_id,
-                        memory_proposals.c.conversation_id == proposal.conversation_id,
-                        memory_proposals.c.semantic_key_hash == proposal.semantic_key_hash,
-                        memory_proposals.c.operation == proposal.operation.value,
-                        memory_proposals.c.memory_type == proposal.memory_type.value,
-                        memory_proposals.c.proposed_payload == dict(proposal.payload),
-                        memory_proposals.c.proposed_text == proposal.rendered_text,
-                        memory_proposals.c.proposed_confidence == proposal.confidence,
-                        memory_proposals.c.proposed_importance == proposal.importance,
-                        memory_proposals.c.state.in_(
-                            ("received", "validating", "candidate", "accepted")
-                        ),
-                    )
-                    .order_by(memory_proposals.c.created_at.desc(), memory_proposals.c.id.desc())
-                    .limit(1)
-                    .with_for_update()
-                )
-            )
-            .mappings()
-            .one_or_none()
-        )
-        if exact is not None:
-            return exact
-        return (
-            (
-                await self._session.execute(
-                    select(memory_proposals)
-                    .where(
-                        memory_proposals.c.account_id == proposal.account_id,
-                        memory_proposals.c.conversation_id == proposal.conversation_id,
-                        memory_proposals.c.semantic_key_hash == proposal.semantic_key_hash,
-                        memory_proposals.c.state.in_(
-                            ("received", "validating", "candidate", "accepted")
-                        ),
-                    )
-                    .order_by(memory_proposals.c.created_at.desc(), memory_proposals.c.id.desc())
-                    .limit(1)
-                    .with_for_update()
-                )
-            )
-            .mappings()
-            .one_or_none()
-        )
+        if row is None:
+            return None
+        if not _proposal_matches(row, proposal):
+            raise ValueError("recorded proposal does not match validated proposal")
+        return row
 
     async def issue_review_action(  # noqa: PLR0913 - review token binding is explicit
         self,
@@ -1970,6 +2056,27 @@ def _proposal_storage_id(model_run_id: UUID, proposal_ordinal: int) -> UUID:
     if proposal_ordinal < 0:
         raise ValueError("proposal ordinal must be non-negative")
     return uuid5(model_run_id, f"memory-proposal:{proposal_ordinal}")
+
+
+def _proposal_matches(row: Any, proposal: Any) -> bool:
+    return all(
+        (
+            row["operation"] == proposal.operation.value,
+            row["memory_type"] == proposal.memory_type.value,
+            row["semantic_key_hash"] == proposal.semantic_key_hash,
+            row["proposed_payload"] == dict(proposal.payload),
+            row["proposed_text"] == proposal.rendered_text,
+            Decimal(row["proposed_confidence"]) == _numeric_score(proposal.confidence),
+            Decimal(row["proposed_importance"]) == _numeric_score(proposal.importance),
+            row["proposed_valid_from"] == proposal.valid_from,
+            row["proposed_valid_to"] == proposal.valid_to,
+            row["visual_only"] == proposal.visual_only,
+        )
+    )
+
+
+def _numeric_score(value: float) -> Decimal:
+    return Decimal(str(value)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
 def _summary_version_matches(
