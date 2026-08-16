@@ -307,6 +307,7 @@ def test_m7_budget_integrity_backfill_is_postgres_safe_and_idempotent() -> None:
     assert "FROM proactive_budget_reservations AS reservation_src" in migration
     assert "WHERE reservation.id = backfill.reservation_id" in migration
     assert ('_constraint(\n        "uq_proactive_budget_reservations_account_key",') in migration
+    assert "reservation_key is duplicated across accounts" in migration
 
 
 @pytest.mark.unit

@@ -960,7 +960,7 @@ async def test_proactive_decision_rejects_a_second_decision_for_terminal_candida
 
 
 @pytest.mark.asyncio
-async def test_budget_reaper_only_selects_candidate_states_that_prove_no_side_effect() -> None:
+async def test_budget_reaper_releases_expired_holds_without_tracked_side_effect() -> None:
     account_id = uuid4()
     reservation_key = b"z" * 32
     session = AsyncMock()
@@ -973,8 +973,9 @@ async def test_budget_reaper_only_selects_candidate_states_that_prove_no_side_ef
     assert await repo.reap_budget(now=NOW) == 1
     statement = session.execute.await_args.args[0]
     rendered = str(statement)
-    assert "JOIN proactive_candidates" in rendered
-    assert "proactive_candidates.state" in rendered
+    assert "JOIN proactive_candidates" not in rendered
+    assert "proactive_budget_reservations.outbound_group_id IS NULL" in rendered
+    assert "proactive_budget_reservations.copilot_draft_id IS NULL" in rendered
     repo.release_budget.assert_awaited_once_with(
         account_id=account_id,
         reservation_key=reservation_key,

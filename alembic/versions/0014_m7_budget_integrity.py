@@ -310,6 +310,16 @@ def downgrade() -> None:
         "ALTER TABLE proactive_budget_reservations DROP CONSTRAINT IF EXISTS "
         "uq_proactive_budget_reservations_account_key"
     )
+    # The old schema made reservation_key global, while 0014 scopes it per
+    # account.  Refuse the downgrade explicitly when newer valid data cannot
+    # fit the old key space; never merge or delete audit rows implicitly.
+    op.execute(
+        "DO $$ BEGIN "
+        "IF EXISTS (SELECT reservation_key FROM proactive_budget_reservations "
+        "GROUP BY reservation_key HAVING COUNT(*) > 1) THEN "
+        "RAISE EXCEPTION 'cannot downgrade M7: reservation_key is duplicated across accounts'; "
+        "END IF; END $$"
+    )
     op.execute(
         "ALTER TABLE proactive_budget_reservations ADD CONSTRAINT "
         "uq_proactive_budget_reservations_key UNIQUE (reservation_key)"

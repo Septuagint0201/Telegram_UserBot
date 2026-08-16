@@ -888,20 +888,16 @@ class ProactiveRepository:
                         proactive_budget_reservations.c.account_id,
                         proactive_budget_reservations.c.reservation_key,
                     )
-                    .join(
-                        proactive_candidates,
-                        (proactive_candidates.c.id == proactive_budget_reservations.c.candidate_id)
-                        & (
-                            proactive_candidates.c.account_id
-                            == proactive_budget_reservations.c.account_id
-                        ),
-                    )
                     .where(
                         proactive_budget_reservations.c.state == "held",
                         proactive_budget_reservations.c.expires_at <= current_time,
-                        proactive_candidates.c.state.in_(
-                            ("evaluated_none", "failed_model", "superseded", "expired")
-                        ),
+                        # The final gate atomically links a reservation before creating
+                        # a delivery group or COPILOT draft.  Null references therefore
+                        # prove that no tracked side effect exists; candidate state alone
+                        # is not a liveness-safe proxy and can strand expired holds while
+                        # a crashed worker left the candidate open/evaluating.
+                        proactive_budget_reservations.c.outbound_group_id.is_(None),
+                        proactive_budget_reservations.c.copilot_draft_id.is_(None),
                     )
                     .with_for_update(skip_locked=True)
                 )
