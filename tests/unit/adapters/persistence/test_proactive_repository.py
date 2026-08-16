@@ -421,6 +421,96 @@ async def test_proactive_persistence_success_paths_are_transaction_shaped() -> N
 
 
 @pytest.mark.asyncio
+async def test_proactive_decision_replay_rejects_non_accepted_decision() -> None:
+    account_id, candidate_id, contact_id, conversation_id, policy_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    candidate = cast(
+        Candidate,
+        SimpleNamespace(
+            id=candidate_id,
+            account_id=account_id,
+            contact_id=contact_id,
+            conversation_id=conversation_id,
+            candidate_key=b"c" * 32,
+            generation=1,
+            membership_hash=membership_digest(()),
+            occurrences=(),
+            window_start_at=NOW,
+            window_end_at=NOW + timedelta(hours=1),
+            policy_version_id=policy_id,
+            timezone_name="UTC",
+            mode_version=1,
+            content_revision=0,
+            activity_revision=0,
+        ),
+    )
+    decision = AgentDecision(
+        candidate_id,
+        ProactiveAction.NONE,
+        "not_natural_now",
+        (),
+        None,
+        0,
+    )
+    output_hash = b"o" * 32
+    decision_id = uuid5(candidate_id, f"proactive-decision:{output_hash.hex()}")
+    session = AsyncMock()
+    session.execute.side_effect = [
+        _Result(
+            {
+                "id": candidate_id,
+                "account_id": account_id,
+                "contact_id": contact_id,
+                "conversation_id": conversation_id,
+                "candidate_key": b"c" * 32,
+                "generation": 1,
+                "membership_hash": membership_digest(()),
+                "window_start_at": NOW,
+                "window_end_at": NOW + timedelta(hours=1),
+                "policy_version_id": policy_id,
+                "timezone_name": "UTC",
+                "mode_version": 1,
+                "content_revision": 0,
+                "activity_revision": 0,
+                "state": "open",
+            }
+        ),
+        _Result(
+            {
+                "id": decision_id,
+                "account_id": account_id,
+                "contact_id": contact_id,
+                "conversation_id": conversation_id,
+                "candidate_id": candidate_id,
+                "generation": 1,
+                "policy_version_id": policy_id,
+                "timezone_name": "UTC",
+                "action": decision.action.value,
+                "decision_code": decision.decision_code,
+                "topic": decision.topic,
+                "priority": decision.priority,
+                "defer_until": decision.defer_until,
+                "output_hash": output_hash,
+                "state": "stale",
+            }
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="decision replay"):
+        await ProactiveRepository(cast(AsyncSession, session)).record_decision(
+            candidate=candidate,
+            decision=decision,
+            output_hash=output_hash,
+            now=NOW,
+        )
+
+
+@pytest.mark.asyncio
 async def test_proactive_persistence_claim_updates_a_pending_job_with_a_lease() -> None:
     account_id, job_id, owner = uuid4(), uuid4(), uuid4()
     key = b"q" * 32
@@ -1297,6 +1387,7 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
                 "priority": decision.priority,
                 "defer_until": decision.defer_until,
                 "output_hash": output_hash,
+                "state": "accepted",
             }
         ),
     ]
@@ -1325,6 +1416,7 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
         "priority": decision.priority,
         "defer_until": decision.defer_until,
         "output_hash": output_hash,
+        "state": "accepted",
     }
     session.execute.side_effect = [
         _Result(

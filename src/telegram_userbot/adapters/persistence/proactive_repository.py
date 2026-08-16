@@ -1755,5 +1755,6 @@ def _decision_matches(
             "priority": decision.priority,
             "defer_until": decision.defer_until,
             "output_hash": output_hash,
+            "state": "accepted",
         }.items()
     )

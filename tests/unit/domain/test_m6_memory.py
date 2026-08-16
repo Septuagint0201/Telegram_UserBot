@@ -345,14 +345,41 @@ def test_embedding_shadow_activation_isolated_and_dimension_checked() -> None:
         targets=((empty_target_id, "memory_version", ""),),
     )
     assert not uncovered.verified
-    with pytest.raises(ValueError, match="content changed"):
-        manager.build(
-            empty,
-            profile_id=profile,
-            targets=((empty_target_id, "memory_version", "now populated"),),
-        )
+    recovered = manager.build(
+        empty,
+        profile_id=profile,
+        targets=((empty_target_id, "memory_version", "now populated"),),
+    )
+    assert recovered.verified
     with pytest.raises(ValueError, match="verification failed"):
         manager.activate(uncovered, profile_id=profile)
+
+
+def test_embedding_shadow_build_does_not_persist_an_invalid_batch() -> None:
+    class WrongDimensionProvider(FakeEmbeddingProvider):
+        def embed(self, text: str, *, dimensions: int) -> tuple[float, ...]:
+            return super().embed(text, dimensions=dimensions + 1)
+
+    manager = EmbeddingSpaceManager()
+    profile = uuid4()
+    shadow = manager.create_shadow(profile_id=profile, model_name="fake", dimensions=4)
+    target_id = uuid4()
+
+    failed = manager.build(
+        shadow,
+        profile_id=profile,
+        targets=((target_id, "memory_version", "stable fact"),),
+        provider=WrongDimensionProvider(),
+    )
+
+    assert not failed.verified
+    assert not manager.records
+    assert not manager.source_hashes
+    assert manager.build(
+        shadow,
+        profile_id=profile,
+        targets=((target_id, "memory_version", "stable fact"),),
+    ).verified
 
 
 def test_erasure_ledger_replays_without_reopening_derived_state_and_freshness_is_explicit() -> None:

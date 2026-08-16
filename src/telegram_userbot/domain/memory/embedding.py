@@ -173,15 +173,18 @@ class EmbeddingSpaceManager:
                             vector=vector,
                         )
                     )
-        for record in records:
-            self.records[
-                (record.space_id, record.target_kind, record.target_id, record.chunk_index)
-            ] = record
-        for target_key, source_hashes in target_manifests:
-            self.source_hashes[target_key] = source_hashes
         dimension_ok = all(len(record.vector) == space.dimensions for record in records)
         source_hashes_ok = all(len(record.source_sha256) == 32 for record in records)
         target_coverage_ok = len(covered_targets) == len(targets)
+        # Publish the whole batch only after it is internally verified, so a
+        # failed shadow build cannot poison a subsequent retry.
+        if dimension_ok and source_hashes_ok and target_coverage_ok:
+            for record in records:
+                self.records[
+                    (record.space_id, record.target_kind, record.target_id, record.chunk_index)
+                ] = record
+            for target_key, source_hashes in target_manifests:
+                self.source_hashes[target_key] = source_hashes
         return ShadowBuildResult(
             space,
             tuple(records),
