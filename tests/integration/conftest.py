@@ -105,6 +105,8 @@ def migrated_database(postgres_dsn: str) -> Iterator[str]:
         command.upgrade(config, "head")
         command.downgrade(config, "0008_m7_proactive_pipeline")
         command.upgrade(config, "head")
+        command.downgrade(config, "0009_m5_m6_account_scope")
+        command.upgrade(config, "head")
 
         sync_dsn = postgres_dsn.replace("postgresql+psycopg://", "postgresql://", 1)
         role_scripts = (

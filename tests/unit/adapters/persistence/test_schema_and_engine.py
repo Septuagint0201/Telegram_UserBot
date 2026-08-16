@@ -109,6 +109,21 @@ def test_m1_schema_inventory_and_constraint_names() -> None:
 
 
 @pytest.mark.unit
+def test_account_owned_foreign_keys_include_local_account_scope() -> None:
+    for table in metadata.tables.values():
+        if "account_id" not in table.c:
+            continue
+        for constraint in table.constraints:
+            if not isinstance(constraint, ForeignKeyConstraint):
+                continue
+            if "account_id" not in constraint.referred_table.c:
+                continue
+            assert "account_id" in constraint.column_keys, (
+                f"{table.name}.{constraint.name} omits local account_id"
+            )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("table", "foreign_key_name"),
     [
@@ -144,6 +159,7 @@ def test_m6_table_inventory_is_topological_for_downgrade() -> None:
         for migration in (
             "0007_m6_memory_pipeline.py",
             "0009_m5_m6_account_scope_constraints.py",
+            "0010_account_scope_refs.py",
         )
     )
     for table_name in M6_TABLES:
@@ -222,6 +238,22 @@ def test_m5_m6_scope_downgrade_keeps_candidate_keys_for_partial_round_trips() ->
 
     assert '("media_objects", "uq_media_objects_id_account")' not in downgrade
     assert '("model_runs", "uq_model_runs_id_account_role")' not in downgrade
+
+
+@pytest.mark.unit
+def test_remaining_scope_migration_is_postgres_safe_and_reversible() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0010_account_scope_refs.py"
+    ).read_text(encoding="utf-8")
+    constraint_names = re.findall(r'"((?:fk|uq)_[^"]+)"', migration)
+    downgrade = migration[migration.index("def downgrade() -> None:") :]
+
+    assert constraint_names
+    assert all(len(name) <= 63 for name in constraint_names)
+    assert '"fk_context_preview_requests_control_command_id_control_commands"' in downgrade
+    assert '"fk_embedding_records_space_dimensions"' in downgrade
+    assert '("message_events", "uq_message_events_id_account")' not in downgrade
+    assert '("embedding_spaces", "uq_embedding_spaces_account_dimensions")' not in downgrade
 
 
 @pytest.mark.unit

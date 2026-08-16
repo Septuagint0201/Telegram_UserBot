@@ -212,6 +212,13 @@ message_events = Table(
         "update_fingerprint",
         name="uq_message_events_fingerprint",
     ),
+    UniqueConstraint("id", "account_id", name="uq_message_events_id_account"),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        name="uq_message_events_full_scope",
+    ),
 )
 Index("ix_message_events_conversation_id", message_events.c.conversation_id, message_events.c.id)
 
@@ -298,12 +305,7 @@ message_revisions = Table(
     Column("entities_schema_version", SmallInteger, nullable=False),
     Column("entities", JSONB),
     Column("content_sha256", LargeBinary),
-    Column(
-        "source_event_id",
-        BigInteger,
-        ForeignKey("message_events.id", name="fk_message_revisions_source_event"),
-        nullable=False,
-    ),
+    Column("source_event_id", BigInteger, nullable=False),
     Column("telegram_edited_at", UTC_TIMESTAMP),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     Column("redacted_at", UTC_TIMESTAMP),
@@ -312,6 +314,11 @@ message_revisions = Table(
         ["message_id", "account_id"],
         ["messages.id", "messages.account_id"],
         name="fk_message_revisions_message_scope",
+    ),
+    ForeignKeyConstraint(
+        ["source_event_id", "account_id"],
+        ["message_events.id", "message_events.account_id"],
+        name="fk_message_revisions_source_event_scope",
     ),
     CheckConstraint("revision_no >= 1", name="revision_positive"),
     CheckConstraint(
@@ -379,7 +386,7 @@ media_objects = Table(
     Column("byte_size", BigInteger),
     Column("width", Integer),
     Column("height", Integer),
-    Column("parent_object_id", UUID_TYPE, ForeignKey("media_objects.id")),
+    Column("parent_object_id", UUID_TYPE),
     Column("validation_error_code", Text),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     Column("ready_at", UTC_TIMESTAMP),
@@ -387,6 +394,11 @@ media_objects = Table(
     Column("deleted_at", UTC_TIMESTAMP),
     Column("retention_class", Text, nullable=False),
     Column("expires_at", UTC_TIMESTAMP),
+    ForeignKeyConstraint(
+        ["parent_object_id", "account_id"],
+        ["media_objects.id", "media_objects.account_id"],
+        name="fk_media_objects_parent_scope",
+    ),
     UniqueConstraint("id", "account_id", name="uq_media_objects_id_account"),
     CheckConstraint("object_kind IN ('original','provider_copy')", name="object_kind_values"),
     CheckConstraint(
@@ -418,7 +430,7 @@ message_media = Table(
     Column("id", UUID_TYPE, primary_key=True),
     Column("account_id", UUID_TYPE, nullable=False),
     Column("message_revision_id", UUID_TYPE, nullable=False),
-    Column("media_object_id", UUID_TYPE, ForeignKey("media_objects.id")),
+    Column("media_object_id", UUID_TYPE),
     Column("media_kind", Text, nullable=False),
     Column("position", Integer, nullable=False),
     Column("telegram_file_ref", Text),
@@ -433,6 +445,11 @@ message_media = Table(
         ["message_revision_id", "account_id"],
         ["message_revisions.id", "message_revisions.account_id"],
         name="fk_message_media_revision_scope",
+    ),
+    ForeignKeyConstraint(
+        ["media_object_id", "account_id"],
+        ["media_objects.id", "media_objects.account_id"],
+        name="fk_message_media_object_scope",
     ),
     CheckConstraint(
         "media_kind IN ('photo','image_document','voice','audio','video','video_note',"
@@ -563,7 +580,7 @@ conversation_turns = Table(
     Column("conversation_id", UUID_TYPE, nullable=False),
     Column("state", Text, nullable=False),
     Column("trigger_kind", Text, nullable=False),
-    Column("supersedes_turn_id", UUID_TYPE, ForeignKey("conversation_turns.id")),
+    Column("supersedes_turn_id", UUID_TYPE),
     Column("collection_sequence", BigInteger, nullable=False),
     Column("active_generation_no", Integer, nullable=False, server_default=text("0")),
     Column("base_mode_snapshot", Text),
@@ -590,6 +607,15 @@ conversation_turns = Table(
         ["conversation_id", "account_id"],
         ["conversations.id", "conversations.account_id"],
         name="fk_conversation_turns_scope",
+    ),
+    ForeignKeyConstraint(
+        ["supersedes_turn_id", "account_id", "conversation_id"],
+        [
+            "conversation_turns.id",
+            "conversation_turns.account_id",
+            "conversation_turns.conversation_id",
+        ],
+        name="fk_conversation_turns_supersedes_scope",
     ),
     CheckConstraint(
         "state IN ('collecting','ready','generating','output_ready','superseded',"
@@ -679,6 +705,7 @@ background_jobs = Table(
         name="lease_matches_state",
     ),
     UniqueConstraint("queue_name", "idempotency_key", name="uq_background_jobs_idempotency"),
+    UniqueConstraint("id", "account_id", name="uq_background_jobs_id_account"),
 )
 Index(
     "ix_background_jobs_claim",
@@ -1598,7 +1625,9 @@ turn_messages = Table(
         name="fk_turn_messages_revision_scope",
     ),
     ForeignKeyConstraint(
-        ["source_event_id"], ["message_events.id"], name="fk_turn_messages_source_event"
+        ["source_event_id", "account_id", "conversation_id"],
+        ["message_events.id", "message_events.account_id", "message_events.conversation_id"],
+        name="fk_turn_messages_source_event_scope",
     ),
     PrimaryKeyConstraint("turn_id", "message_id", name="pk_turn_messages"),
     CheckConstraint("message_revision_no > 0", name="message_revision_positive"),
@@ -2063,6 +2092,7 @@ control_commands = Table(
     ),
     UniqueConstraint("bot_identity", "telegram_update_id", name="uq_control_commands_bot_update"),
     UniqueConstraint("account_id", "idempotency_key", name="uq_control_commands_idempotency"),
+    UniqueConstraint("id", "account_id", name="uq_control_commands_id_account"),
 )
 
 M4_TABLES = tuple(
@@ -2263,7 +2293,9 @@ context_manifests = Table(
         name="fk_context_manifests_turn_scope",
     ),
     ForeignKeyConstraint(
-        ["background_job_id"], ["background_jobs.id"], name="fk_context_manifests_job"
+        ["background_job_id", "account_id"],
+        ["background_jobs.id", "background_jobs.account_id"],
+        name="fk_context_manifests_job_scope",
     ),
     ForeignKeyConstraint(
         ["context_policy_version_id"],
@@ -2478,7 +2510,7 @@ context_preview_requests = Table(
     "context_preview_requests",
     metadata,
     Column("id", UUID_TYPE, primary_key=True),
-    Column("control_command_id", UUID_TYPE, ForeignKey("control_commands.id"), unique=True),
+    Column("control_command_id", UUID_TYPE, unique=True),
     Column("bot_identity", Text, nullable=False),
     Column("admin_user_id", BigInteger, nullable=False),
     Column("bot_chat_id", BigInteger, nullable=False),
@@ -2509,6 +2541,11 @@ context_preview_requests = Table(
         ["context_manifest_id", "account_id"],
         ["context_manifests.id", "context_manifests.account_id"],
         name="fk_context_preview_requests_manifest_scope",
+    ),
+    ForeignKeyConstraint(
+        ["control_command_id", "account_id"],
+        ["control_commands.id", "control_commands.account_id"],
+        name="fk_context_preview_requests_control_scope",
     ),
     CheckConstraint(
         "state IN ('pending_confirmation','confirmed','delivering','delivered','send_unknown',"
@@ -2647,7 +2684,9 @@ memory_jobs = Table(
         name="fk_memory_jobs_conversation_scope",
     ),
     ForeignKeyConstraint(
-        ["background_job_id"], ["background_jobs.id"], name="fk_memory_jobs_background_job"
+        ["background_job_id", "account_id"],
+        ["background_jobs.id", "background_jobs.account_id"],
+        name="fk_memory_jobs_background_job_scope",
     ),
     CheckConstraint(
         "job_kind IN ('episode','rolling_summary','consolidation','reconciliation')",
@@ -2992,12 +3031,22 @@ memory_versions = Table(
         name="acceptance_values",
     ),
     UniqueConstraint("memory_id", "version_no", name="uq_memory_versions_no"),
+    UniqueConstraint(
+        "memory_id",
+        "account_id",
+        "version_no",
+        name="uq_memory_versions_account_no",
+    ),
     UniqueConstraint("id", "account_id", name="uq_memory_versions_id_account"),
 )
 memories.append_constraint(
     ForeignKeyConstraint(
-        ["id", "current_version_no"],
-        ["memory_versions.memory_id", "memory_versions.version_no"],
+        ["id", "account_id", "current_version_no"],
+        [
+            "memory_versions.memory_id",
+            "memory_versions.account_id",
+            "memory_versions.version_no",
+        ],
         name="fk_memories_current_version",
         use_alter=True,
         deferrable=True,
@@ -3337,13 +3386,20 @@ summary_versions = Table(
     ),
     CheckConstraint("octet_length(manifest_sha256) = 32", name="manifest_hash_32_bytes"),
     UniqueConstraint("summary_id", "version_no", name="uq_summary_versions_no"),
+    UniqueConstraint(
+        "summary_id",
+        "account_id",
+        "version_no",
+        name="uq_summary_versions_account_no",
+    ),
     UniqueConstraint("id", "account_id", name="uq_summary_versions_id_account"),
 )
 summaries.append_constraint(
     ForeignKeyConstraint(
-        ["id", "current_version_no"],
+        ["id", "account_id", "current_version_no"],
         [
             "summary_versions.summary_id",
+            "summary_versions.account_id",
             "summary_versions.version_no",
         ],
         name="fk_summaries_current_version",
@@ -3469,6 +3525,12 @@ embedding_spaces = Table(
     CheckConstraint("normalization IN ('none','l2')", name="normalization_values"),
     CheckConstraint("state IN ('building','active','retired','failed')", name="state_values"),
     UniqueConstraint("id", "dimensions", name="uq_embedding_spaces_id_dimensions"),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "dimensions",
+        name="uq_embedding_spaces_account_dimensions",
+    ),
 )
 Index(
     "uq_embedding_spaces_active",
@@ -3498,9 +3560,9 @@ embedding_records = Table(
     Column("invalidated_at", UTC_TIMESTAMP),
     ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_embedding_records_account"),
     ForeignKeyConstraint(
-        ["embedding_space_id", "dimensions"],
-        ["embedding_spaces.id", "embedding_spaces.dimensions"],
-        name="fk_embedding_records_space_dimensions",
+        ["embedding_space_id", "account_id", "dimensions"],
+        ["embedding_spaces.id", "embedding_spaces.account_id", "embedding_spaces.dimensions"],
+        name="fk_embedding_records_space_scope",
     ),
     ForeignKeyConstraint(
         ["memory_version_id", "account_id"],

@@ -653,9 +653,11 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                 (
                     "alembic/versions/0007_m6_memory_pipeline.py",
                     "alembic/versions/0009_m5_m6_account_scope_constraints.py",
+                    "alembic/versions/0010_account_scope_refs.py",
                     "deploy/postgres/m6_roles.sql",
                     "docs/compatibility/m6.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
+                    "tests/integration/test_account_scope_references.py",
                     "TODO.md",
                     "docs/Implementation-Plan.md",
                 ),
@@ -664,6 +666,8 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "test_m6_roles_keep_control_out_of_derived_truth_and_allow_review_commands",
                     "tests.integration.test_m6_account_scope_constraints::"
                     "test_m5_m6_cross_account_references_are_rejected",
+                    "tests.integration.test_account_scope_references::"
+                    "test_remaining_account_owned_references_reject_cross_scope",
                     "tests.unit.test_m6_documentation_status::"
                     "test_m6_status_documents_are_consistent",
                 ),
@@ -769,9 +773,11 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                 (
                     "alembic/versions/0008_m7_proactive_pipeline.py",
                     "alembic/versions/0009_m5_m6_account_scope_constraints.py",
+                    "alembic/versions/0010_account_scope_refs.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
+                    "tests/integration/test_account_scope_references.py",
                     "TODO.md",
                     "docs/Implementation-Plan.md",
                 ),
@@ -779,6 +785,8 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "tests.integration.test_m7_proactive_pipeline::test_m7_schema_inventory_constraints_and_head",
                     "tests.integration.test_m6_account_scope_constraints::"
                     "test_m5_m6_cross_account_references_are_rejected",
+                    "tests.integration.test_account_scope_references::"
+                    "test_remaining_account_owned_references_reject_cross_scope",
                     "tests.unit.test_m7_documentation_status::test_m7_status_documents_are_consistent",
                 ),
             ),

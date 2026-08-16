@@ -15,7 +15,7 @@ def test_m7_status_documents_are_consistent() -> None:
     disclosure = (ROOT / "DISCLOSURE").read_text(encoding="utf-8")
 
     assert "M7-001" in todo
-    assert "0009_m5_m6_account_scope" in compatibility
+    assert "0010_account_scope_refs" in compatibility
     assert "M7" in plan
     assert "M7" in readme
     assert "M7" in design
