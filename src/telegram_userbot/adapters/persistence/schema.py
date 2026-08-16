@@ -387,6 +387,7 @@ media_objects = Table(
     Column("deleted_at", UTC_TIMESTAMP),
     Column("retention_class", Text, nullable=False),
     Column("expires_at", UTC_TIMESTAMP),
+    UniqueConstraint("id", "account_id", name="uq_media_objects_id_account"),
     CheckConstraint("object_kind IN ('original','provider_copy')", name="object_kind_values"),
     CheckConstraint(
         "status IN ('pending','ready','rejected','delete_pending','deleted','failed')",
@@ -1706,6 +1707,7 @@ model_runs = Table(
         "logical_role",
         name="uq_model_runs_turn_role_scope",
     ),
+    UniqueConstraint("id", "account_id", "logical_role", name="uq_model_runs_id_account_role"),
 )
 Index(
     "uq_model_runs_turn_generation",
@@ -2329,7 +2331,8 @@ context_manifest_items = Table(
     "context_manifest_items",
     metadata,
     Column("id", BigInteger, Identity(), primary_key=True),
-    Column("manifest_id", UUID_TYPE, ForeignKey("context_manifests.id"), nullable=False),
+    Column("manifest_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
     Column("ordinal", Integer, nullable=False),
     Column("layer", Text, nullable=False),
     Column("canonical_role", Text, nullable=False),
@@ -2338,8 +2341,8 @@ context_manifest_items = Table(
     Column("source_id", UUID_TYPE, nullable=False),
     Column("source_revision", Text, nullable=False),
     Column("prompt_version_id", UUID_TYPE, ForeignKey("prompt_versions.id")),
-    Column("message_revision_id", UUID_TYPE, ForeignKey("message_revisions.id")),
-    Column("media_object_id", UUID_TYPE, ForeignKey("media_objects.id")),
+    Column("message_revision_id", UUID_TYPE),
+    Column("media_object_id", UUID_TYPE),
     # M6 adds the foreign keys after the derived-source tables exist.
     Column("memory_version_id", UUID_TYPE),
     Column("summary_version_id", UUID_TYPE),
@@ -2422,6 +2425,21 @@ context_manifest_items = Table(
         name="content_hashes_32_bytes",
     ),
     UniqueConstraint("manifest_id", "ordinal", name="uq_context_manifest_items_ordinal"),
+    ForeignKeyConstraint(
+        ["manifest_id", "account_id"],
+        ["context_manifests.id", "context_manifests.account_id"],
+        name="fk_context_manifest_items_manifest_scope",
+    ),
+    ForeignKeyConstraint(
+        ["message_revision_id", "account_id"],
+        ["message_revisions.id", "message_revisions.account_id"],
+        name="fk_context_manifest_items_message_revision_scope",
+    ),
+    ForeignKeyConstraint(
+        ["media_object_id", "account_id"],
+        ["media_objects.id", "media_objects.account_id"],
+        name="fk_context_manifest_items_media_scope",
+    ),
 )
 
 context_manifest_item_reasons = Table(
@@ -2466,7 +2484,7 @@ context_preview_requests = Table(
     Column("bot_chat_id", BigInteger, nullable=False),
     Column("account_id", UUID_TYPE, nullable=False),
     Column("conversation_id", UUID_TYPE, nullable=False),
-    Column("context_manifest_id", UUID_TYPE, ForeignKey("context_manifests.id"), nullable=False),
+    Column("context_manifest_id", UUID_TYPE, nullable=False),
     Column("manifest_sha256", LargeBinary, nullable=False),
     Column("source_revision_vector_sha256", LargeBinary, nullable=False),
     Column("state", Text, nullable=False),
@@ -2486,6 +2504,11 @@ context_preview_requests = Table(
         ["conversation_id", "account_id"],
         ["conversations.id", "conversations.account_id"],
         name="fk_context_preview_requests_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["context_manifest_id", "account_id"],
+        ["context_manifests.id", "context_manifests.account_id"],
+        name="fk_context_preview_requests_manifest_scope",
     ),
     CheckConstraint(
         "state IN ('pending_confirmation','confirmed','delivering','delivered','send_unknown',"
@@ -2659,6 +2682,7 @@ memory_jobs = Table(
     ),
     UniqueConstraint("account_id", "idempotency_key", name="uq_memory_jobs_idempotency"),
     UniqueConstraint("conversation_id", "job_kind", "generation", name="uq_memory_jobs_generation"),
+    UniqueConstraint("id", "account_id", name="uq_memory_jobs_id_account"),
 )
 Index(
     "ix_memory_jobs_pending_due",
@@ -2707,7 +2731,9 @@ memory_input_manifests = Table(
         name="fk_memory_input_manifests_conversation_scope",
     ),
     ForeignKeyConstraint(
-        ["memory_job_id"], ["memory_jobs.id"], name="fk_memory_input_manifests_job"
+        ["memory_job_id", "account_id"],
+        ["memory_jobs.id", "memory_jobs.account_id"],
+        name="fk_memory_input_manifests_job_scope",
     ),
     ForeignKeyConstraint(
         ["model_config_version_id"],
@@ -2733,6 +2759,7 @@ memory_input_manifests = Table(
     ),
     CheckConstraint("octet_length(manifest_sha256) = 32", name="manifest_hash_32_bytes"),
     UniqueConstraint("memory_job_id", "generation", name="uq_memory_input_manifests_generation"),
+    UniqueConstraint("id", "account_id", name="uq_memory_input_manifests_id_account"),
     UniqueConstraint(
         "account_id",
         "manifest_sha256",
@@ -2744,9 +2771,9 @@ memory_input_manifests = Table(
 )
 memory_jobs.append_constraint(
     ForeignKeyConstraint(
-        ["input_manifest_id"],
-        ["memory_input_manifests.id"],
-        name="fk_memory_jobs_input_manifest",
+        ["input_manifest_id", "account_id"],
+        ["memory_input_manifests.id", "memory_input_manifests.account_id"],
+        name="fk_memory_jobs_input_manifest_scope",
         use_alter=True,
         deferrable=True,
         initially="DEFERRED",
@@ -2758,6 +2785,7 @@ memory_input_manifest_items = Table(
     metadata,
     Column("id", BigInteger, Identity(), primary_key=True),
     Column("manifest_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
     Column("ordinal", Integer, nullable=False),
     Column("source_type", Text, nullable=False),
     Column("message_revision_id", UUID_TYPE),
@@ -2769,15 +2797,19 @@ memory_input_manifest_items = Table(
     Column("source_content_sha256", LargeBinary, nullable=False),
     Column("selection_reason_code", Text, nullable=False),
     ForeignKeyConstraint(
-        ["manifest_id"], ["memory_input_manifests.id"], name="fk_memory_manifest_items_manifest"
+        ["manifest_id", "account_id"],
+        ["memory_input_manifests.id", "memory_input_manifests.account_id"],
+        name="fk_memory_manifest_items_manifest_scope",
     ),
     ForeignKeyConstraint(
-        ["message_revision_id"],
-        ["message_revisions.id"],
-        name="fk_memory_manifest_items_message_revision",
+        ["message_revision_id", "account_id"],
+        ["message_revisions.id", "message_revisions.account_id"],
+        name="fk_memory_manifest_items_message_revision_scope",
     ),
     ForeignKeyConstraint(
-        ["media_object_id"], ["media_objects.id"], name="fk_memory_manifest_items_media"
+        ["media_object_id", "account_id"],
+        ["media_objects.id", "media_objects.account_id"],
+        name="fk_memory_manifest_items_media_scope",
     ),
     CheckConstraint("ordinal > 0", name="ordinal_positive"),
     CheckConstraint(
@@ -2834,7 +2866,9 @@ memory_watermarks = Table(
         name="fk_memory_watermarks_conversation_scope",
     ),
     ForeignKeyConstraint(
-        ["last_succeeded_job_id"], ["memory_jobs.id"], name="fk_memory_watermarks_job"
+        ["last_succeeded_job_id", "account_id"],
+        ["memory_jobs.id", "memory_jobs.account_id"],
+        name="fk_memory_watermarks_job_scope",
     ),
     CheckConstraint("watermark_kind IN ('episode','reconciliation')", name="kind_values"),
     CheckConstraint(
@@ -2929,7 +2963,11 @@ memory_versions = Table(
         ["memories.id", "memories.account_id"],
         name="fk_memory_versions_memory_scope",
     ),
-    ForeignKeyConstraint(["model_run_id"], ["model_runs.id"], name="fk_memory_versions_model_run"),
+    ForeignKeyConstraint(
+        ["model_run_id", "account_id", "model_role"],
+        ["model_runs.id", "model_runs.account_id", "model_runs.logical_role"],
+        name="fk_memory_versions_model_run_scope",
+    ),
     CheckConstraint(
         "operation IN ('create','update','merge','supersede','invalidate')", name="operation_values"
     ),
@@ -3002,12 +3040,30 @@ memory_proposals = Table(
     Column("retention_class", Text, nullable=False),
     Column("expires_at", UTC_TIMESTAMP),
     ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_proposals_account"),
-    ForeignKeyConstraint(["memory_job_id"], ["memory_jobs.id"], name="fk_memory_proposals_job"),
-    ForeignKeyConstraint(["model_run_id"], ["model_runs.id"], name="fk_memory_proposals_model_run"),
     ForeignKeyConstraint(
-        ["accepted_memory_version_id"],
-        ["memory_versions.id"],
-        name="fk_memory_proposals_accepted_version",
+        ["contact_id", "account_id"],
+        ["contacts.id", "contacts.account_id"],
+        name="fk_memory_proposals_contact_scope",
+    ),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_memory_proposals_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["memory_job_id", "account_id"],
+        ["memory_jobs.id", "memory_jobs.account_id"],
+        name="fk_memory_proposals_job_scope",
+    ),
+    ForeignKeyConstraint(
+        ["model_run_id", "account_id", "model_role"],
+        ["model_runs.id", "model_runs.account_id", "model_runs.logical_role"],
+        name="fk_memory_proposals_model_run_scope",
+    ),
+    ForeignKeyConstraint(
+        ["accepted_memory_version_id", "account_id"],
+        ["memory_versions.id", "memory_versions.account_id"],
+        name="fk_memory_proposals_accepted_version_scope",
     ),
     CheckConstraint("model_role = 'memory_agent'", name="model_role_values"),
     CheckConstraint("proposal_ordinal >= 0", name="proposal_ordinal_nonnegative"),
@@ -3034,6 +3090,7 @@ memory_proposals = Table(
     ),
     UniqueConstraint("account_id", "idempotency_key", name="uq_memory_proposals_idempotency"),
     UniqueConstraint("model_run_id", "proposal_ordinal", name="uq_memory_proposals_run_ordinal"),
+    UniqueConstraint("id", "account_id", name="uq_memory_proposals_id_account"),
 )
 Index(
     "ix_memory_proposals_state_expires",
@@ -3054,7 +3111,9 @@ memory_proposal_targets = Table(
         "proposal_id", "target_memory_id", "target_role", name="pk_memory_proposal_targets"
     ),
     ForeignKeyConstraint(
-        ["proposal_id"], ["memory_proposals.id"], name="fk_memory_proposal_targets_proposal"
+        ["proposal_id", "account_id"],
+        ["memory_proposals.id", "memory_proposals.account_id"],
+        name="fk_memory_proposal_targets_proposal_scope",
     ),
     ForeignKeyConstraint(
         ["target_memory_id", "account_id"],
@@ -3087,15 +3146,19 @@ memory_proposal_evidence = Table(
         "proposal_id", "message_revision_id", "evidence_role", name="pk_memory_proposal_evidence"
     ),
     ForeignKeyConstraint(
-        ["proposal_id"], ["memory_proposals.id"], name="fk_memory_proposal_evidence_proposal"
+        ["proposal_id", "account_id"],
+        ["memory_proposals.id", "memory_proposals.account_id"],
+        name="fk_memory_proposal_evidence_proposal_scope",
     ),
     ForeignKeyConstraint(
-        ["message_revision_id"],
-        ["message_revisions.id"],
-        name="fk_memory_proposal_evidence_revision",
+        ["message_revision_id", "account_id"],
+        ["message_revisions.id", "message_revisions.account_id"],
+        name="fk_memory_proposal_evidence_revision_scope",
     ),
     ForeignKeyConstraint(
-        ["media_object_id"], ["media_objects.id"], name="fk_memory_proposal_evidence_media"
+        ["media_object_id", "account_id"],
+        ["media_objects.id", "media_objects.account_id"],
+        name="fk_memory_proposal_evidence_media_scope",
     ),
     CheckConstraint(
         "quoted_span_start IS NULL OR quoted_span_start >= 0", name="span_start_nonnegative"
@@ -3124,19 +3187,29 @@ memory_evidence = Table(
         "memory_version_id", "evidence_role", "source_content_sha256", name="pk_memory_evidence"
     ),
     ForeignKeyConstraint(
-        ["memory_version_id"], ["memory_versions.id"], name="fk_memory_evidence_version"
+        ["memory_version_id", "account_id"],
+        ["memory_versions.id", "memory_versions.account_id"],
+        name="fk_memory_evidence_version_scope",
     ),
     ForeignKeyConstraint(
-        ["message_revision_id"], ["message_revisions.id"], name="fk_memory_evidence_revision"
+        ["message_revision_id", "account_id"],
+        ["message_revisions.id", "message_revisions.account_id"],
+        name="fk_memory_evidence_revision_scope",
     ),
     ForeignKeyConstraint(
-        ["summary_version_id"], ["summary_versions.id"], name="fk_memory_evidence_summary"
+        ["summary_version_id", "account_id"],
+        ["summary_versions.id", "summary_versions.account_id"],
+        name="fk_memory_evidence_summary_scope",
     ),
     ForeignKeyConstraint(
-        ["other_memory_version_id"], ["memory_versions.id"], name="fk_memory_evidence_other_version"
+        ["other_memory_version_id", "account_id"],
+        ["memory_versions.id", "memory_versions.account_id"],
+        name="fk_memory_evidence_other_version_scope",
     ),
     ForeignKeyConstraint(
-        ["media_object_id"], ["media_objects.id"], name="fk_memory_evidence_media"
+        ["media_object_id", "account_id"],
+        ["media_objects.id", "media_objects.account_id"],
+        name="fk_memory_evidence_media_scope",
     ),
     CheckConstraint(
         "num_nonnulls(message_revision_id, summary_version_id, other_memory_version_id) = 1",
@@ -3163,15 +3236,22 @@ memory_relations = Table(
     metadata,
     Column("from_version_id", UUID_TYPE, nullable=False),
     Column("to_version_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
     Column("relation_type", Text, nullable=False),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     PrimaryKeyConstraint(
         "from_version_id", "to_version_id", "relation_type", name="pk_memory_relations"
     ),
     ForeignKeyConstraint(
-        ["from_version_id"], ["memory_versions.id"], name="fk_memory_relations_from"
+        ["from_version_id", "account_id"],
+        ["memory_versions.id", "memory_versions.account_id"],
+        name="fk_memory_relations_from_scope",
     ),
-    ForeignKeyConstraint(["to_version_id"], ["memory_versions.id"], name="fk_memory_relations_to"),
+    ForeignKeyConstraint(
+        ["to_version_id", "account_id"],
+        ["memory_versions.id", "memory_versions.account_id"],
+        name="fk_memory_relations_to_scope",
+    ),
     CheckConstraint("from_version_id <> to_version_id", name="not_self_relation"),
     CheckConstraint(
         "relation_type IN ('supports','contradicts','derived_from','merges','supersedes')",
@@ -3238,7 +3318,11 @@ summary_versions = Table(
         ["summaries.id", "summaries.account_id"],
         name="fk_summary_versions_summary_scope",
     ),
-    ForeignKeyConstraint(["model_run_id"], ["model_runs.id"], name="fk_summary_versions_model_run"),
+    ForeignKeyConstraint(
+        ["model_run_id", "account_id", "model_role"],
+        ["model_runs.id", "model_runs.account_id", "model_runs.logical_role"],
+        name="fk_summary_versions_model_run_scope",
+    ),
     CheckConstraint(
         "version_no > 0 AND range_end_event_id >= range_start_event_id", name="version_range_values"
     ),
@@ -3287,10 +3371,14 @@ summary_version_sources = Table(
         name="fk_summary_sources_version_scope",
     ),
     ForeignKeyConstraint(
-        ["message_revision_id"], ["message_revisions.id"], name="fk_summary_sources_revision"
+        ["message_revision_id", "account_id"],
+        ["message_revisions.id", "message_revisions.account_id"],
+        name="fk_summary_sources_revision_scope",
     ),
     ForeignKeyConstraint(
-        ["prior_summary_version_id"], ["summary_versions.id"], name="fk_summary_sources_prior"
+        ["prior_summary_version_id", "account_id"],
+        ["summary_versions.id", "summary_versions.account_id"],
+        name="fk_summary_sources_prior_scope",
     ),
     CheckConstraint(
         "num_nonnulls(message_revision_id, prior_summary_version_id) = 1", name="exactly_one_source"
@@ -3319,7 +3407,9 @@ summary_watermarks = Table(
         name="fk_summary_watermarks_conversation_scope",
     ),
     ForeignKeyConstraint(
-        ["last_summary_version_id"], ["summary_versions.id"], name="fk_summary_watermarks_version"
+        ["last_summary_version_id", "account_id"],
+        ["summary_versions.id", "summary_versions.account_id"],
+        name="fk_summary_watermarks_version_scope",
     ),
     CheckConstraint(
         "summary_kind IN ('rolling','daily','weekly','consolidated')", name="kind_values"
@@ -3329,17 +3419,17 @@ summary_watermarks = Table(
 
 memory_input_manifest_items.append_constraint(
     ForeignKeyConstraint(
-        ["memory_version_id"],
-        ["memory_versions.id"],
-        name="fk_memory_manifest_items_memory_version",
+        ["memory_version_id", "account_id"],
+        ["memory_versions.id", "memory_versions.account_id"],
+        name="fk_memory_manifest_items_memory_version_scope",
         use_alter=True,
     )
 )
 memory_input_manifest_items.append_constraint(
     ForeignKeyConstraint(
-        ["summary_version_id"],
-        ["summary_versions.id"],
-        name="fk_memory_manifest_items_summary_version",
+        ["summary_version_id", "account_id"],
+        ["summary_versions.id", "summary_versions.account_id"],
+        name="fk_memory_manifest_items_summary_version_scope",
         use_alter=True,
     )
 )
@@ -3393,7 +3483,7 @@ embedding_records = Table(
     "embedding_records",
     metadata,
     Column("id", UUID_TYPE, primary_key=True),
-    Column("account_id", UUID_TYPE),
+    Column("account_id", UUID_TYPE, nullable=False),
     Column("embedding_space_id", UUID_TYPE, nullable=False),
     Column("memory_version_id", UUID_TYPE),
     Column("summary_version_id", UUID_TYPE),
@@ -3413,15 +3503,19 @@ embedding_records = Table(
         name="fk_embedding_records_space_dimensions",
     ),
     ForeignKeyConstraint(
-        ["memory_version_id"], ["memory_versions.id"], name="fk_embedding_records_memory_version"
+        ["memory_version_id", "account_id"],
+        ["memory_versions.id", "memory_versions.account_id"],
+        name="fk_embedding_records_memory_version_scope",
     ),
     ForeignKeyConstraint(
-        ["summary_version_id"], ["summary_versions.id"], name="fk_embedding_records_summary_version"
+        ["summary_version_id", "account_id"],
+        ["summary_versions.id", "summary_versions.account_id"],
+        name="fk_embedding_records_summary_version_scope",
     ),
     ForeignKeyConstraint(
-        ["message_revision_id"],
-        ["message_revisions.id"],
-        name="fk_embedding_records_message_revision",
+        ["message_revision_id", "account_id"],
+        ["message_revisions.id", "message_revisions.account_id"],
+        name="fk_embedding_records_message_revision_scope",
     ),
     CheckConstraint(
         "num_nonnulls(memory_version_id, summary_version_id, message_revision_id) = 1",
@@ -3484,9 +3578,20 @@ memory_review_actions = Table(
     Column("decided_at", UTC_TIMESTAMP),
     ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_review_actions_account"),
     ForeignKeyConstraint(
-        ["proposal_id"], ["memory_proposals.id"], name="fk_memory_review_actions_proposal"
+        ["proposal_id", "account_id"],
+        ["memory_proposals.id", "memory_proposals.account_id"],
+        name="fk_memory_review_actions_proposal_scope",
     ),
-    ForeignKeyConstraint(["memory_id"], ["memories.id"], name="fk_memory_review_actions_memory"),
+    ForeignKeyConstraint(
+        ["memory_id", "account_id"],
+        ["memories.id", "memories.account_id"],
+        name="fk_memory_review_actions_memory_scope",
+    ),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_memory_review_actions_conversation_scope",
+    ),
     CheckConstraint("action IN ('accept','reject','forget')", name="action_values"),
     CheckConstraint(
         "state IN ('pending','confirmed','applied','rejected','expired')", name="state_values"

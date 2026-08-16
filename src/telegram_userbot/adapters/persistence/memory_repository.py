@@ -151,7 +151,7 @@ class MemoryRepository:
             raise ValueError("manifest source is outside the requested scope")
 
     async def _require_embedding_target_scope(
-        self, record: EmbeddingRecord, *, account_id: UUID | None
+        self, record: EmbeddingRecord, *, account_id: UUID
     ) -> None:
         if record.target_kind == "memory_version":
             query = (
@@ -162,11 +162,10 @@ class MemoryRepository:
                     memories.c.id == memory_versions.c.memory_id,
                 )
             )
-            if account_id is not None:
-                query = query.where(
-                    memory_versions.c.account_id == account_id,
-                    memories.c.account_id == account_id,
-                )
+            query = query.where(
+                memory_versions.c.account_id == account_id,
+                memories.c.account_id == account_id,
+            )
         elif record.target_kind == "summary_version":
             query = (
                 select(summary_versions.c.id)
@@ -176,11 +175,10 @@ class MemoryRepository:
                     summaries.c.id == summary_versions.c.summary_id,
                 )
             )
-            if account_id is not None:
-                query = query.where(
-                    summary_versions.c.account_id == account_id,
-                    summaries.c.account_id == account_id,
-                )
+            query = query.where(
+                summary_versions.c.account_id == account_id,
+                summaries.c.account_id == account_id,
+            )
         else:
             query = (
                 select(message_revisions.c.id)
@@ -190,11 +188,10 @@ class MemoryRepository:
                     messages.c.id == message_revisions.c.message_id,
                 )
             )
-            if account_id is not None:
-                query = query.where(
-                    message_revisions.c.account_id == account_id,
-                    messages.c.account_id == account_id,
-                )
+            query = query.where(
+                message_revisions.c.account_id == account_id,
+                messages.c.account_id == account_id,
+            )
         if await self._session.scalar(query) is None:
             raise ValueError("embedding target is outside the requested account scope")
 
@@ -242,7 +239,7 @@ class MemoryRepository:
                     )
                     if (
                         record is None
-                        or record["account_id"] not in {None, account_id}
+                        or record["account_id"] != account_id
                         or not await self._embedding_record_belongs_to_account(
                             record, account_id=account_id
                         )
@@ -524,6 +521,7 @@ class MemoryRepository:
             await self._session.execute(
                 insert(memory_input_manifest_items).values(
                     manifest_id=manifest.id,
+                    account_id=manifest.account_id,
                     ordinal=ordinal,
                     source_type=source.source_type,
                     message_revision_id=source.source_id
@@ -1177,7 +1175,7 @@ class MemoryRepository:
         space: EmbeddingSpace,
         records: tuple[EmbeddingRecord, ...],
         *,
-        account_id: UUID | None,
+        account_id: UUID,
         model_profile_id: UUID,
         config_version_id: UUID,
         activate: bool = False,
@@ -1329,9 +1327,7 @@ class MemoryRepository:
                 update(embedding_spaces)
                 .where(
                     embedding_spaces.c.id == space.id,
-                    embedding_spaces.c.account_id == account_id
-                    if account_id is not None
-                    else embedding_spaces.c.account_id.is_(None),
+                    embedding_spaces.c.account_id == account_id,
                     embedding_spaces.c.model_profile_id == model_profile_id,
                 )
                 .values(state="active", activated_at=current_time)
@@ -1475,8 +1471,7 @@ class MemoryRepository:
                     update(embedding_records)
                     .where(
                         embedding_records.c.id.in_(targets),
-                        (embedding_records.c.account_id == account_id)
-                        | embedding_records.c.account_id.is_(None),
+                        embedding_records.c.account_id == account_id,
                     )
                     .values(state="invalidated", invalidated_at=current_time)
                 )

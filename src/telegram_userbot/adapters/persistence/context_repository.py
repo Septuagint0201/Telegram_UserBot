@@ -135,6 +135,7 @@ class ContextRepository:
                 insert(context_manifest_items)
                 .values(
                     manifest_id=manifest.id,
+                    account_id=account_id,
                     ordinal=item.ordinal,
                     layer=item.layer,
                     canonical_role=item.canonical_role,
@@ -218,7 +219,10 @@ class ContextRepository:
                         context_manifest_items.c.token_estimate,
                         context_manifest_items.c.estimated_image_tokens,
                     )
-                    .where(context_manifest_items.c.manifest_id == manifest["id"])
+                    .where(
+                        context_manifest_items.c.manifest_id == manifest["id"],
+                        context_manifest_items.c.account_id == manifest["account_id"],
+                    )
                     .order_by(context_manifest_items.c.ordinal)
                 )
             )

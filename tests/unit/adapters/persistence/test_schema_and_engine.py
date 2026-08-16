@@ -136,9 +136,15 @@ def test_m6_current_version_foreign_keys_reference_exact_candidate_keys(
 @pytest.mark.unit
 def test_m6_table_inventory_is_topological_for_downgrade() -> None:
     positions = {name: position for position, name in enumerate(M6_TABLES)}
-    migration = (
-        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0007_m6_memory_pipeline.py"
-    ).read_text(encoding="utf-8")
+    migrations = "\n".join(
+        (Path(__file__).resolve().parents[4] / "alembic" / "versions" / migration).read_text(
+            encoding="utf-8"
+        )
+        for migration in (
+            "0007_m6_memory_pipeline.py",
+            "0009_m5_m6_account_scope_constraints.py",
+        )
+    )
     for table_name in M6_TABLES:
         table = metadata.tables[table_name]
         for constraint in table.constraints:
@@ -148,9 +154,26 @@ def test_m6_table_inventory_is_topological_for_downgrade() -> None:
             if target_name not in positions or target_name == table_name:
                 continue
             if constraint.use_alter:
-                assert f'"{constraint.name}"' in migration
+                assert f'"{constraint.name}"' in migrations
                 continue
             assert positions[target_name] < positions[table_name], constraint.name
+
+
+@pytest.mark.unit
+def test_m5_m6_scope_migration_drops_dependent_fks_before_candidate_keys() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0009_m5_m6_account_scope_constraints.py"
+    ).read_text(encoding="utf-8")
+
+    drop_fks = migration.index("for table, names in old_constraints.items():")
+    create_keys = migration.index("for table, name, columns in unique_constraints:")
+    create_fks = migration.index("foreign_keys = (")
+
+    assert drop_fks < create_keys < create_fks
+    assert "_drop_constraints(table, (name,))\n        _create_unique" not in migration
 
 
 @pytest.mark.unit

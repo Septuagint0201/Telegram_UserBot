@@ -178,7 +178,6 @@ async def test_embedding_target_and_owner_helpers_cover_all_durable_target_kinds
     )
     for record in records:
         await repo._require_embedding_target_scope(record, account_id=account_id)
-        await repo._require_embedding_target_scope(record, account_id=None)
 
     rows = (
         {
