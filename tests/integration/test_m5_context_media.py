@@ -1,5 +1,5 @@
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid7
 
 import pytest
@@ -15,6 +15,7 @@ from telegram_userbot.adapters.persistence.schema import (
     context_manifests,
     context_policies,
     context_policy_versions,
+    context_preview_deliveries,
     conversation_turns,
     conversations,
     memories,
@@ -462,6 +463,115 @@ async def test_m5_manifest_persists_content_free_and_preview_is_one_time(
             manifest=built.manifest,
             created_at=NOW,
         )
+
+
+@pytest.mark.integration
+async def test_m5_preview_delete_claim_is_fenced_and_reclaimable(db_session: AsyncSession) -> None:
+    account_id, conversation_id, turn_id, revision_id = await seed_scope(db_session)
+    context_version_id, retrieval_version_id = await seed_policies(db_session)
+    source = ContextSource(
+        Candidate(revision_id, "revision-1", "current:1", ContextLayer.CURRENT, NOW, 30),
+        "user",
+        "contact",
+        TrustLevel.UNTRUSTED_USER,
+        SensitiveValue("SYNTHETIC_PRIVATE_CONTEXT_BODY"),
+        "message_revision",
+    )
+    built = build_context(
+        manifest_id=uuid7(),
+        purpose="reactive_reply",
+        logical_role="main_ai",
+        sources=(source,),
+        budget=calculate_budget(
+            ContextPolicy("context-v1"), ContextCapabilities(32_000, 2_000, False)
+        ),
+        builder_version="context-builder-v1",
+        prompt_version="prompt-v1",
+        prompt_bundle_sha256=(b"p" * 32).hex(),
+        context_policy_version="context-v1",
+        retrieval_policy_version="retrieval-v1",
+        capability_snapshot_sha256=(b"c" * 32).hex(),
+    )
+    repository = ContextRepository(db_session)
+    await repository.save_manifest(
+        account_id=account_id,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        background_job_id=None,
+        context_policy_version_id=context_version_id,
+        retrieval_policy_version_id=retrieval_version_id,
+        prompt_bundle_sha256=b"p" * 32,
+        capability_snapshot_sha256=b"c" * 32,
+        manifest=built.manifest,
+        created_at=NOW,
+    )
+    challenge = await repository.issue_preview(
+        account_id=account_id,
+        conversation_id=conversation_id,
+        manifest_id=built.manifest.id,
+        admin_user_id=42,
+        bot_chat_id=42,
+        bot_identity="control-bot",
+        now=NOW,
+    )
+    request = await repository.consume_preview(
+        token=challenge.confirmation_token,
+        admin_user_id=42,
+        bot_chat_id=42,
+        bot_identity="control-bot",
+        now=NOW,
+    )
+    assert request is not None
+    delete_after = NOW + timedelta(minutes=10)
+    assert await repository.begin_preview_delivery(
+        request=request,
+        chunk_count=1,
+        now=NOW,
+        delete_after=delete_after,
+    )
+    assert await repository.claim_preview_delivery_chunk(request=request, ordinal=1)
+    await repository.record_preview_delivery_chunk(
+        request=request,
+        ordinal=1,
+        state="sent",
+        message_id=99,
+        now=NOW,
+        delete_after=delete_after,
+    )
+    await repository.finish_preview_delivery(request=request, now=NOW)
+
+    first = await repository.due_preview_deletions(bot_identity="control-bot", now=delete_after)
+    assert len(first) == 1
+    assert first[0].fencing_token == 1
+    assert not await repository.due_preview_deletions(
+        bot_identity="control-bot", now=delete_after + timedelta(seconds=59)
+    )
+    reclaimed = await repository.due_preview_deletions(
+        bot_identity="control-bot", now=delete_after + timedelta(seconds=60)
+    )
+    assert len(reclaimed) == 1
+    assert reclaimed[0].fencing_token == 2
+    with pytest.raises(RuntimeError, match="deletion_conflict"):
+        await repository.finish_preview_deletion(
+            deletion=first[0], deleted=True, now=delete_after + timedelta(seconds=60)
+        )
+    await repository.finish_preview_deletion(
+        deletion=reclaimed[0], deleted=True, now=delete_after + timedelta(seconds=60)
+    )
+    deleted = (
+        (
+            await db_session.execute(
+                select(context_preview_deliveries).where(
+                    context_preview_deliveries.c.id == reclaimed[0].delivery_id
+                )
+            )
+        )
+        .mappings()
+        .one()
+    )
+    assert deleted["state"] == "deleted"
+    assert deleted["delete_claimed_at"] is None
+    assert deleted["delete_lease_expires_at"] is None
 
 
 @pytest.mark.integration

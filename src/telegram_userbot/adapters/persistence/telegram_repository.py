@@ -551,6 +551,7 @@ class TelegramLifecycleRepository:
                 model_role=group.model_role,
                 copilot_draft_id=group.copilot_draft_id,
                 approved_draft_revision_id=group.approved_draft_revision_id,
+                proactive_decision_id=group.proactive_decision_id,
                 source=group.source,
                 generation_no=group.generation_no,
                 state=DeliveryGroupState.PLANNED,

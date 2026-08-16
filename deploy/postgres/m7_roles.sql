@@ -47,6 +47,31 @@ GRANT SELECT, INSERT, UPDATE ON
   proactive_scan_cursors
 TO telegram_userbot_worker_runtime;
 
+-- App owns the conversation lock, final gate, durable target binding, and settlement.
+GRANT SELECT ON
+  proactive_policies,
+  proactive_contact_settings,
+  proactive_life_events,
+  proactive_intentions,
+  proactive_relationships,
+  proactive_occurrences,
+  proactive_occurrence_evidence,
+  proactive_candidates,
+  proactive_candidate_memberships,
+  proactive_budget_buckets,
+  proactive_budget_reservations,
+  proactive_decisions,
+  proactive_decision_memberships,
+  proactive_state_transitions
+TO telegram_userbot_app_runtime;
+GRANT UPDATE ON
+  proactive_candidates,
+  proactive_budget_buckets,
+  proactive_budget_reservations,
+  proactive_decisions
+TO telegram_userbot_app_runtime;
+GRANT INSERT ON proactive_state_transitions TO telegram_userbot_app_runtime;
+
 -- Control reads content-free status and creates versioned settings through its command queue.
 GRANT SELECT ON
   proactive_policies,

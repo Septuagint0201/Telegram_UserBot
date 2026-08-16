@@ -346,6 +346,26 @@ def test_delivery_integrity_migration_binds_proactive_target_conservatively() ->
 
 
 @pytest.mark.unit
+def test_recovery_binding_migration_fences_delete_and_proactive_side_effects() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0017_m5_m7_recovery_binding.py"
+    ).read_text(encoding="utf-8")
+
+    assert "delete_lease_expires_at" in migration
+    assert "delete_fencing_token" in migration
+    assert "delete_claim_recovered" in migration
+    assert "proactive_decision_id" in migration
+    assert "budget_reservations_target_side_effect" in migration
+    assert "DEFERRABLE INITIALLY DEFERRED" in migration
+    assert "uq_proactive_decisions_full_scope" in migration
+    assert "))) NOT VALID" in migration
+    assert "VALIDATE CONSTRAINT" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable

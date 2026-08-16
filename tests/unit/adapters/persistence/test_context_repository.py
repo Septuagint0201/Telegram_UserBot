@@ -482,7 +482,7 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
         request=request, ordinal=1
     )
 
-    deletion = PreviewDeletionRecord(7, request_id, "control-bot", 42, 100)
+    deletion = PreviewDeletionRecord(7, request_id, "control-bot", 42, 100, 3)
     for states in (("deleted",), ("delete_failed",), ("sent",), ("deleted", "send_unknown")):
         deletion_fake = FakeSession(
             scalars=(7, request_id),
@@ -499,6 +499,7 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
         assert "context_preview_deliveries.request_id" in deletion_sql
         assert "context_preview_deliveries.bot_identity" in deletion_sql
         assert "context_preview_deliveries.bot_message_id" in deletion_sql
+        assert "context_preview_deliveries.delete_fencing_token" in deletion_sql
 
     conflict = FakeSession(scalars=(None,))
     with pytest.raises(RuntimeError, match="deletion_conflict"):
@@ -542,7 +543,7 @@ async def test_context_repository_rejects_invalid_owner_and_naive_times_before_s
     request = PreviewRequestRecord(
         UUID(int=7), UUID(int=8), b"m" * 32, b"s" * 32, "confirmed", 42, 42, "bot"
     )
-    deletion = PreviewDeletionRecord(1, request.request_id, "bot", 42, 9)
+    deletion = PreviewDeletionRecord(1, request.request_id, "bot", 42, 9, 1)
     with pytest.raises(ValueError, match="now must be timezone-aware"):
         await repository.issue_preview(
             account_id=account_id,

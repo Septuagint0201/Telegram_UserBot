@@ -9,7 +9,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, cast
 from uuid import UUID, uuid7
 
-from sqlalchemy import and_, insert, select, update
+from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +42,7 @@ from telegram_userbot.domain.shared.time import require_aware
 MAX_PREVIEW_TTL = timedelta(minutes=5)
 MAX_PREVIEW_DELETE_AFTER = timedelta(minutes=10)
 MAX_PREVIEW_CHUNKS = 8
+DEFAULT_PREVIEW_DELETE_LEASE = timedelta(minutes=1)
 SCORE_QUANTUM = Decimal("0.0000001")
 
 
@@ -108,6 +109,7 @@ class PreviewDeletionRecord:
     bot_identity: str
     bot_chat_id: int
     bot_message_id: int
+    fencing_token: int
 
 
 class ContextRepository:
@@ -1093,18 +1095,37 @@ class ContextRepository:
         return final_state, delivered, len(rows)
 
     async def due_preview_deletions(
-        self, *, bot_identity: str, now: datetime, limit: int = 50
+        self,
+        *,
+        bot_identity: str,
+        now: datetime,
+        limit: int = 50,
+        lease: timedelta = DEFAULT_PREVIEW_DELETE_LEASE,
     ) -> tuple[PreviewDeletionRecord, ...]:
         current_time = require_aware(now, "now")
-        if not bot_identity or bot_identity != bot_identity.strip() or limit <= 0 or limit > 100:
+        if (
+            not bot_identity
+            or bot_identity != bot_identity.strip()
+            or limit <= 0
+            or limit > 100
+            or lease <= timedelta(0)
+            or lease > timedelta(minutes=5)
+        ):
             raise ValueError("context_preview_deletion_query_invalid")
+        eligible = or_(
+            context_preview_deliveries.c.state.in_(("sent", "delete_failed")),
+            and_(
+                context_preview_deliveries.c.state == "delete_pending",
+                context_preview_deliveries.c.delete_lease_expires_at <= current_time,
+            ),
+        )
         rows = (
             (
                 await self._session.execute(
                     select(context_preview_deliveries)
                     .where(
                         context_preview_deliveries.c.bot_identity == bot_identity,
-                        context_preview_deliveries.c.state.in_(("sent", "delete_failed")),
+                        eligible,
                         context_preview_deliveries.c.bot_message_id.is_not(None),
                         context_preview_deliveries.c.delete_after <= current_time,
                     )
@@ -1121,11 +1142,24 @@ class ContextRepository:
         )
         records: list[PreviewDeletionRecord] = []
         for row in rows:
-            await self._session.execute(
+            fencing_token = await self._session.scalar(
                 update(context_preview_deliveries)
-                .where(context_preview_deliveries.c.id == row["id"])
-                .values(state="delete_pending")
+                .where(
+                    context_preview_deliveries.c.id == row["id"],
+                    context_preview_deliveries.c.delete_fencing_token
+                    == row["delete_fencing_token"],
+                )
+                .values(
+                    state="delete_pending",
+                    delete_claimed_at=current_time,
+                    delete_lease_expires_at=current_time + lease,
+                    delete_fencing_token=context_preview_deliveries.c.delete_fencing_token + 1,
+                    last_error_code=None,
+                )
+                .returning(context_preview_deliveries.c.delete_fencing_token)
             )
+            if fencing_token is None:
+                continue
             records.append(
                 PreviewDeletionRecord(
                     cast(int, row["id"]),
@@ -1133,6 +1167,7 @@ class ContextRepository:
                     cast(str, row["bot_identity"]),
                     cast(int, row["bot_chat_id"]),
                     cast(int, row["bot_message_id"]),
+                    cast(int, fencing_token),
                 )
             )
         return tuple(records)
@@ -1155,9 +1190,12 @@ class ContextRepository:
                 context_preview_deliveries.c.bot_chat_id == deletion.bot_chat_id,
                 context_preview_deliveries.c.bot_message_id == deletion.bot_message_id,
                 context_preview_deliveries.c.state == "delete_pending",
+                context_preview_deliveries.c.delete_fencing_token == deletion.fencing_token,
             )
             .values(
                 state="deleted" if deleted else "delete_failed",
+                delete_claimed_at=None,
+                delete_lease_expires_at=None,
                 deleted_at=current_time if deleted else None,
                 last_error_code=None if deleted else error_code or "delete_failed",
             )

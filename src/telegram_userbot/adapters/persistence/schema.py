@@ -1332,6 +1332,7 @@ outbound_delivery_groups = Table(
     Column("model_role", Text),
     Column("copilot_draft_id", UUID_TYPE),
     Column("approved_draft_revision_id", UUID_TYPE),
+    Column("proactive_decision_id", UUID_TYPE),
     Column("source", Text, nullable=False),
     Column("generation_no", Integer, nullable=False, server_default=text("1")),
     Column("state", Text, nullable=False, server_default=text("'planned'")),
@@ -1355,9 +1356,25 @@ outbound_delivery_groups = Table(
         ["conversations.id", "conversations.account_id"],
         name="fk_outbound_delivery_groups_conversation_scope",
     ),
+    ForeignKeyConstraint(
+        ["proactive_decision_id", "account_id", "conversation_id"],
+        [
+            "proactive_decisions.id",
+            "proactive_decisions.account_id",
+            "proactive_decisions.conversation_id",
+        ],
+        name="fk_outbound_groups_proactive_decision_scope",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
     CheckConstraint(
         "source IN ('ai','proactive_ai','copilot_approved','system')",
         name="source_values",
+    ),
+    CheckConstraint(
+        "(source <> 'proactive_ai' OR proactive_decision_id IS NOT NULL) AND "
+        "(proactive_decision_id IS NULL OR source IN ('proactive_ai','copilot_approved'))",
+        name="proactive_source",
     ),
     CheckConstraint(
         "state IN ('planned','sending','partial','sent','failed','unknown','cancelled')",
@@ -1393,6 +1410,12 @@ Index(
     outbound_delivery_groups.c.state,
     outbound_delivery_groups.c.updated_at,
     postgresql_where=outbound_delivery_groups.c.state.in_(("sending", "partial", "unknown")),
+)
+Index(
+    "uq_outbound_groups_proactive_decision",
+    outbound_delivery_groups.c.proactive_decision_id,
+    unique=True,
+    postgresql_where=outbound_delivery_groups.c.proactive_decision_id.is_not(None),
 )
 
 outbound_intents = Table(
@@ -1863,6 +1886,7 @@ copilot_drafts = Table(
     Column("turn_id", UUID_TYPE, nullable=False),
     Column("model_run_id", UUID_TYPE),
     Column("model_role", Text),
+    Column("proactive_decision_id", UUID_TYPE),
     Column("draft_kind", Text, nullable=False),
     Column("state", Text, nullable=False),
     Column("current_revision_no", Integer),
@@ -1902,7 +1926,22 @@ copilot_drafts = Table(
         ],
         name="fk_copilot_drafts_model_run_scope",
     ),
-    CheckConstraint("draft_kind = 'reactive'", name="draft_kind_v1"),
+    ForeignKeyConstraint(
+        ["proactive_decision_id", "account_id", "conversation_id"],
+        [
+            "proactive_decisions.id",
+            "proactive_decisions.account_id",
+            "proactive_decisions.conversation_id",
+        ],
+        name="fk_copilot_drafts_proactive_decision_scope",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    CheckConstraint(
+        "(draft_kind = 'reactive' AND proactive_decision_id IS NULL) OR "
+        "(draft_kind = 'proactive' AND proactive_decision_id IS NOT NULL)",
+        name="draft_kind_provenance",
+    ),
     CheckConstraint(
         "state IN ('requested','collecting','generating','ready','editing','approved',"
         "'send_queued','send_unknown','sent','ignored','expired','invalidated','failed')",
@@ -1934,6 +1973,12 @@ Index(
             "send_unknown",
         )
     ),
+)
+Index(
+    "uq_copilot_drafts_proactive_decision",
+    copilot_drafts.c.proactive_decision_id,
+    unique=True,
+    postgresql_where=copilot_drafts.c.proactive_decision_id.is_not(None),
 )
 Index(
     "ix_copilot_drafts_expiry",
@@ -2607,6 +2652,9 @@ context_preview_deliveries = Table(
     Column("bot_message_id", BigInteger),
     Column("sent_at", UTC_TIMESTAMP),
     Column("delete_after", UTC_TIMESTAMP),
+    Column("delete_claimed_at", UTC_TIMESTAMP),
+    Column("delete_lease_expires_at", UTC_TIMESTAMP),
+    Column("delete_fencing_token", BigInteger, nullable=False, server_default=text("0")),
     Column("deleted_at", UTC_TIMESTAMP),
     Column("last_error_code", Text),
     ForeignKeyConstraint(
@@ -2623,6 +2671,14 @@ context_preview_deliveries = Table(
         "state IN ('pending','sending','sent','send_unknown','delete_pending',"
         "'deleted','delete_failed')",
         name="state_values",
+    ),
+    CheckConstraint("delete_fencing_token >= 0", name="delete_fencing_token_nonnegative"),
+    CheckConstraint(
+        "(state = 'delete_pending' AND delete_claimed_at IS NOT NULL AND "
+        "delete_lease_expires_at IS NOT NULL AND delete_fencing_token > 0) OR "
+        "(state <> 'delete_pending' AND delete_claimed_at IS NULL AND "
+        "delete_lease_expires_at IS NULL)",
+        name="delete_lease_state_match",
     ),
     UniqueConstraint("request_id", "ordinal", name="uq_context_preview_deliveries_ordinal"),
 )
@@ -4177,8 +4233,11 @@ proactive_budget_reservations = Table(
     CheckConstraint("authorization_generation > 0", name="authorization_generation_positive"),
     CheckConstraint("target IN ('auto_send','copilot_draft')", name="target_values"),
     CheckConstraint(
-        "(target = 'auto_send' AND copilot_draft_id IS NULL) OR "
-        "(target = 'copilot_draft' AND outbound_group_id IS NULL)",
+        "((target = 'auto_send' AND copilot_draft_id IS NULL) OR "
+        "(target = 'copilot_draft' AND outbound_group_id IS NULL)) AND "
+        "(state NOT IN ('committed','send_unknown') OR "
+        "(target = 'auto_send' AND outbound_group_id IS NOT NULL) OR "
+        "(target = 'copilot_draft' AND copilot_draft_id IS NOT NULL))",
         name="target_side_effect_match",
     ),
     CheckConstraint(
@@ -4254,6 +4313,9 @@ proactive_decisions = Table(
     CheckConstraint("state IN ('accepted','rejected','stale')", name="state_values"),
     UniqueConstraint("candidate_id", name="uq_proactive_decisions_candidate"),
     UniqueConstraint("id", "account_id", name="uq_proactive_decisions_id_account"),
+    UniqueConstraint(
+        "id", "account_id", "conversation_id", name="uq_proactive_decisions_full_scope"
+    ),
     UniqueConstraint(
         "id", "account_id", "candidate_id", name="uq_proactive_decisions_candidate_scope"
     ),

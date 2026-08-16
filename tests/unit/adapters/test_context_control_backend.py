@@ -54,7 +54,7 @@ class RepositoryFake(ContextRepository):
             UUID(int=3), "00000000", NOW + timedelta(minutes=1), SensitiveValue("challenge")
         )
         self.due_deletions: tuple[PreviewDeletionRecord, ...] = (
-            PreviewDeletionRecord(7, REQUEST.request_id, REQUEST.bot_identity, 42, 99),
+            PreviewDeletionRecord(7, REQUEST.request_id, REQUEST.bot_identity, 42, 99, 1),
         )
 
     async def latest_summary(self, **kwargs: object) -> ContextSummaryRecord | None:
@@ -122,7 +122,12 @@ class RepositoryFake(ContextRepository):
         return ("send_unknown" if unknown else "delivered", sent, total)
 
     async def due_preview_deletions(
-        self, *, bot_identity: str, now: datetime, limit: int = 50
+        self,
+        *,
+        bot_identity: str,
+        now: datetime,
+        limit: int = 50,
+        lease: timedelta = timedelta(minutes=1),
     ) -> tuple[PreviewDeletionRecord, ...]:
         return self.due_deletions
 
@@ -462,6 +467,7 @@ async def test_durable_preview_delete_failure_is_persisted_and_alerted() -> None
     assert await service.delete_due(now=NOW) == 0
     assert repository.deletion_results == [(False, "preview_delete_failed")]
     assert alerts == ["preview_delete_failed"]
+    assert repository.commit_count == 2
 
     repository.due_deletions = ()
     assert await service.delete_due(now=NOW) == 0

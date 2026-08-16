@@ -13,6 +13,8 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.persistence.schema import (
+    copilot_drafts,
+    outbound_delivery_groups,
     proactive_budget_buckets,
     proactive_budget_reservations,
     proactive_candidate_memberships,
@@ -1043,6 +1045,15 @@ class ProactiveRepository:
             ReservationState.EXPIRED,
         }:
             return _reservation(row)
+        if target in {ReservationState.COMMITTED, ReservationState.SEND_UNKNOWN}:
+            reservation_target = ProactiveTarget(cast(str, row["target"]))
+            side_effect_id = (
+                row["outbound_group_id"]
+                if reservation_target is ProactiveTarget.AUTO_SEND
+                else row["copilot_draft_id"]
+            )
+            if side_effect_id is None:
+                raise ValueError("budget settlement requires a bound side effect")
         if (
             cast(datetime, row["expires_at"]) <= current_time
             and target is ReservationState.RELEASED
@@ -1101,6 +1112,95 @@ class ProactiveRepository:
             target,
             cast(datetime, row["expires_at"]),
         )
+
+    async def bind_budget_target(
+        self,
+        *,
+        account_id: UUID,
+        reservation_key: bytes,
+        target: ProactiveTarget,
+        target_id: UUID,
+        now: datetime,
+    ) -> BudgetReservation | None:
+        if len(reservation_key) != 32 or target not in {
+            ProactiveTarget.AUTO_SEND,
+            ProactiveTarget.COPILOT_DRAFT,
+        }:
+            raise ValueError("budget reservation target is invalid")
+        current_time = require_aware(now, "now")
+        row = (
+            (
+                await self._session.execute(
+                    select(proactive_budget_reservations)
+                    .where(
+                        proactive_budget_reservations.c.account_id == account_id,
+                        proactive_budget_reservations.c.reservation_key == reservation_key,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        if row["target"] != target.value:
+            raise ValueError("budget reservation target does not match side effect")
+        current = ReservationState(cast(str, row["state"]))
+        column = (
+            proactive_budget_reservations.c.outbound_group_id
+            if target is ProactiveTarget.AUTO_SEND
+            else proactive_budget_reservations.c.copilot_draft_id
+        )
+        existing_id = row[column.name]
+        if existing_id is not None:
+            if existing_id != target_id:
+                raise ValueError("budget reservation is bound to another side effect")
+            return _reservation(row)
+        if current is not ReservationState.HELD:
+            raise ValueError("budget reservation is no longer bindable")
+        if cast(datetime, row["expires_at"]) <= current_time:
+            raise ValueError("budget reservation expired before side-effect binding")
+        if target is ProactiveTarget.AUTO_SEND:
+            target_exists = await self._session.scalar(
+                select(outbound_delivery_groups.c.id).where(
+                    outbound_delivery_groups.c.id == target_id,
+                    outbound_delivery_groups.c.account_id == account_id,
+                    outbound_delivery_groups.c.conversation_id == row["conversation_id"],
+                    outbound_delivery_groups.c.proactive_decision_id == row["decision_id"],
+                    outbound_delivery_groups.c.source == "proactive_ai",
+                    outbound_delivery_groups.c.state == "planned",
+                    outbound_delivery_groups.c.first_side_effect_at.is_(None),
+                )
+            )
+        else:
+            target_exists = await self._session.scalar(
+                select(copilot_drafts.c.id).where(
+                    copilot_drafts.c.id == target_id,
+                    copilot_drafts.c.account_id == account_id,
+                    copilot_drafts.c.conversation_id == row["conversation_id"],
+                    copilot_drafts.c.proactive_decision_id == row["decision_id"],
+                    copilot_drafts.c.draft_kind == "proactive",
+                    copilot_drafts.c.state.in_(
+                        ("requested", "collecting", "generating", "ready", "editing", "approved")
+                    ),
+                )
+            )
+        if target_exists != target_id:
+            raise ValueError("budget side effect does not match reservation provenance")
+        bound = await self._session.scalar(
+            update(proactive_budget_reservations)
+            .where(
+                proactive_budget_reservations.c.id == row["id"],
+                proactive_budget_reservations.c.state == "held",
+                column.is_(None),
+            )
+            .values({column.name: target_id})
+            .returning(proactive_budget_reservations.c.id)
+        )
+        if bound != row["id"]:
+            raise RuntimeError("budget side-effect binding CAS failed")
+        return _reservation(row)
 
     async def commit_budget(
         self, *, account_id: UUID, reservation_key: bytes, now: datetime, unknown: bool = False

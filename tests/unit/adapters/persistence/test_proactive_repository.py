@@ -701,6 +701,8 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         "bypass": False,
         "state": "held",
         "expires_at": NOW + timedelta(minutes=5),
+        "outbound_group_id": None,
+        "copilot_draft_id": None,
     }
     session = AsyncMock()
     repo = ProactiveRepository(cast(AsyncSession, session))
@@ -835,8 +837,17 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
     assert result is not None
     assert result.state is ReservationState.COMMITTED
 
+    session.execute.side_effect = [_Result(row)]
+    with pytest.raises(ValueError, match="bound side effect"):
+        await repo.settle_budget(
+            account_id=account_id,
+            reservation_key=key,
+            target=ReservationState.COMMITTED,
+            now=NOW,
+        )
+
     session.execute.side_effect = [
-        _Result(row),
+        _Result(dict(row, outbound_group_id=uuid4())),
         _Result(rowcount=1),
         _Result(rowcount=1),
         _Result(rowcount=1),
@@ -864,6 +875,136 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
     )
     assert released_after_expiry is not None
     assert released_after_expiry.state is ReservationState.EXPIRED
+
+    with pytest.raises(ValueError, match="target is invalid"):
+        await repo.bind_budget_target(
+            account_id=account_id,
+            reservation_key=b"short",
+            target=ProactiveTarget.AUTO_SEND,
+            target_id=uuid4(),
+            now=NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_proactive_budget_target_binding_fails_closed_and_replays() -> None:
+    account_id, conversation_id, decision_id = uuid4(), uuid4(), uuid4()
+    target_id, reservation_id = uuid4(), uuid4()
+    key = b"b" * 32
+    row = {
+        "id": reservation_id,
+        "reservation_key": key,
+        "account_id": account_id,
+        "contact_id": uuid4(),
+        "conversation_id": conversation_id,
+        "decision_id": decision_id,
+        "target": ProactiveTarget.AUTO_SEND.value,
+        "state": "held",
+        "local_date": NOW.date(),
+        "bypass": False,
+        "expires_at": NOW + timedelta(minutes=5),
+        "outbound_group_id": None,
+        "copilot_draft_id": None,
+    }
+
+    session = AsyncMock()
+    repo = ProactiveRepository(cast(AsyncSession, session))
+    session.execute.return_value = _Result(None)
+    assert (
+        await repo.bind_budget_target(
+            account_id=account_id,
+            reservation_key=key,
+            target=ProactiveTarget.AUTO_SEND,
+            target_id=target_id,
+            now=NOW,
+        )
+        is None
+    )
+
+    session.execute.return_value = _Result(row | {"target": ProactiveTarget.COPILOT_DRAFT.value})
+    with pytest.raises(ValueError, match="does not match"):
+        await repo.bind_budget_target(
+            account_id=account_id,
+            reservation_key=key,
+            target=ProactiveTarget.AUTO_SEND,
+            target_id=target_id,
+            now=NOW,
+        )
+
+    session.execute.return_value = _Result(row | {"outbound_group_id": target_id})
+    replay = await repo.bind_budget_target(
+        account_id=account_id,
+        reservation_key=key,
+        target=ProactiveTarget.AUTO_SEND,
+        target_id=target_id,
+        now=NOW,
+    )
+    assert replay is not None
+    assert replay.state is ReservationState.HELD
+
+    session.execute.return_value = _Result(row | {"outbound_group_id": uuid4()})
+    with pytest.raises(ValueError, match="another side effect"):
+        await repo.bind_budget_target(
+            account_id=account_id,
+            reservation_key=key,
+            target=ProactiveTarget.AUTO_SEND,
+            target_id=target_id,
+            now=NOW,
+        )
+
+    for invalid_row, message in (
+        (row | {"state": "released"}, "no longer bindable"),
+        (row | {"expires_at": NOW}, "expired before"),
+    ):
+        session.execute.return_value = _Result(invalid_row)
+        with pytest.raises(ValueError, match=message):
+            await repo.bind_budget_target(
+                account_id=account_id,
+                reservation_key=key,
+                target=ProactiveTarget.AUTO_SEND,
+                target_id=target_id,
+                now=NOW,
+            )
+
+    session.execute.return_value = _Result(row)
+    session.scalar.side_effect = [None]
+    with pytest.raises(ValueError, match="does not match reservation provenance"):
+        await repo.bind_budget_target(
+            account_id=account_id,
+            reservation_key=key,
+            target=ProactiveTarget.AUTO_SEND,
+            target_id=target_id,
+            now=NOW,
+        )
+
+    session.scalar.side_effect = [target_id, reservation_id]
+    bound = await repo.bind_budget_target(
+        account_id=account_id,
+        reservation_key=key,
+        target=ProactiveTarget.AUTO_SEND,
+        target_id=target_id,
+        now=NOW,
+    )
+    assert bound is not None
+
+    draft_id = uuid4()
+    session.execute.return_value = _Result(
+        row
+        | {
+            "target": ProactiveTarget.COPILOT_DRAFT.value,
+            "outbound_group_id": None,
+            "copilot_draft_id": None,
+        }
+    )
+    session.scalar.side_effect = [draft_id, None]
+    with pytest.raises(RuntimeError, match="binding CAS failed"):
+        await repo.bind_budget_target(
+            account_id=account_id,
+            reservation_key=key,
+            target=ProactiveTarget.COPILOT_DRAFT,
+            target_id=draft_id,
+            now=NOW,
+        )
 
 
 @pytest.mark.asyncio

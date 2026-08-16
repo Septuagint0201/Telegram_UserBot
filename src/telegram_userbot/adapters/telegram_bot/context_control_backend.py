@@ -291,21 +291,23 @@ class DurableContextControlBackend:
 
     async def delete_due(self, *, now: datetime) -> int:
         deleted = 0
-        for item in await self._repository.due_preview_deletions(
-            bot_identity=self._bot_identity, now=now
-        ):
+        due = await self._repository.due_preview_deletions(bot_identity=self._bot_identity, now=now)
+        if due:
+            await self._repository.commit_preview_boundary()
+        for item in due:
             try:
                 await self._gateway.delete_message(
                     bot_chat_id=item.bot_chat_id,
                     bot_message_id=item.bot_message_id,
                 )
-            except RuntimeError:
+            except Exception:
                 await self._repository.finish_preview_deletion(
                     deletion=item,
                     deleted=False,
                     now=now,
                     error_code="preview_delete_failed",
                 )
+                await self._repository.commit_preview_boundary()
                 if self._on_delete_failure is not None:
                     self._on_delete_failure("preview_delete_failed")
             else:
@@ -314,5 +316,6 @@ class DurableContextControlBackend:
                     deleted=True,
                     now=now,
                 )
+                await self._repository.commit_preview_boundary()
                 deleted += 1
         return deleted

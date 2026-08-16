@@ -483,6 +483,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "src/telegram_userbot/adapters/telegram_bot/context_control_backend.py",
                     "alembic/versions/0015_context_preview_integrity.py",
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
+                    "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "tests/unit/adapters/test_context_control.py",
                     "tests/integration/test_m5_context_media.py",
                 ),
@@ -492,6 +493,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "tests.unit.adapters.test_context_control_backend::test_exact_manifest_rebuilder_checks_vector_content_render_and_eligibility",
                     "tests.unit.adapters.persistence.test_context_repository::test_context_preview_consume_delivery_and_deletion_state_branches",
                     "tests.integration.test_m5_context_media::test_m5_manifest_persists_content_free_and_preview_is_one_time",
+                    "tests.integration.test_m5_context_media::test_m5_preview_delete_claim_is_fenced_and_reclaimable",
                     "tests.integration.test_m5_context_media::test_m5_control_role_executes_preview_function_without_direct_content_access",
                     "tests.integration.test_m5_context_media::test_m5_preview_rebuilds_current_memory_and_summary_sources",
                 ),
@@ -663,6 +665,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0014_m7_budget_integrity.py",
                     "alembic/versions/0015_context_preview_integrity.py",
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
+                    "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "deploy/postgres/m6_roles.sql",
                     "docs/compatibility/m6.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
@@ -738,11 +741,14 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "src/telegram_userbot/adapters/persistence/proactive_repository.py",
                     "alembic/versions/0013_m5_m7_consistency.py",
                     "alembic/versions/0014_m7_budget_integrity.py",
+                    "alembic/versions/0017_m5_m7_recovery_binding.py",
                 ),
                 (
                     "tests.unit.domain.test_m7_proactive::test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged",
                     "tests.integration.test_m7_proactive_pipeline::"
                     "test_m7_concurrent_budget_replay_counts_one_hold",
+                    "tests.integration.test_m7_proactive_pipeline::"
+                    "test_m7_budget_target_binding_precedes_settlement",
                 ),
             ),
             (
@@ -768,9 +774,15 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
             ),
             (
                 "M7-009",
-                ("src/telegram_userbot/domain/proactive/pipeline.py",),
+                (
+                    "src/telegram_userbot/domain/proactive/pipeline.py",
+                    "src/telegram_userbot/adapters/persistence/proactive_repository.py",
+                    "alembic/versions/0017_m5_m7_recovery_binding.py",
+                ),
                 (
                     "tests.unit.domain.test_m7_proactive::test_m7_final_gate_maps_modes_and_rechecks_all_snapshots",
+                    "tests.integration.test_m7_proactive_pipeline::"
+                    "test_m7_budget_target_binding_precedes_settlement",
                 ),
             ),
             (
@@ -802,6 +814,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0014_m7_budget_integrity.py",
                     "alembic/versions/0015_context_preview_integrity.py",
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
+                    "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",

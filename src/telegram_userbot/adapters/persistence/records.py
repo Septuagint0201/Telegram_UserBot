@@ -197,6 +197,7 @@ class NewDeliveryGroupRecord:
     account_control_version: int = 1
     copilot_draft_id: UUID | None = None
     approved_draft_revision_id: UUID | None = None
+    proactive_decision_id: UUID | None = None
     logical_content_sha256: bytes | None = None
     normalizer_version: str = "normalized-text-v1"
     splitter_version: str = "telegram-text-v1"
