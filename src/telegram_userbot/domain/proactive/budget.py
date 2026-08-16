@@ -38,6 +38,7 @@ class BudgetLedger:
         self._lock = Lock()
         self._buckets: dict[tuple[UUID, UUID | None, str, date], _Bucket] = {}
         self._reservations: dict[tuple[UUID, bytes], BudgetReservation] = {}
+        self._reservation_limits: dict[tuple[UUID, bytes], BudgetLimits] = {}
 
     def reserve(  # noqa: PLR0913 - reservation identity spans all budget scopes
         self,
@@ -66,6 +67,8 @@ class BudgetLedger:
                     or existing.expires_at != expiry
                 ):
                     raise ValueError("budget reservation key belongs to another scope")
+                if self._reservation_limits[reservation_identity] != limits:
+                    raise ValueError("budget reservation key belongs to another limit set")
                 return (
                     existing
                     if existing.state
@@ -110,6 +113,7 @@ class BudgetLedger:
                 expires_at=expiry,
             )
             self._reservations[reservation_identity] = reservation
+            self._reservation_limits[reservation_identity] = limits
             return reservation
 
     def commit(

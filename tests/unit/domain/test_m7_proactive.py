@@ -28,6 +28,7 @@ from telegram_userbot.domain.proactive.models import (
     ReasonCode,
     RelationshipLevel,
     ReservationState,
+    SuppressionReason,
     TypedEvidence,
     derive_key,
     membership_digest,
@@ -107,10 +108,12 @@ def intention(*, expected_at: datetime | None = None, importance: float = 0.95) 
     )
 
 
-def candidate_for(*, now: datetime = NOW, timezone_name: str = "UTC") -> Candidate:
+def candidate_for(
+    *, now: datetime = NOW, timezone_name: str = "UTC", active_policy: ProactivePolicy | None = None
+) -> Candidate:
     fact = intention(expected_at=now + timedelta(minutes=5))
     fact = replace(fact, timezone_name=timezone_name)
-    active_policy = policy()
+    active_policy = active_policy or policy()
     occurrences = materialize_intention(
         fact, now=now, policy=active_policy, secret=PROACTIVE_TEST_SECRET
     )
@@ -318,6 +321,32 @@ def test_m7_rules_cover_event_start_end_reconnect_and_filter_suppressions() -> N
         .value
         == "minimum_interval"
     )
+    default_interval_settings = replace(
+        settings, minimum_interval=None, relationship_level=RelationshipLevel.CLOSE
+    )
+    assert (
+        filter_occurrences(
+            (occurrence,),
+            now=NOW,
+            policy=p,
+            settings=default_interval_settings,
+            account_enabled=True,
+            mode_permits=True,
+            last_proactive_at=NOW - timedelta(hours=1),
+        ).suppressed[0][1]
+        is SuppressionReason.MINIMUM_INTERVAL
+    )
+    assert (
+        filter_occurrences(
+            (replace(occurrence, policy_version_id=uuid4()),),
+            now=NOW,
+            policy=p,
+            settings=settings,
+            account_enabled=True,
+            mode_permits=True,
+        ).suppressed[0][1]
+        is SuppressionReason.POLICY_CHANGED
+    )
 
 
 @pytest.mark.unit
@@ -395,6 +424,15 @@ def test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged() -> None:
             local_date=NOW.date(),
             limits=limits,
             expires_at=NOW + timedelta(minutes=2),
+            reservation_key=key,
+        )
+    with pytest.raises(ValueError, match="another limit set"):
+        ledger.reserve(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=BudgetLimits(account_daily=1, contact_daily=1, bypass_daily=1),
+            expires_at=NOW + timedelta(minutes=1),
             reservation_key=key,
         )
     assert (
@@ -564,11 +602,34 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     assert store.claim(now=NOW + timedelta(days=1), owner=uuid4()) is None
     assert store.compensate(now=NOW + timedelta(days=1), max_attempts=1) == ()
     assert store.claim(now=NOW + timedelta(days=1, seconds=5), owner=uuid4()) is None
-    expired = store.enqueue(
-        account_id=account_id, idempotency_key=sha256(b"late").digest(), available_at=NOW
+    expired_key = sha256(b"late").digest()
+    unrelated_key = sha256(b"unrelated-window").digest()
+    expired = store.enqueue(account_id=account_id, idempotency_key=expired_key, available_at=NOW)
+    unrelated = store.enqueue(
+        account_id=account_id,
+        idempotency_key=unrelated_key,
+        available_at=NOW + timedelta(days=2),
+        expires_at=NOW + timedelta(days=3),
     )
-    assert store.expire(now=NOW + timedelta(days=1), window_end=NOW) == 1
+    assert (
+        store.expire(
+            account_id=account_id,
+            idempotency_key=expired_key,
+            now=NOW + timedelta(days=1),
+            window_end=NOW,
+        )
+        == 1
+    )
     assert expired.state is DueJobState.PENDING
+    assert (
+        store.expire(
+            account_id=account_id,
+            idempotency_key=unrelated_key,
+            now=NOW + timedelta(days=1),
+        )
+        == 0
+    )
+    assert unrelated.state is DueJobState.PENDING
     retry_key = sha256(b"retry-window").digest()
     retry_job = store.enqueue(
         account_id=account_id,
@@ -635,7 +696,8 @@ def test_m7_due_job_idempotency_is_account_scoped() -> None:
 
 @pytest.mark.unit
 def test_m7_quiet_gate_uses_only_agent_selected_occurrences() -> None:
-    candidate = candidate_for(now=datetime(2026, 8, 16, 23, tzinfo=UTC))
+    p = policy()
+    candidate = candidate_for(now=datetime(2026, 8, 16, 23, tzinfo=UTC), active_policy=p)
     first = candidate.occurrences[0]
     second = replace(
         first,
@@ -663,7 +725,7 @@ def test_m7_quiet_gate_uses_only_agent_selected_occurrences() -> None:
                 updated,
                 decision,
                 datetime(2026, 8, 16, 23, tzinfo=UTC),
-                policy(),
+                p,
                 EffectiveMode.AUTO,
             )
         ).reason
@@ -680,7 +742,7 @@ def test_m7_quiet_gate_uses_only_agent_selected_occurrences() -> None:
                 updated,
                 invalid_selection,
                 datetime(2026, 8, 16, 23, tzinfo=UTC),
-                policy(),
+                p,
                 EffectiveMode.AUTO,
             )
         ).reason
@@ -710,7 +772,7 @@ def test_m7_quiet_gate_uses_only_agent_selected_occurrences() -> None:
                 mixed,
                 mixed_decision,
                 datetime(2026, 8, 16, 23, tzinfo=UTC),
-                policy(),
+                p,
                 EffectiveMode.AUTO,
             )
         ).reason
@@ -720,7 +782,8 @@ def test_m7_quiet_gate_uses_only_agent_selected_occurrences() -> None:
 
 @pytest.mark.unit
 def test_m7_final_gate_binds_activity_snapshot_to_candidate() -> None:
-    candidate = candidate_for()
+    p = policy()
+    candidate = candidate_for(active_policy=p)
     decision = AgentDecision(
         candidate.id,
         ProactiveAction.SEND_NOW,
@@ -729,7 +792,7 @@ def test_m7_final_gate_binds_activity_snapshot_to_candidate() -> None:
         "check in",
         0.5,
     )
-    authorization = AuthorizationInput(candidate, decision, NOW, policy(), EffectiveMode.AUTO)
+    authorization = AuthorizationInput(candidate, decision, NOW, p, EffectiveMode.AUTO)
     final = FinalGateInput(authorization, 1, 1, EffectiveMode.AUTO, 1, 1, 0, 0, 1, 1, NOW)
     assert final_gate(final).reason == "ACTIVITY_REVISION_SNAPSHOT_INVALID"
 
@@ -786,8 +849,8 @@ def test_m7_agent_parser_is_strict_and_defer_stays_in_window() -> None:
 
 @pytest.mark.unit
 def test_m7_final_gate_maps_modes_and_rechecks_all_snapshots() -> None:
-    candidate = candidate_for()
     p = policy()
+    candidate = candidate_for(active_policy=p)
     decision = AgentDecision(
         candidate.id,
         ProactiveAction.SEND_NOW,
@@ -801,6 +864,10 @@ def test_m7_final_gate_maps_modes_and_rechecks_all_snapshots() -> None:
     assert map_mode(EffectiveMode.COPILOT).value == "copilot_draft"
     assert map_mode(EffectiveMode.HUMAN).value == "skip"
     assert preliminary_gate(authorization).allowed
+    assert (
+        preliminary_gate(replace(authorization, policy=policy())).reason
+        == "POLICY_VERSION_SNAPSHOT_INVALID"
+    )
     final = FinalGateInput(authorization, 1, 1, EffectiveMode.AUTO, 1, 1, 0, 0, 0, 0, NOW)
     assert final_gate(final).reason == "AUTHORIZED_FINAL"
     assert (
@@ -1137,7 +1204,7 @@ def test_m7_value_objects_cover_validation_boundaries() -> None:
         with pytest.raises(ValueError, match=message):
             ContactSettings(contact_id=uuid4(), **contact_changes)  # type: ignore[arg-type]
 
-    occurrence = candidate_for().occurrences[0]
+    occurrence = candidate_for(active_policy=p).occurrences[0]
     invalid_occurrences: tuple[tuple[dict[str, object], str], ...] = (
         ({"occurrence_key": b"short"}, "occurrence identity"),
         ({"generation": 0}, "occurrence identity"),
@@ -1239,7 +1306,8 @@ def test_m7_value_objects_cover_validation_boundaries() -> None:
 
 @pytest.mark.unit
 def test_m7_preliminary_gate_covers_each_fail_closed_boundary() -> None:
-    candidate = candidate_for()
+    p = policy()
+    candidate = candidate_for(active_policy=p)
     decision = AgentDecision(
         candidate.id,
         ProactiveAction.SEND_NOW,
@@ -1248,7 +1316,7 @@ def test_m7_preliminary_gate_covers_each_fail_closed_boundary() -> None:
         "topic",
         0.5,
     )
-    base = AuthorizationInput(candidate, decision, NOW, policy(), EffectiveMode.AUTO)
+    base = AuthorizationInput(candidate, decision, NOW, p, EffectiveMode.AUTO)
     cases: tuple[tuple[AuthorizationInput, str], ...] = (
         (replace(base, decision=replace(decision, candidate_id=uuid4())), "CANDIDATE_MISMATCH"),
         (
@@ -1280,7 +1348,7 @@ def test_m7_preliminary_gate_covers_each_fail_closed_boundary() -> None:
         assert preliminary_gate(value).reason == reason
 
     quiet_now = datetime(2026, 8, 16, 23, 0, tzinfo=UTC)
-    quiet_candidate = candidate_for(now=quiet_now)
+    quiet_candidate = candidate_for(now=quiet_now, active_policy=p)
     quiet_base = replace(
         base,
         candidate=quiet_candidate,
@@ -1315,7 +1383,7 @@ def test_m7_preliminary_gate_covers_each_fail_closed_boundary() -> None:
     )
 
     absolute_now = datetime(2026, 8, 16, 3, 0, tzinfo=UTC)
-    absolute_candidate = candidate_for(now=absolute_now)
+    absolute_candidate = candidate_for(now=absolute_now, active_policy=p)
     absolute = replace(
         base,
         candidate=absolute_candidate,
@@ -1350,7 +1418,7 @@ def test_m7_time_and_quiet_policy_fail_closed_edges() -> None:
         2026, 8, 17, 8, tzinfo=UTC
     )
 
-    occurrence = candidate_for().occurrences[0]
+    occurrence = candidate_for(active_policy=p).occurrences[0]
     for candidate_occurrence in (
         None,
         replace(occurrence, reason=ReasonCode.RELATIONSHIP_RECONNECT, quiet_bypass_possible=False),
@@ -1376,11 +1444,34 @@ def test_m7_time_and_quiet_policy_fail_closed_edges() -> None:
         policy=p,
         occurrence=occurrence,
     ).bypass_allowed
-    assert quiet_decision(
+    assert not quiet_decision(
         datetime(2026, 8, 16, 7, tzinfo=UTC),
         timezone_name="UTC",
         policy=p,
         occurrence=occurrence,
+    ).bypass_allowed
+    morning_deadline = replace(
+        occurrence,
+        window_start_at=datetime(2026, 8, 16, 6, 30, tzinfo=UTC),
+        window_end_at=datetime(2026, 8, 16, 7, 30, tzinfo=UTC),
+        hard_deadline_at=datetime(2026, 8, 16, 7, 30, tzinfo=UTC),
+    )
+    assert quiet_decision(
+        datetime(2026, 8, 16, 7, tzinfo=UTC),
+        timezone_name="UTC",
+        policy=p,
+        occurrence=morning_deadline,
+    ).bypass_allowed
+    late_deadline = replace(
+        occurrence,
+        window_end_at=datetime(2026, 8, 17, 9, tzinfo=UTC),
+        hard_deadline_at=datetime(2026, 8, 17, 9, tzinfo=UTC),
+    )
+    assert not quiet_decision(
+        datetime(2026, 8, 16, 23, tzinfo=UTC),
+        timezone_name="UTC",
+        policy=p,
+        occurrence=late_deadline,
     ).bypass_allowed
 
 
@@ -1400,6 +1491,7 @@ def test_m7_validation_and_fake_store_edge_cases() -> None:
     }
     invalid_payloads: tuple[dict[str, object], ...] = (
         {**payload, "schema_version": 2},
+        {**payload, "schema_version": True},
         {**payload, "decision_code": "bad"},
         {**payload, "selected_occurrence_ids": "not-list"},
         {**payload, "selected_occurrence_ids": [1]},

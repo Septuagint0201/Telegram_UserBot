@@ -239,22 +239,42 @@ class DurableDueJobStore:
                 )
             )
 
-    def expire(self, *, now: datetime, window_end: datetime) -> int:
+    def expire(
+        self,
+        *,
+        account_id: UUID,
+        idempotency_key: bytes,
+        now: datetime,
+        window_end: datetime | None = None,
+    ) -> int:
+        """Expire one job using its persisted deadline or an explicit fallback.
+
+        The fallback is needed by the fake for candidate-window deadlines that
+        are supplied by the caller, but the account/key binding prevents one
+        candidate's deadline from expiring unrelated jobs.
+        """
+        if len(idempotency_key) != 32:
+            raise ValueError("due job key must be 32 bytes")
         current_time = require_aware(now, "now")
-        end_time = require_aware(window_end, "window_end")
+        fallback_end = None if window_end is None else require_aware(window_end, "window_end")
+        job_key = (account_id, idempotency_key)
         with self._lock:
-            changed = 0
-            for key, current in tuple(self._jobs.items()):
-                if (
-                    current.state
-                    in {DueJobState.PENDING, DueJobState.LEASED, DueJobState.RETRY_WAIT}
-                    and end_time <= current_time
-                ):
-                    self._jobs[key] = replace(
-                        current,
-                        state=DueJobState.EXPIRED,
-                        lease_owner=None,
-                        lease_expires_at=None,
-                    )
-                    changed += 1
-            return changed
+            current = self._jobs.get(job_key)
+            if current is None:
+                return 0
+            end_time = current.expires_at or fallback_end
+            if end_time is None:
+                raise ValueError("due job expiry deadline is required")
+            if (
+                current.state
+                not in {DueJobState.PENDING, DueJobState.LEASED, DueJobState.RETRY_WAIT}
+                or end_time > current_time
+            ):
+                return 0
+            self._jobs[job_key] = replace(
+                current,
+                state=DueJobState.EXPIRED,
+                lease_owner=None,
+                lease_expires_at=None,
+            )
+            return 1

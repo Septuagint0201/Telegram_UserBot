@@ -85,7 +85,11 @@ def parse_agent_decision(  # noqa: PLR0912 - strict schema branches fail closed
     current_time = require_aware(now, "now")
     raw = _object(payload, "$")
     _strict_fields(raw)
-    if raw["schema_version"] != 1:
+    if (
+        isinstance(raw["schema_version"], bool)
+        or not isinstance(raw["schema_version"], int)
+        or raw["schema_version"] != 1
+    ):
         raise ProactiveValidationError(
             "unsupported_schema", "schema_version must be 1", path="$.schema_version"
         )

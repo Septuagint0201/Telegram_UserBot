@@ -85,6 +85,8 @@ def preliminary_gate(value: AuthorizationInput) -> GateResult:  # noqa: PLR0911,
         return GateResult(False, "DECISION_NONE")
     if not value.policy.enabled:
         return GateResult(False, "POLICY_DISABLED")
+    if candidate.policy_version_id != value.policy.version_id:
+        return GateResult(False, "POLICY_VERSION_SNAPSHOT_INVALID")
     if candidate.state not in {
         CandidateState.OPEN,
         CandidateState.EVALUATING,

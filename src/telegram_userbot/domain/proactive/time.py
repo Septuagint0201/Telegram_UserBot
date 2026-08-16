@@ -170,7 +170,14 @@ def qualifies_quiet_bypass(
     local = now.astimezone(zone)
     if local.hour == 0 or 1 <= local.hour < 7:
         return False
-    return (local.hour == 7) or (local.hour >= 22)
+    next_morning = local.date() + timedelta(days=1 if local.hour >= 22 else 0)
+    next_0800 = local_to_utc(
+        datetime.combine(next_morning, time(8, 0)),
+        timezone_name,
+        ambiguous="later",
+        nonexistent="forward",
+    )
+    return occurrence.hard_deadline_at < next_0800 and (local.hour == 7 or local.hour >= 22)
 
 
 def next_quiet_end(now: datetime, *, timezone_name: str, policy: ProactivePolicy) -> datetime:

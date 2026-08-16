@@ -417,7 +417,10 @@ def filter_occurrences(  # noqa: PLR0912, PLR0913 - each suppression gate is exp
         reason: SuppressionReason | None = None
         if not account_enabled or not settings.enabled:
             reason = SuppressionReason.DISABLED
-        elif occurrence.reason not in policy.allowed_reasons:
+        elif (
+            occurrence.policy_version_id != policy.version_id
+            or occurrence.reason not in policy.allowed_reasons
+        ):
             reason = SuppressionReason.POLICY_CHANGED
         elif not occurrence.evidence or any(not item.valid for item in occurrence.evidence):
             reason = SuppressionReason.EVIDENCE_INVALID
@@ -433,12 +436,14 @@ def filter_occurrences(  # noqa: PLR0912, PLR0913 - each suppression gate is exp
             reason = SuppressionReason.CONVERSATION_ACTIVE
         elif conflicting_work:
             reason = SuppressionReason.CONFLICTING_WORK
-        elif (
-            settings.minimum_interval is not None
-            and last_proactive_time is not None
-            and now_utc - last_proactive_time < settings.minimum_interval
-        ):
-            reason = SuppressionReason.MINIMUM_INTERVAL
+        else:
+            minimum_interval = (
+                settings.minimum_interval
+                if settings.minimum_interval is not None
+                else policy.minimum_interval(settings.relationship_level)
+            )
+            if last_proactive_time is not None and now_utc - last_proactive_time < minimum_interval:
+                reason = SuppressionReason.MINIMUM_INTERVAL
         if reason is None:
             quiet = quiet_decision(
                 now_utc,
