@@ -292,9 +292,10 @@ def upgrade() -> None:
         "ALTER TABLE proactive_budget_reservations DROP CONSTRAINT IF EXISTS "
         "uq_proactive_budget_reservations_key"
     )
-    op.execute(
+    _constraint(
+        "uq_proactive_budget_reservations_account_key",
         "ALTER TABLE proactive_budget_reservations ADD CONSTRAINT "
-        "uq_proactive_budget_reservations_account_key UNIQUE (account_id, reservation_key)"
+        "uq_proactive_budget_reservations_account_key UNIQUE (account_id, reservation_key)",
     )
     op.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_proactive_budget_reservations_active_decision "

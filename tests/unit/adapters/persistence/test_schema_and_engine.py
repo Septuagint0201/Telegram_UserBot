@@ -299,6 +299,17 @@ def test_worker_retry_migration_is_fenced_bounded_and_reversible() -> None:
 
 
 @pytest.mark.unit
+def test_m7_budget_integrity_backfill_is_postgres_safe_and_idempotent() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0014_m7_budget_integrity.py"
+    ).read_text(encoding="utf-8")
+
+    assert "FROM proactive_budget_reservations AS reservation_src" in migration
+    assert "WHERE reservation.id = backfill.reservation_id" in migration
+    assert ('_constraint(\n        "uq_proactive_budget_reservations_account_key",') in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable
