@@ -846,6 +846,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0019_m5_m6_recovery_execution.py",
                     "alembic/versions/0020_m5_m7_review_hardening.py",
                     "alembic/versions/0021_m7_evidence_activity.py",
+                    "alembic/versions/0022_m7_job_scope_and_deadline.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",

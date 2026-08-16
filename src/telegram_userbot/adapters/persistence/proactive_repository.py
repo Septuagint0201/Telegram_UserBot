@@ -264,13 +264,16 @@ class ProactiveRepository:
         job_id = uuid5(account_id, f"proactive-job:{job_kind}:{idempotency_key.hex()}")
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-            {"lock_key": f"proactive_job:{idempotency_key.hex()}"},
+            {"lock_key": f"proactive_job:{account_id}:{idempotency_key.hex()}"},
         )
         existing = (
             (
                 await self._session.execute(
                     select(proactive_jobs)
-                    .where(proactive_jobs.c.idempotency_key == idempotency_key)
+                    .where(
+                        proactive_jobs.c.account_id == account_id,
+                        proactive_jobs.c.idempotency_key == idempotency_key,
+                    )
                     .with_for_update()
                 )
             )
@@ -311,7 +314,7 @@ class ProactiveRepository:
                 attempt_count=0,
                 created_at=created_time,
             )
-            .on_conflict_do_nothing(constraint="uq_proactive_jobs_idempotency")
+            .on_conflict_do_nothing(constraint="uq_proactive_jobs_account_idempotency")
         )
         return job_id
 
@@ -471,6 +474,7 @@ class ProactiveRepository:
     async def complete(  # noqa: PLR0913 - lease and retry policy are explicit
         self,
         *,
+        account_id: UUID,
         idempotency_key: bytes,
         owner: UUID,
         fencing_token: int,
@@ -531,6 +535,7 @@ class ProactiveRepository:
             await self._session.execute(
                 update(proactive_jobs)
                 .where(
+                    proactive_jobs.c.account_id == account_id,
                     proactive_jobs.c.idempotency_key == idempotency_key,
                     proactive_jobs.c.state == "leased",
                     proactive_jobs.c.lease_owner == owner,
@@ -556,6 +561,7 @@ class ProactiveRepository:
     async def complete_job(  # noqa: PLR0913 - compatibility alias preserves policy
         self,
         *,
+        account_id: UUID,
         idempotency_key: bytes,
         owner: UUID,
         fencing_token: int,
@@ -565,6 +571,7 @@ class ProactiveRepository:
         retry_delay: timedelta = timedelta(seconds=5),
     ) -> bool:
         return await self.complete(
+            account_id=account_id,
             idempotency_key=idempotency_key,
             owner=owner,
             fencing_token=fencing_token,

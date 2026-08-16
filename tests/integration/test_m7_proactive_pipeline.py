@@ -102,7 +102,7 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
     )
     assert set(rows) == set(M7_TABLES)
     assert await db_session.scalar(text("SELECT version_num FROM alembic_version")) == (
-        "0021_m7_evidence_activity"
+        "0022_m7_job_scope_and_deadline"
     )
     indexes = set(
         await db_session.scalars(
@@ -261,6 +261,7 @@ async def test_m7_concurrent_job_replay_and_same_owner_reclaim_are_fenced(
     assert first is not None
     async with factory() as worker, worker.begin():
         assert not await ProactiveRepository(worker).complete_job(
+            account_id=account_id,
             idempotency_key=key,
             owner=owner,
             fencing_token=first.fencing_token,
@@ -288,12 +289,14 @@ async def test_m7_concurrent_job_replay_and_same_owner_reclaim_are_fenced(
     async with factory() as worker, worker.begin():
         repository = ProactiveRepository(worker)
         assert not await repository.complete_job(
+            account_id=account_id,
             idempotency_key=key,
             owner=owner,
             fencing_token=first.fencing_token,
             now=NOW + timedelta(seconds=6),
         )
         assert await repository.complete_job(
+            account_id=account_id,
             idempotency_key=key,
             owner=owner,
             fencing_token=replacement.fencing_token,

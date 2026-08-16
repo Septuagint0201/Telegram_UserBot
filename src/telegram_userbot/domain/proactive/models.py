@@ -285,6 +285,7 @@ class RuleOccurrence:
         )
         if (
             not self.window_start_at < self.window_end_at
+            or self.hard_deadline_at < self.window_start_at
             or self.hard_deadline_at > self.window_end_at
         ):
             raise ValueError("occurrence window is invalid")

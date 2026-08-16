@@ -4006,7 +4006,8 @@ proactive_occurrences = Table(
         name="state_values",
     ),
     CheckConstraint(
-        "window_start_at < window_end_at AND hard_deadline_at <= window_end_at",
+        "window_start_at < window_end_at AND hard_deadline_at >= window_start_at "
+        "AND hard_deadline_at <= window_end_at",
         name="window_values",
     ),
     CheckConstraint("importance >= 0 AND importance <= 1", name="importance_bounded"),
@@ -4163,7 +4164,7 @@ proactive_jobs = Table(
         "(state <> 'leased' AND lease_owner IS NULL AND lease_expires_at IS NULL)",
         name="lease_fields_match",
     ),
-    UniqueConstraint("idempotency_key", name="uq_proactive_jobs_idempotency"),
+    UniqueConstraint("account_id", "idempotency_key", name="uq_proactive_jobs_account_idempotency"),
 )
 Index("ix_proactive_jobs_due", proactive_jobs.c.state, proactive_jobs.c.available_at)
 

@@ -453,6 +453,22 @@ def test_m7_occurrence_evidence_activity_migration_is_recoverable() -> None:
 
 
 @pytest.mark.unit
+def test_m7_job_scope_and_deadline_migration_is_recoverable() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0022_m7_job_scope_and_deadline.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'down_revision: str | Sequence[str] | None = "0021_m7_evidence_activity"' in migration
+    assert "uq_proactive_jobs_idempotency" in migration
+    assert "uq_proactive_jobs_account_idempotency" in migration
+    assert "hard_deadline_at >= window_start_at" in migration
+    assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable

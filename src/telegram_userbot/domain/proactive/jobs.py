@@ -50,7 +50,7 @@ class DurableDueJobStore:
 
     def __init__(self) -> None:
         self._lock = Lock()
-        self._jobs: dict[bytes, DueJob] = {}
+        self._jobs: dict[tuple[UUID, bytes], DueJob] = {}
 
     def enqueue(
         self,
@@ -66,14 +66,15 @@ class DurableDueJobStore:
         expiry_time = None if expires_at is None else require_aware(expires_at, "expires_at")
         if expiry_time is not None and expiry_time <= available_time:
             raise ValueError("due job expiry must be after availability")
+        job_key = (account_id, idempotency_key)
         with self._lock:
-            current = self._jobs.get(idempotency_key)
+            current = self._jobs.get(job_key)
             if current is not None:
                 return current
             job = DueJob(
                 uuid4(), account_id, idempotency_key, available_time, expires_at=expiry_time
             )
-            self._jobs[idempotency_key] = job
+            self._jobs[job_key] = job
             return job
 
     def claim(
@@ -126,12 +127,13 @@ class DurableDueJobStore:
                 attempt_count=current.attempt_count + 1,
                 fencing_token=current.fencing_token + 1,
             )
-            self._jobs[current.idempotency_key] = claimed
+            self._jobs[(current.account_id, current.idempotency_key)] = claimed
             return claimed
 
     def complete(  # noqa: PLR0913 - fake mirrors the durable lease contract
         self,
         *,
+        account_id: UUID,
         idempotency_key: bytes,
         owner: UUID,
         fencing_token: int,
@@ -143,8 +145,9 @@ class DurableDueJobStore:
         if fencing_token <= 0 or max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("completion policy is invalid")
         current_time = require_aware(now, "now")
+        job_key = (account_id, idempotency_key)
         with self._lock:
-            current = self._jobs.get(idempotency_key)
+            current = self._jobs.get(job_key)
             if (
                 current is None
                 or current.state is not DueJobState.LEASED
@@ -155,7 +158,7 @@ class DurableDueJobStore:
             ):
                 return False
             if current.expires_at is not None and current.expires_at <= current_time:
-                self._jobs[idempotency_key] = replace(
+                self._jobs[job_key] = replace(
                     current,
                     state=DueJobState.EXPIRED,
                     lease_owner=None,
@@ -171,7 +174,7 @@ class DurableDueJobStore:
             else:
                 state = DueJobState.RETRY_WAIT
                 available_at = current_time + retry_delay
-            self._jobs[idempotency_key] = replace(
+            self._jobs[job_key] = replace(
                 current,
                 state=state,
                 available_at=available_at,

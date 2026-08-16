@@ -489,6 +489,7 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     assert lease.fencing_token == 1
     assert (
         store.complete(
+            account_id=account_id,
             idempotency_key=key,
             owner=uuid4(),
             fencing_token=lease.fencing_token,
@@ -504,6 +505,7 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     assert lease2.fencing_token == 2
     assert (
         store.complete(
+            account_id=account_id,
             idempotency_key=key,
             owner=owner,
             fencing_token=lease.fencing_token,
@@ -513,6 +515,7 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     )
     assert (
         store.complete(
+            account_id=account_id,
             idempotency_key=key,
             owner=owner,
             fencing_token=lease2.fencing_token,
@@ -526,6 +529,7 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     assert late is not None
     assert (
         store.complete(
+            account_id=account_id,
             idempotency_key=late_key,
             owner=owner,
             fencing_token=late.fencing_token,
@@ -552,6 +556,7 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     assert retry_lease is not None
     assert retry_lease.id == retry_job.id
     assert store.complete(
+        account_id=account_id,
         idempotency_key=retry_key,
         owner=owner,
         fencing_token=retry_lease.fencing_token,
@@ -559,6 +564,48 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
         succeeded=False,
     )
     assert store.claim(now=NOW + timedelta(minutes=2), owner=uuid4()) is None
+
+
+@pytest.mark.unit
+def test_m7_due_job_idempotency_is_account_scoped() -> None:
+    store = DurableDueJobStore()
+    first_account, second_account = uuid4(), uuid4()
+    key = sha256(b"same-key-different-accounts").digest()
+
+    first = store.enqueue(account_id=first_account, idempotency_key=key, available_at=NOW)
+    second = store.enqueue(account_id=second_account, idempotency_key=key, available_at=NOW)
+    assert first.id != second.id
+
+    first_owner = uuid4()
+    first_lease = store.claim(now=NOW, owner=first_owner)
+    assert first_lease is not None
+    assert first_lease.account_id == first_account
+    assert not store.complete(
+        account_id=second_account,
+        idempotency_key=key,
+        owner=first_owner,
+        fencing_token=first_lease.fencing_token,
+        now=NOW,
+    )
+    assert store.complete(
+        account_id=first_account,
+        idempotency_key=key,
+        owner=first_owner,
+        fencing_token=first_lease.fencing_token,
+        now=NOW,
+    )
+
+    second_owner = uuid4()
+    second_lease = store.claim(now=NOW, owner=second_owner)
+    assert second_lease is not None
+    assert second_lease.account_id == second_account
+    assert store.complete(
+        account_id=second_account,
+        idempotency_key=key,
+        owner=second_owner,
+        fencing_token=second_lease.fencing_token,
+        now=NOW,
+    )
 
 
 @pytest.mark.unit
@@ -1371,6 +1418,7 @@ def test_m7_validation_and_fake_store_edge_cases() -> None:
         store.claim(now=NOW, owner=uuid4(), lease=timedelta(0))
     assert (
         store.complete(
+            account_id=account_id,
             idempotency_key=sha256(b"missing").digest(),
             owner=uuid4(),
             fencing_token=1,

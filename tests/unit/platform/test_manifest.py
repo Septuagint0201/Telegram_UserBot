@@ -29,7 +29,7 @@ def test_alembic_head_fits_default_version_column() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     head = ScriptDirectory.from_config(config).get_current_head()
-    assert head == "0021_m7_evidence_activity"
+    assert head == "0022_m7_job_scope_and_deadline"
     assert len(head) <= 32
 
 
@@ -54,6 +54,7 @@ def test_valid_manifest_semantics() -> None:
         ("M4", 11),
         ("M5", 11),
         ("M6", 12),
+        ("M7", 12),
     ],
 )
 def test_requirement_ids_follow_supported_manifest_milestone(milestone: str, count: int) -> None:

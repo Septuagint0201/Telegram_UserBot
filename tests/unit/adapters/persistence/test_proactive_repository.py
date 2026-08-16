@@ -338,7 +338,13 @@ async def test_proactive_persistence_success_paths_are_transaction_shaped() -> N
         idempotency_key=b"a" * 32,
         available_at=NOW,
     )
-    assert await repo.complete_job(idempotency_key=key, owner=uuid4(), fencing_token=1, now=NOW)
+    assert await repo.complete_job(
+        account_id=account_id,
+        idempotency_key=key,
+        owner=uuid4(),
+        fencing_token=1,
+        now=NOW,
+    )
     assert await repo.recover_expired(now=NOW) == 1
     assert await repo.reap_budget(now=NOW) == 0
     repo.settle_budget = AsyncMock(return_value=None)  # type: ignore[method-assign]
