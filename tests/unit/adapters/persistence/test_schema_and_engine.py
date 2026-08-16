@@ -16,6 +16,7 @@ from telegram_userbot.adapters.persistence.schema import (
     M1_TABLES,
     M5_TABLES,
     M6_TABLES,
+    context_preview_deliveries,
     copilot_drafts,
     memories,
     memory_proposals,
@@ -372,6 +373,28 @@ def test_recovery_binding_migration_fences_delete_and_proactive_side_effects() -
     }
     assert "fk_copilot_drafts_proactive_decision_scope" not in {
         constraint.name for constraint in copilot_drafts.foreign_key_constraints
+    }
+
+
+@pytest.mark.unit
+def test_preview_delete_retry_migration_is_bounded_indexed_and_reversible() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0018_m5_retry_budget_proof.py"
+    ).read_text(encoding="utf-8")
+
+    assert "delete_attempt_count integer NOT NULL DEFAULT 0" in migration
+    assert "delete_next_attempt_at timestamptz" in migration
+    assert "delete_first_failed_at timestamptz" in migration
+    assert "delete_critical_alerted_at timestamptz" in migration
+    assert "ix_context_preview_deliveries_delete_due" in migration
+    assert "delete_retry_state_match" in migration
+    assert "def downgrade() -> None:" in migration
+    assert not context_preview_deliveries.c.delete_attempt_count.nullable
+    assert {index.name for index in context_preview_deliveries.indexes} >= {
+        "ix_context_preview_deliveries_delete_due"
     }
 
 

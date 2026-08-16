@@ -838,7 +838,18 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
     assert result.state is ReservationState.COMMITTED
 
     session.execute.side_effect = [_Result(row)]
-    with pytest.raises(ValueError, match="bound side effect"):
+    with pytest.raises(ValueError, match="started Telegram side effect"):
+        await repo.settle_budget(
+            account_id=account_id,
+            reservation_key=key,
+            target=ReservationState.COMMITTED,
+            now=NOW,
+        )
+
+    group_id = uuid4()
+    session.execute.side_effect = [_Result(dict(row, outbound_group_id=group_id))]
+    session.scalar.return_value = None
+    with pytest.raises(ValueError, match="started Telegram side effect"):
         await repo.settle_budget(
             account_id=account_id,
             reservation_key=key,
@@ -847,11 +858,12 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         )
 
     session.execute.side_effect = [
-        _Result(dict(row, outbound_group_id=uuid4())),
+        _Result(dict(row, outbound_group_id=group_id)),
         _Result(rowcount=1),
         _Result(rowcount=1),
         _Result(rowcount=1),
     ]
+    session.scalar.return_value = group_id
     committed_after_expiry = await repo.settle_budget(
         account_id=account_id,
         reservation_key=key,
@@ -884,6 +896,61 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
             target_id=uuid4(),
             now=NOW,
         )
+
+
+@pytest.mark.asyncio
+async def test_started_proactive_side_effect_cannot_release_budget() -> None:
+    account_id, conversation_id, decision_id, group_id = uuid4(), uuid4(), uuid4(), uuid4()
+    key = b"x" * 32
+    session = AsyncMock()
+    session.execute.return_value = _Result(
+        {
+            "state": ReservationState.HELD.value,
+            "target": ProactiveTarget.AUTO_SEND.value,
+            "account_id": account_id,
+            "conversation_id": conversation_id,
+            "decision_id": decision_id,
+            "outbound_group_id": group_id,
+            "copilot_draft_id": None,
+        }
+    )
+    session.scalar.return_value = group_id
+    with pytest.raises(ValueError, match="cannot release budget"):
+        await ProactiveRepository(cast(AsyncSession, session)).settle_budget(
+            account_id=account_id,
+            reservation_key=key,
+            target=ReservationState.RELEASED,
+            now=NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_budget_side_effect_proof_covers_auto_and_copilot_delivery_groups() -> None:
+    account_id, conversation_id, decision_id = uuid4(), uuid4(), uuid4()
+    group_id, draft_id = uuid4(), uuid4()
+    session = AsyncMock()
+    repo = ProactiveRepository(cast(AsyncSession, session))
+    auto_row = {
+        "target": ProactiveTarget.AUTO_SEND.value,
+        "account_id": account_id,
+        "conversation_id": conversation_id,
+        "decision_id": decision_id,
+        "outbound_group_id": None,
+        "copilot_draft_id": None,
+    }
+    assert not await repo._budget_side_effect_started(auto_row)
+    session.scalar.side_effect = [None, group_id]
+    assert not await repo._budget_side_effect_started(auto_row | {"outbound_group_id": group_id})
+    assert await repo._budget_side_effect_started(auto_row | {"outbound_group_id": group_id})
+
+    copilot_row = auto_row | {
+        "target": ProactiveTarget.COPILOT_DRAFT.value,
+        "outbound_group_id": None,
+    }
+    assert not await repo._budget_side_effect_started(copilot_row)
+    session.scalar.side_effect = [None, group_id]
+    assert not await repo._budget_side_effect_started(copilot_row | {"copilot_draft_id": draft_id})
+    assert await repo._budget_side_effect_started(copilot_row | {"copilot_draft_id": draft_id})
 
 
 @pytest.mark.asyncio

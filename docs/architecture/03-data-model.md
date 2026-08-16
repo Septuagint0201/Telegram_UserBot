@@ -2322,6 +2322,13 @@ context_preview_deliveries(
   bot_message_id BIGINT?,
   sent_at TIMESTAMPTZ?,
   delete_after TIMESTAMPTZ?,
+  delete_claimed_at TIMESTAMPTZ?,
+  delete_lease_expires_at TIMESTAMPTZ?,
+  delete_fencing_token BIGINT NOT NULL DEFAULT 0,
+  delete_attempt_count INTEGER NOT NULL DEFAULT 0,
+  delete_next_attempt_at TIMESTAMPTZ?,
+  delete_first_failed_at TIMESTAMPTZ?,
+  delete_critical_alerted_at TIMESTAMPTZ?,
   deleted_at TIMESTAMPTZ?,
   last_error_code TEXT?,
   UNIQUE (request_id, ordinal),
@@ -2332,7 +2339,7 @@ context_preview_deliveries(
 )
 ```
 
-Delivery表冗余`bot_identity_id/bot_chat_id`以建立上述unique和删除路由，并通过包含request scope的composite FK保持一致。Preview token保存hash而非callback明文，并通过request间接绑定exact manifest，同时直接绑定admin、Bot chat和默认5分钟deadline。
+Delivery表冗余`bot_identity_id/bot_chat_id`以建立上述unique和删除路由，并通过包含request scope的composite FK保持一致。删除worker先提交lease与递增fencing token，再调用Bot RPC；失败以1分钟为基数指数退避并在1小时封顶，首次失败和下一次attempt都持久化，delete deadline超过24小时后只写一次critical alert时间。Preview token保存hash而非callback明文，并通过request间接绑定exact manifest，同时直接绑定admin、Bot chat和默认5分钟deadline。
 
 确认CAS消费token后，`control`再次验证manifest/source未redacted，在内存中重建并按plain-text chunk发送。每个已知Bot message ID默认10分钟后best-effort删除。Bot send在RPC后断连可能成为`send_unknown`；由于Bot API路径没有本项目可持久化的random ID对账，系统不自动重发unknown chunk，避免扩大敏感内容复制。没有message ID时无法可靠自动删除，必须告警并在Disclosure中保留该残余风险。
 
@@ -2849,7 +2856,7 @@ Control Bot draft在事务外完成schema、权重和fixture validation。激活
 
 确认事务后，`control`只通过受限view/function按精确manifest source refs在内存中重建canonical文本，生成确定性plain-text chunks，并在发送前插入不含正文的delivery metadata。每段Bot RPC完成后短事务记录已知message ID；RPC后断连则标记`send_unknown`且不自动重发。所有已知段发送完成后设置request `delivered`和默认10分钟`delete_after`。
 
-删除worker只领取已到期且具有已知message ID的delivery row，调用Bot delete后记录`deleted`或稳定错误码。删除job、outbox、log和audit都不得携带preview正文；没有message ID的unknown段只能告警并保留残余风险。Contact purge/account wipe可把删除deadline提前，但不能从已redacted source重新构建正文。
+删除worker只领取已到期且具有已知message ID的delivery row，先提交lease/fencing claim，再调用Bot delete并记录`deleted`或稳定错误码。失败row只有到达持久化`delete_next_attempt_at`后才能重领，过期worker不能覆盖新claim；delete deadline超过24小时后只产生一次critical alert。删除job、outbox、log和audit都不得携带preview正文；没有message ID的unknown段只能告警并保留残余风险。Contact purge/account wipe可把删除deadline提前，但不能从已redacted source重新构建正文。
 
 ### 16.14 Job claim
 

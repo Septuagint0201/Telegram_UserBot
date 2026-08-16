@@ -6,7 +6,7 @@ from typing import cast
 from uuid import UUID, uuid7
 
 import pytest
-from sqlalchemy import insert, select, text
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from telegram_userbot.adapters.persistence.proactive_repository import ProactiveRepository
@@ -471,7 +471,7 @@ async def test_m7_budget_target_binding_precedes_settlement(db_session: AsyncSes
         target=ProactiveTarget.AUTO_SEND,
     )
     assert reservation is not None
-    with pytest.raises(ValueError, match="bound side effect"):
+    with pytest.raises(ValueError, match="started Telegram side effect"):
         await repository.commit_budget(account_id=account_id, reservation_key=key, now=NOW)
 
     group_id = uuid7()
@@ -502,6 +502,15 @@ async def test_m7_budget_target_binding_precedes_settlement(db_session: AsyncSes
         now=NOW,
     )
     assert bound is not None
+    with pytest.raises(ValueError, match="started Telegram side effect"):
+        await repository.commit_budget(account_id=account_id, reservation_key=key, now=NOW)
+    await db_session.execute(
+        update(outbound_delivery_groups)
+        .where(outbound_delivery_groups.c.id == group_id)
+        .values(first_side_effect_at=NOW, state="sending")
+    )
+    with pytest.raises(ValueError, match="cannot release budget"):
+        await repository.release_budget(account_id=account_id, reservation_key=key, now=NOW)
     committed = await repository.commit_budget(account_id=account_id, reservation_key=key, now=NOW)
     assert committed is not None
     assert committed.state.value == "committed"
@@ -593,6 +602,47 @@ async def test_m7_budget_target_binding_precedes_settlement(db_session: AsyncSes
         )
         == draft_id
     )
+    with pytest.raises(ValueError, match="started Telegram side effect"):
+        await repository.commit_budget(
+            account_id=draft_account_id,
+            reservation_key=draft_key,
+            now=NOW,
+        )
+    approved_group_id = uuid7()
+    await db_session.execute(
+        insert(outbound_delivery_groups).values(
+            id=approved_group_id,
+            account_id=draft_account_id,
+            conversation_id=draft_conversation_id,
+            copilot_draft_id=draft_id,
+            proactive_decision_id=second_decision,
+            source="copilot_approved",
+            state="sending",
+            intent_count=1,
+            idempotency_key=b"p" * 32,
+            mode_version=1,
+            content_revision=0,
+            account_control_version=1,
+            max_delivery_chunks=1,
+            send_authorized_at=NOW,
+            first_side_effect_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    with pytest.raises(ValueError, match="cannot release budget"):
+        await repository.release_budget(
+            account_id=draft_account_id,
+            reservation_key=draft_key,
+            now=NOW,
+        )
+    draft_committed = await repository.commit_budget(
+        account_id=draft_account_id,
+        reservation_key=draft_key,
+        now=NOW,
+    )
+    assert draft_committed is not None
+    assert draft_committed.state.value == "committed"
 
 
 @pytest.mark.integration

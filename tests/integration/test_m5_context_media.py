@@ -543,6 +543,7 @@ async def test_m5_preview_delete_claim_is_fenced_and_reclaimable(db_session: Asy
     first = await repository.due_preview_deletions(bot_identity="control-bot", now=delete_after)
     assert len(first) == 1
     assert first[0].fencing_token == 1
+    assert first[0].attempt_count == 1
     assert not await repository.due_preview_deletions(
         bot_identity="control-bot", now=delete_after + timedelta(seconds=59)
     )
@@ -551,18 +552,34 @@ async def test_m5_preview_delete_claim_is_fenced_and_reclaimable(db_session: Asy
     )
     assert len(reclaimed) == 1
     assert reclaimed[0].fencing_token == 2
+    assert reclaimed[0].attempt_count == 2
     with pytest.raises(RuntimeError, match="deletion_conflict"):
         await repository.finish_preview_deletion(
             deletion=first[0], deleted=True, now=delete_after + timedelta(seconds=60)
         )
+    assert not await repository.finish_preview_deletion(
+        deletion=reclaimed[0],
+        deleted=False,
+        now=delete_after + timedelta(seconds=60),
+        error_code="synthetic_delete_failure",
+    )
+    assert not await repository.due_preview_deletions(
+        bot_identity="control-bot", now=delete_after + timedelta(minutes=2, seconds=59)
+    )
+    retry = await repository.due_preview_deletions(
+        bot_identity="control-bot", now=delete_after + timedelta(minutes=3)
+    )
+    assert len(retry) == 1
+    assert retry[0].fencing_token == 3
+    assert retry[0].attempt_count == 3
     await repository.finish_preview_deletion(
-        deletion=reclaimed[0], deleted=True, now=delete_after + timedelta(seconds=60)
+        deletion=retry[0], deleted=True, now=delete_after + timedelta(minutes=3)
     )
     deleted = (
         (
             await db_session.execute(
                 select(context_preview_deliveries).where(
-                    context_preview_deliveries.c.id == reclaimed[0].delivery_id
+                    context_preview_deliveries.c.id == retry[0].delivery_id
                 )
             )
         )
@@ -572,6 +589,9 @@ async def test_m5_preview_delete_claim_is_fenced_and_reclaimable(db_session: Asy
     assert deleted["state"] == "deleted"
     assert deleted["delete_claimed_at"] is None
     assert deleted["delete_lease_expires_at"] is None
+    assert deleted["delete_next_attempt_at"] is None
+    assert deleted["delete_attempt_count"] == 3
+    assert deleted["delete_first_failed_at"] == delete_after + timedelta(seconds=60)
 
 
 @pytest.mark.integration

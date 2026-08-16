@@ -536,7 +536,7 @@ Control Bot 运行在独立的 `control` 进程中，不持有 Telethon Session�
 
 完整预览是高敏感操作。命令先展示精确manifest、联系人、内容范围和“正文将复制到管理员Telegram会话”的警告；管理员通过私聊内的Confirm按钮回调提交绑定本人、Bot chat、manifest hash和短期deadline的一次性token，token不进入Bot消息正文或可手输命令参数，Control Bot随后才重建并发送完整canonical文本。图片只显示media reference、hash、尺寸和`detail=auto`，不向Bot重传二进制。
 
-确认token默认5分钟过期且只能使用一次；preview消息默认10分钟后尽力删除，并持久化Bot message ID和删除结果。Telegram消息删除不能保证清除通知、客户端缓存、转发、截图或平台副本，删除失败必须告警，不能宣称已经可靠擦除。Preview不调用模型、不创建Telegram真人账号outbound intent，也不能恢复已经delete/forget/purge/redact的正文。
+确认token默认5分钟过期且只能使用一次；preview消息默认10分钟后尽力删除，并持久化Bot message ID、删除lease/fencing、attempt和结果。删除失败按1分钟起步、最多1小时的指数退避重试，越过delete deadline 24小时只触发一次critical alert；Telegram消息删除不能保证清除通知、客户端缓存、转发、截图或平台副本，不能宣称已经可靠擦除。Preview不调用模型、不创建Telegram真人账号outbound intent，也不能恢复已经delete/forget/purge/redact的正文。
 
 ```text
 /pause

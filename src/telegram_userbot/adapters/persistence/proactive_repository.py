@@ -1005,6 +1005,38 @@ class ProactiveRepository:
             if bucket_update.rowcount != 1:
                 raise RuntimeError("budget bucket expiry CAS failed")
 
+    async def _budget_side_effect_started(self, row: Any) -> bool:
+        reservation_target = ProactiveTarget(cast(str, row["target"]))
+        if reservation_target is ProactiveTarget.AUTO_SEND:
+            group_id = cast(UUID | None, row["outbound_group_id"])
+            if group_id is None:
+                return False
+            started_id = await self._session.scalar(
+                select(outbound_delivery_groups.c.id).where(
+                    outbound_delivery_groups.c.id == group_id,
+                    outbound_delivery_groups.c.account_id == row["account_id"],
+                    outbound_delivery_groups.c.conversation_id == row["conversation_id"],
+                    outbound_delivery_groups.c.proactive_decision_id == row["decision_id"],
+                    outbound_delivery_groups.c.source == "proactive_ai",
+                    outbound_delivery_groups.c.first_side_effect_at.is_not(None),
+                )
+            )
+            return started_id == group_id
+        draft_id = cast(UUID | None, row["copilot_draft_id"])
+        if draft_id is None:
+            return False
+        started_id = await self._session.scalar(
+            select(outbound_delivery_groups.c.id).where(
+                outbound_delivery_groups.c.account_id == row["account_id"],
+                outbound_delivery_groups.c.conversation_id == row["conversation_id"],
+                outbound_delivery_groups.c.copilot_draft_id == draft_id,
+                outbound_delivery_groups.c.proactive_decision_id == row["decision_id"],
+                outbound_delivery_groups.c.source == "copilot_approved",
+                outbound_delivery_groups.c.first_side_effect_at.is_not(None),
+            )
+        )
+        return started_id is not None
+
     async def settle_budget(
         self,
         *,
@@ -1045,15 +1077,25 @@ class ProactiveRepository:
             ReservationState.EXPIRED,
         }:
             return _reservation(row)
-        if target in {ReservationState.COMMITTED, ReservationState.SEND_UNKNOWN}:
-            reservation_target = ProactiveTarget(cast(str, row["target"]))
-            side_effect_id = (
-                row["outbound_group_id"]
-                if reservation_target is ProactiveTarget.AUTO_SEND
-                else row["copilot_draft_id"]
-            )
-            if side_effect_id is None:
-                raise ValueError("budget settlement requires a bound side effect")
+        side_effect_started = await self._budget_side_effect_started(row)
+        if (
+            target
+            in {
+                ReservationState.COMMITTED,
+                ReservationState.SEND_UNKNOWN,
+            }
+            and not side_effect_started
+        ):
+            raise ValueError("budget settlement requires a started Telegram side effect")
+        if (
+            target
+            in {
+                ReservationState.RELEASED,
+                ReservationState.EXPIRED,
+            }
+            and side_effect_started
+        ):
+            raise ValueError("started Telegram side effect cannot release budget")
         if (
             cast(datetime, row["expires_at"]) <= current_time
             and target is ReservationState.RELEASED

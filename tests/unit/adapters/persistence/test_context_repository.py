@@ -13,6 +13,7 @@ from telegram_userbot.adapters.persistence.context_repository import (
     ContextRepository,
     PreviewDeletionRecord,
     PreviewRequestRecord,
+    _preview_delete_backoff,
     _scores_match,
 )
 from telegram_userbot.domain.shared.redaction import SensitiveValue
@@ -26,6 +27,15 @@ def test_manifest_score_replay_distinguishes_missing_and_quantized_values() -> N
     assert not _scores_match("0.5", None)
     assert not _scores_match(None, 0.5)
     assert _scores_match("0.5000000", 0.5)
+
+
+@pytest.mark.unit
+def test_preview_delete_backoff_is_exponential_and_capped() -> None:
+    assert _preview_delete_backoff(1) == timedelta(minutes=1)
+    assert _preview_delete_backoff(3) == timedelta(minutes=4)
+    assert _preview_delete_backoff(20) == timedelta(hours=1)
+    with pytest.raises(ValueError, match="attempt count"):
+        _preview_delete_backoff(0)
 
 
 class FakeResult:
@@ -482,18 +492,31 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
         request=request, ordinal=1
     )
 
-    deletion = PreviewDeletionRecord(7, request_id, "control-bot", 42, 100, 3)
+    deletion = PreviewDeletionRecord(
+        7,
+        request_id,
+        "control-bot",
+        42,
+        100,
+        3,
+        NOW - timedelta(minutes=10),
+        3,
+        False,
+    )
     for states in (("deleted",), ("delete_failed",), ("sent",), ("deleted", "send_unknown")):
         deletion_fake = FakeSession(
             scalars=(7, request_id),
             scalar_sequences=(states,),
         )
-        await ContextRepository(cast(AsyncSession, deletion_fake)).finish_preview_deletion(
+        critical = await ContextRepository(
+            cast(AsyncSession, deletion_fake)
+        ).finish_preview_deletion(
             deletion=deletion,
             deleted=states in {("deleted",), ("deleted", "send_unknown")},
             now=NOW,
             error_code="synthetic" if states == ("delete_failed",) else None,
         )
+        assert not critical
         assert len(deletion_fake.statements) == 3
         deletion_sql = str(deletion_fake.statements[0])
         assert "context_preview_deliveries.request_id" in deletion_sql
@@ -508,6 +531,51 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
             deleted=True,
             now=NOW,
         )
+
+
+@pytest.mark.unit
+async def test_context_preview_deletion_emits_critical_once_after_24_hours() -> None:
+    request_id = UUID(int=1)
+    deletion = PreviewDeletionRecord(
+        8,
+        request_id,
+        "control-bot",
+        42,
+        101,
+        1,
+        NOW - timedelta(hours=24),
+        1,
+        False,
+    )
+    fake = FakeSession(scalars=(8, request_id), scalar_sequences=(("delete_failed",),))
+    assert await ContextRepository(cast(AsyncSession, fake)).finish_preview_deletion(
+        deletion=deletion,
+        deleted=False,
+        now=NOW,
+        error_code="synthetic",
+    )
+    deletion_sql = str(fake.statements[0])
+    assert "delete_next_attempt_at" in deletion_sql
+    assert "delete_critical_alerted_at" in deletion_sql
+
+    replay = PreviewDeletionRecord(
+        8,
+        request_id,
+        "control-bot",
+        42,
+        101,
+        2,
+        NOW - timedelta(hours=25),
+        2,
+        True,
+    )
+    replay_fake = FakeSession(scalars=(8, request_id), scalar_sequences=(("delete_failed",),))
+    assert not await ContextRepository(cast(AsyncSession, replay_fake)).finish_preview_deletion(
+        deletion=replay,
+        deleted=False,
+        now=NOW,
+        error_code="synthetic",
+    )
 
 
 @pytest.mark.unit
@@ -543,7 +611,7 @@ async def test_context_repository_rejects_invalid_owner_and_naive_times_before_s
     request = PreviewRequestRecord(
         UUID(int=7), UUID(int=8), b"m" * 32, b"s" * 32, "confirmed", 42, 42, "bot"
     )
-    deletion = PreviewDeletionRecord(1, request.request_id, "bot", 42, 9, 1)
+    deletion = PreviewDeletionRecord(1, request.request_id, "bot", 42, 9, 1, NOW, 1, False)
     with pytest.raises(ValueError, match="now must be timezone-aware"):
         await repository.issue_preview(
             account_id=account_id,

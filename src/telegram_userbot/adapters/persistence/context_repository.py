@@ -9,7 +9,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, cast
 from uuid import UUID, uuid7
 
-from sqlalchemy import and_, insert, or_, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +43,9 @@ MAX_PREVIEW_TTL = timedelta(minutes=5)
 MAX_PREVIEW_DELETE_AFTER = timedelta(minutes=10)
 MAX_PREVIEW_CHUNKS = 8
 DEFAULT_PREVIEW_DELETE_LEASE = timedelta(minutes=1)
+PREVIEW_DELETE_RETRY_BASE = timedelta(minutes=1)
+PREVIEW_DELETE_RETRY_CAP = timedelta(hours=1)
+PREVIEW_DELETE_CRITICAL_AFTER = timedelta(hours=24)
 SCORE_QUANTUM = Decimal("0.0000001")
 
 
@@ -52,6 +55,13 @@ def _scores_match(persisted: object, expected: float | None) -> bool:
     return persisted is not None and Decimal(str(persisted)) == Decimal(str(expected)).quantize(
         SCORE_QUANTUM, rounding=ROUND_HALF_UP
     )
+
+
+def _preview_delete_backoff(attempt_count: int) -> timedelta:
+    if attempt_count <= 0:
+        raise ValueError("preview delete attempt count must be positive")
+    multiplier = 1 << min(attempt_count - 1, 10)
+    return min(PREVIEW_DELETE_RETRY_BASE * multiplier, PREVIEW_DELETE_RETRY_CAP)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +120,9 @@ class PreviewDeletionRecord:
     bot_chat_id: int
     bot_message_id: int
     fencing_token: int
+    delete_after: datetime
+    attempt_count: int
+    critical_alerted: bool
 
 
 class ContextRepository:
@@ -1113,7 +1126,11 @@ class ContextRepository:
         ):
             raise ValueError("context_preview_deletion_query_invalid")
         eligible = or_(
-            context_preview_deliveries.c.state.in_(("sent", "delete_failed")),
+            context_preview_deliveries.c.state == "sent",
+            and_(
+                context_preview_deliveries.c.state == "delete_failed",
+                context_preview_deliveries.c.delete_next_attempt_at <= current_time,
+            ),
             and_(
                 context_preview_deliveries.c.state == "delete_pending",
                 context_preview_deliveries.c.delete_lease_expires_at <= current_time,
@@ -1154,6 +1171,8 @@ class ContextRepository:
                     delete_claimed_at=current_time,
                     delete_lease_expires_at=current_time + lease,
                     delete_fencing_token=context_preview_deliveries.c.delete_fencing_token + 1,
+                    delete_attempt_count=context_preview_deliveries.c.delete_attempt_count + 1,
+                    delete_next_attempt_at=None,
                     last_error_code=None,
                 )
                 .returning(context_preview_deliveries.c.delete_fencing_token)
@@ -1168,6 +1187,9 @@ class ContextRepository:
                     cast(int, row["bot_chat_id"]),
                     cast(int, row["bot_message_id"]),
                     cast(int, fencing_token),
+                    cast(datetime, row["delete_after"]),
+                    cast(int, row["delete_attempt_count"]) + 1,
+                    row["delete_critical_alerted_at"] is not None,
                 )
             )
         return tuple(records)
@@ -1179,8 +1201,29 @@ class ContextRepository:
         deleted: bool,
         now: datetime,
         error_code: str | None = None,
-    ) -> None:
+    ) -> bool:
         current_time = require_aware(now, "now")
+        critical_alert = (
+            not deleted
+            and not deletion.critical_alerted
+            and current_time >= deletion.delete_after + PREVIEW_DELETE_CRITICAL_AFTER
+        )
+        delivery_values: dict[str, object] = {
+            "state": "deleted" if deleted else "delete_failed",
+            "delete_claimed_at": None,
+            "delete_lease_expires_at": None,
+            "delete_next_attempt_at": (
+                None if deleted else current_time + _preview_delete_backoff(deletion.attempt_count)
+            ),
+            "deleted_at": current_time if deleted else None,
+            "last_error_code": None if deleted else error_code or "delete_failed",
+        }
+        if not deleted:
+            delivery_values["delete_first_failed_at"] = func.coalesce(
+                context_preview_deliveries.c.delete_first_failed_at, current_time
+            )
+        if critical_alert:
+            delivery_values["delete_critical_alerted_at"] = current_time
         completed_delivery = await self._session.scalar(
             update(context_preview_deliveries)
             .where(
@@ -1192,13 +1235,7 @@ class ContextRepository:
                 context_preview_deliveries.c.state == "delete_pending",
                 context_preview_deliveries.c.delete_fencing_token == deletion.fencing_token,
             )
-            .values(
-                state="deleted" if deleted else "delete_failed",
-                delete_claimed_at=None,
-                delete_lease_expires_at=None,
-                deleted_at=current_time if deleted else None,
-                last_error_code=None if deleted else error_code or "delete_failed",
-            )
+            .values(**delivery_values)
             .returning(context_preview_deliveries.c.id)
         )
         if completed_delivery != deletion.delivery_id:
@@ -1249,3 +1286,4 @@ class ContextRepository:
         )
         if completed_request != deletion.request_id:
             raise RuntimeError("context_preview_deletion_request_conflict")
+        return critical_alert

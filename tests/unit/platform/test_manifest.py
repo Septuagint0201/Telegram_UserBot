@@ -29,7 +29,7 @@ def test_alembic_head_fits_default_version_column() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     head = ScriptDirectory.from_config(config).get_current_head()
-    assert head == "0017_m5_m7_recovery_binding"
+    assert head == "0018_m5_retry_budget_proof"
     assert len(head) <= 32
 
 

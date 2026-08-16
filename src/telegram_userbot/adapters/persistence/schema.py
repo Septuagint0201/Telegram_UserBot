@@ -24,6 +24,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    and_,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -2633,6 +2634,10 @@ context_preview_deliveries = Table(
     Column("delete_claimed_at", UTC_TIMESTAMP),
     Column("delete_lease_expires_at", UTC_TIMESTAMP),
     Column("delete_fencing_token", BigInteger, nullable=False, server_default=text("0")),
+    Column("delete_attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("delete_next_attempt_at", UTC_TIMESTAMP),
+    Column("delete_first_failed_at", UTC_TIMESTAMP),
+    Column("delete_critical_alerted_at", UTC_TIMESTAMP),
     Column("deleted_at", UTC_TIMESTAMP),
     Column("last_error_code", Text),
     ForeignKeyConstraint(
@@ -2651,12 +2656,23 @@ context_preview_deliveries = Table(
         name="state_values",
     ),
     CheckConstraint("delete_fencing_token >= 0", name="delete_fencing_token_nonnegative"),
+    CheckConstraint("delete_attempt_count >= 0", name="delete_attempt_count_nonnegative"),
     CheckConstraint(
         "(state = 'delete_pending' AND delete_claimed_at IS NOT NULL AND "
         "delete_lease_expires_at IS NOT NULL AND delete_fencing_token > 0) OR "
         "(state <> 'delete_pending' AND delete_claimed_at IS NULL AND "
         "delete_lease_expires_at IS NULL)",
         name="delete_lease_state_match",
+    ),
+    CheckConstraint(
+        "(state = 'delete_failed' AND delete_next_attempt_at IS NOT NULL AND "
+        "delete_first_failed_at IS NOT NULL) OR "
+        "(state <> 'delete_failed' AND delete_next_attempt_at IS NULL)",
+        name="delete_retry_state_match",
+    ),
+    CheckConstraint(
+        "delete_critical_alerted_at IS NULL OR delete_first_failed_at IS NOT NULL",
+        name="delete_critical_requires_failure",
     ),
     UniqueConstraint("request_id", "ordinal", name="uq_context_preview_deliveries_ordinal"),
 )
@@ -2667,6 +2683,18 @@ Index(
     context_preview_deliveries.c.bot_message_id,
     unique=True,
     postgresql_where=context_preview_deliveries.c.bot_message_id.is_not(None),
+)
+Index(
+    "ix_context_preview_deliveries_delete_due",
+    context_preview_deliveries.c.bot_identity,
+    context_preview_deliveries.c.state,
+    context_preview_deliveries.c.delete_next_attempt_at,
+    context_preview_deliveries.c.delete_after,
+    context_preview_deliveries.c.id,
+    postgresql_where=and_(
+        context_preview_deliveries.c.bot_message_id.is_not(None),
+        context_preview_deliveries.c.state.in_(("sent", "delete_pending", "delete_failed")),
+    ),
 )
 
 # This cross-milestone foreign key is created explicitly by migration 0006.

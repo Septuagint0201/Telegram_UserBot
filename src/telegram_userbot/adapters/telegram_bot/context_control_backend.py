@@ -301,7 +301,7 @@ class DurableContextControlBackend:
                     bot_message_id=item.bot_message_id,
                 )
             except Exception:
-                await self._repository.finish_preview_deletion(
+                critical_alert = await self._repository.finish_preview_deletion(
                     deletion=item,
                     deleted=False,
                     now=now,
@@ -309,7 +309,11 @@ class DurableContextControlBackend:
                 )
                 await self._repository.commit_preview_boundary()
                 if self._on_delete_failure is not None:
-                    self._on_delete_failure("preview_delete_failed")
+                    self._on_delete_failure(
+                        "preview_delete_failed_critical"
+                        if critical_alert
+                        else "preview_delete_failed"
+                    )
             else:
                 await self._repository.finish_preview_deletion(
                     deletion=item,

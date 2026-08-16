@@ -45,6 +45,7 @@ class RepositoryFake(ContextRepository):
     def __init__(self) -> None:
         self.deliveries: list[tuple[int, str, int | None]] = []
         self.deletion_results: list[tuple[bool, str | None]] = []
+        self.deletion_critical = False
         self.claim_result = True
         self.commit_count = 0
         self.initial_states: tuple[str, ...] = ()
@@ -54,7 +55,17 @@ class RepositoryFake(ContextRepository):
             UUID(int=3), "00000000", NOW + timedelta(minutes=1), SensitiveValue("challenge")
         )
         self.due_deletions: tuple[PreviewDeletionRecord, ...] = (
-            PreviewDeletionRecord(7, REQUEST.request_id, REQUEST.bot_identity, 42, 99, 1),
+            PreviewDeletionRecord(
+                7,
+                REQUEST.request_id,
+                REQUEST.bot_identity,
+                42,
+                99,
+                1,
+                NOW - timedelta(minutes=10),
+                1,
+                False,
+            ),
         )
 
     async def latest_summary(self, **kwargs: object) -> ContextSummaryRecord | None:
@@ -138,8 +149,9 @@ class RepositoryFake(ContextRepository):
         deleted: bool,
         now: datetime,
         error_code: str | None = None,
-    ) -> None:
+    ) -> bool:
         self.deletion_results.append((deleted, error_code))
+        return self.deletion_critical
 
 
 class RebuilderFake:
@@ -471,3 +483,20 @@ async def test_durable_preview_delete_failure_is_persisted_and_alerted() -> None
 
     repository.due_deletions = ()
     assert await service.delete_due(now=NOW) == 0
+
+    repository.due_deletions = (
+        PreviewDeletionRecord(
+            8,
+            REQUEST.request_id,
+            REQUEST.bot_identity,
+            42,
+            100,
+            1,
+            NOW - timedelta(hours=25),
+            1,
+            False,
+        ),
+    )
+    repository.deletion_critical = True
+    assert await service.delete_due(now=NOW) == 0
+    assert alerts[-1] == "preview_delete_failed_critical"
