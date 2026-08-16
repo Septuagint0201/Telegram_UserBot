@@ -954,6 +954,45 @@ async def test_budget_side_effect_proof_covers_auto_and_copilot_delivery_groups(
 
 
 @pytest.mark.asyncio
+async def test_budget_release_requires_terminal_bound_target_without_delivery() -> None:
+    account_id, conversation_id, decision_id = uuid4(), uuid4(), uuid4()
+    group_id, draft_id = uuid4(), uuid4()
+    session = AsyncMock()
+    repo = ProactiveRepository(cast(AsyncSession, session))
+    auto_row = {
+        "target": ProactiveTarget.AUTO_SEND.value,
+        "account_id": account_id,
+        "conversation_id": conversation_id,
+        "decision_id": decision_id,
+        "outbound_group_id": group_id,
+        "copilot_draft_id": None,
+    }
+    session.execute.return_value = _Result({"state": "planned", "first_side_effect_at": None})
+    assert not await repo._budget_target_releasable(auto_row)
+    session.execute.return_value = _Result({"state": "cancelled", "first_side_effect_at": None})
+    assert await repo._budget_target_releasable(auto_row)
+    session.execute.return_value = _Result({"state": "failed", "first_side_effect_at": NOW})
+    assert not await repo._budget_target_releasable(auto_row)
+
+    copilot_row = auto_row | {
+        "target": ProactiveTarget.COPILOT_DRAFT.value,
+        "outbound_group_id": None,
+        "copilot_draft_id": draft_id,
+    }
+    session.scalar.side_effect = ["ready", "ignored", "expired", "send_queued"]
+    session.execute.side_effect = [
+        _Result(None),
+        _Result({"state": "sending", "first_side_effect_at": None}),
+        _Result(None),
+        _Result({"state": "cancelled", "first_side_effect_at": None}),
+    ]
+    assert not await repo._budget_target_releasable(copilot_row)
+    assert not await repo._budget_target_releasable(copilot_row)
+    assert await repo._budget_target_releasable(copilot_row)
+    assert await repo._budget_target_releasable(copilot_row)
+
+
+@pytest.mark.asyncio
 async def test_proactive_budget_target_binding_fails_closed_and_replays() -> None:
     account_id, conversation_id, decision_id = uuid4(), uuid4(), uuid4()
     target_id, reservation_id = uuid4(), uuid4()
@@ -1381,14 +1420,16 @@ async def test_budget_reaper_releases_expired_holds_without_tracked_side_effect(
         rows=[{"account_id": account_id, "reservation_key": reservation_key}]
     )
     repo = ProactiveRepository(cast(AsyncSession, session))
+    repo._budget_target_releasable = AsyncMock(return_value=True)  # type: ignore[method-assign]
     repo.release_budget = AsyncMock(return_value=SimpleNamespace())  # type: ignore[method-assign]
 
     assert await repo.reap_budget(now=NOW) == 1
     statement = session.execute.await_args.args[0]
     rendered = str(statement)
     assert "JOIN proactive_candidates" not in rendered
-    assert "proactive_budget_reservations.outbound_group_id IS NULL" in rendered
-    assert "proactive_budget_reservations.copilot_draft_id IS NULL" in rendered
+    assert "proactive_budget_reservations.outbound_group_id IS NULL" not in rendered
+    assert "proactive_budget_reservations.copilot_draft_id IS NULL" not in rendered
+    repo._budget_target_releasable.assert_awaited_once()
     repo.release_budget.assert_awaited_once_with(
         account_id=account_id,
         reservation_key=reservation_key,

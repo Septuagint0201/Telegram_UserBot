@@ -1037,6 +1037,81 @@ class ProactiveRepository:
         )
         return started_id is not None
 
+    async def _budget_target_releasable(self, row: Any) -> bool:
+        reservation_target = ProactiveTarget(cast(str, row["target"]))
+        if reservation_target is ProactiveTarget.AUTO_SEND:
+            group_id = cast(UUID | None, row["outbound_group_id"])
+            if group_id is None:
+                return True
+            group = (
+                (
+                    await self._session.execute(
+                        select(
+                            outbound_delivery_groups.c.state,
+                            outbound_delivery_groups.c.first_side_effect_at,
+                        )
+                        .where(
+                            outbound_delivery_groups.c.id == group_id,
+                            outbound_delivery_groups.c.account_id == row["account_id"],
+                            outbound_delivery_groups.c.conversation_id == row["conversation_id"],
+                            outbound_delivery_groups.c.proactive_decision_id == row["decision_id"],
+                            outbound_delivery_groups.c.source == "proactive_ai",
+                        )
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return bool(
+                group is not None
+                and group["first_side_effect_at"] is None
+                and group["state"] in {"cancelled", "failed"}
+            )
+
+        draft_id = cast(UUID | None, row["copilot_draft_id"])
+        if draft_id is None:
+            return True
+        draft_state = await self._session.scalar(
+            select(copilot_drafts.c.state)
+            .where(
+                copilot_drafts.c.id == draft_id,
+                copilot_drafts.c.account_id == row["account_id"],
+                copilot_drafts.c.conversation_id == row["conversation_id"],
+                copilot_drafts.c.proactive_decision_id == row["decision_id"],
+                copilot_drafts.c.draft_kind == "proactive",
+            )
+            .with_for_update()
+        )
+        if draft_state is None:
+            return False
+        delivery_group = (
+            (
+                await self._session.execute(
+                    select(
+                        outbound_delivery_groups.c.state,
+                        outbound_delivery_groups.c.first_side_effect_at,
+                    )
+                    .where(
+                        outbound_delivery_groups.c.account_id == row["account_id"],
+                        outbound_delivery_groups.c.conversation_id == row["conversation_id"],
+                        outbound_delivery_groups.c.copilot_draft_id == draft_id,
+                        outbound_delivery_groups.c.proactive_decision_id == row["decision_id"],
+                        outbound_delivery_groups.c.source == "copilot_approved",
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if delivery_group is not None:
+            return bool(
+                delivery_group["first_side_effect_at"] is None
+                and delivery_group["state"] in {"cancelled", "failed"}
+            )
+        return draft_state in {"ignored", "expired", "invalidated", "failed"}
+
     async def settle_budget(
         self,
         *,
@@ -1096,6 +1171,11 @@ class ProactiveRepository:
             and side_effect_started
         ):
             raise ValueError("started Telegram side effect cannot release budget")
+        if target in {
+            ReservationState.RELEASED,
+            ReservationState.EXPIRED,
+        } and not await self._budget_target_releasable(row):
+            raise ValueError("active budget target cannot release budget")
         if (
             cast(datetime, row["expires_at"]) <= current_time
             and target is ReservationState.RELEASED
@@ -1269,20 +1349,10 @@ class ProactiveRepository:
         reservations = tuple(
             (
                 await self._session.execute(
-                    select(
-                        proactive_budget_reservations.c.account_id,
-                        proactive_budget_reservations.c.reservation_key,
-                    )
+                    select(proactive_budget_reservations)
                     .where(
                         proactive_budget_reservations.c.state == "held",
                         proactive_budget_reservations.c.expires_at <= current_time,
-                        # The final gate atomically links a reservation before creating
-                        # a delivery group or COPILOT draft.  Null references therefore
-                        # prove that no tracked side effect exists; candidate state alone
-                        # is not a liveness-safe proxy and can strand expired holds while
-                        # a crashed worker left the candidate open/evaluating.
-                        proactive_budget_reservations.c.outbound_group_id.is_(None),
-                        proactive_budget_reservations.c.copilot_draft_id.is_(None),
                     )
                     .with_for_update(skip_locked=True)
                 )
@@ -1292,6 +1362,8 @@ class ProactiveRepository:
         )
         changed = 0
         for reservation in reservations:
+            if not await self._budget_target_releasable(reservation):
+                continue
             if (
                 await self.release_budget(
                     account_id=reservation["account_id"],

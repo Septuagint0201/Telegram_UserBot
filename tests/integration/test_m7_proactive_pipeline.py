@@ -102,7 +102,7 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
     )
     assert set(rows) == set(M7_TABLES)
     assert await db_session.scalar(text("SELECT version_num FROM alembic_version")) == (
-        "0017_m5_m7_recovery_binding"
+        "0018_m5_retry_budget_proof"
     )
     indexes = set(
         await db_session.scalars(
@@ -502,6 +502,8 @@ async def test_m7_budget_target_binding_precedes_settlement(db_session: AsyncSes
         now=NOW,
     )
     assert bound is not None
+    with pytest.raises(ValueError, match="active budget target"):
+        await repository.release_budget(account_id=account_id, reservation_key=key, now=NOW)
     with pytest.raises(ValueError, match="started Telegram side effect"):
         await repository.commit_budget(account_id=account_id, reservation_key=key, now=NOW)
     await db_session.execute(
@@ -602,6 +604,12 @@ async def test_m7_budget_target_binding_precedes_settlement(db_session: AsyncSes
         )
         == draft_id
     )
+    with pytest.raises(ValueError, match="active budget target"):
+        await repository.release_budget(
+            account_id=draft_account_id,
+            reservation_key=draft_key,
+            now=NOW,
+        )
     with pytest.raises(ValueError, match="started Telegram side effect"):
         await repository.commit_budget(
             account_id=draft_account_id,
@@ -643,6 +651,146 @@ async def test_m7_budget_target_binding_precedes_settlement(db_session: AsyncSes
     )
     assert draft_committed is not None
     assert draft_committed.state.value == "committed"
+
+
+@pytest.mark.integration
+async def test_m7_reaper_releases_terminal_bound_holds_before_side_effect(
+    db_session: AsyncSession,
+) -> None:
+    repository = ProactiveRepository(db_session)
+    reservation_ids: list[UUID] = []
+
+    for index, target in enumerate(
+        (ProactiveTarget.AUTO_SEND, ProactiveTarget.COPILOT_DRAFT), start=1
+    ):
+        account_id, conversation_id, _account_peer_id = await seed_conversation(db_session)
+        contact_id = await db_session.scalar(
+            select(conversations.c.contact_id).where(conversations.c.id == conversation_id)
+        )
+        assert contact_id is not None
+        candidate_id, decision_id, policy_id = await seed_budget_binding(
+            db_session, account_id, contact_id, conversation_id
+        )
+        reservation_key = bytes([index]) * 32
+        reservation = await repository.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
+            limits=BudgetLimits(10, 10),
+            now=NOW - timedelta(minutes=10),
+            expires_at=NOW - timedelta(minutes=5),
+            reservation_key=reservation_key,
+            candidate_id=candidate_id,
+            decision_id=decision_id,
+            policy_version_id=policy_id,
+            authorization_generation=1,
+            target=target,
+        )
+        assert reservation is not None
+        reservation_ids.append(reservation.id)
+
+        if target is ProactiveTarget.AUTO_SEND:
+            target_id = uuid7()
+            await db_session.execute(
+                insert(outbound_delivery_groups).values(
+                    id=target_id,
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    proactive_decision_id=decision_id,
+                    source="proactive_ai",
+                    state="planned",
+                    intent_count=1,
+                    idempotency_key=bytes([index + 10]) * 32,
+                    mode_version=1,
+                    content_revision=0,
+                    account_control_version=1,
+                    max_delivery_chunks=1,
+                    send_authorized_at=NOW - timedelta(minutes=10),
+                    created_at=NOW - timedelta(minutes=10),
+                    updated_at=NOW - timedelta(minutes=10),
+                )
+            )
+        else:
+            turn_id, target_id = uuid7(), uuid7()
+            await db_session.execute(
+                insert(conversation_turns).values(
+                    id=turn_id,
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    state="completed",
+                    trigger_kind="proactive",
+                    collection_sequence=1,
+                )
+            )
+            await db_session.execute(
+                insert(copilot_drafts).values(
+                    id=target_id,
+                    account_id=account_id,
+                    contact_id=contact_id,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    proactive_decision_id=decision_id,
+                    draft_kind="proactive",
+                    state="requested",
+                    account_control_version_snapshot=1,
+                    mode_version_snapshot=1,
+                    content_revision_snapshot=0,
+                    requested_by="system:proactive",
+                    requested_at=NOW - timedelta(minutes=10),
+                )
+            )
+        assert (
+            await repository.bind_budget_target(
+                account_id=account_id,
+                reservation_key=reservation_key,
+                target=target,
+                target_id=target_id,
+                now=NOW - timedelta(minutes=9),
+            )
+            is not None
+        )
+        if target is ProactiveTarget.AUTO_SEND:
+            await db_session.execute(
+                update(outbound_delivery_groups)
+                .where(outbound_delivery_groups.c.id == target_id)
+                .values(state="cancelled", completed_at=NOW - timedelta(minutes=1))
+            )
+        else:
+            await db_session.execute(
+                update(copilot_drafts)
+                .where(copilot_drafts.c.id == target_id)
+                .values(
+                    state="ignored",
+                    terminal_at=NOW - timedelta(minutes=1),
+                    terminal_reason="ADMIN_IGNORED",
+                )
+            )
+
+    assert await repository.reap_budget(now=NOW) == 2
+    states = tuple(
+        await db_session.scalars(
+            select(proactive_budget_reservations.c.state)
+            .where(proactive_budget_reservations.c.id.in_(reservation_ids))
+            .order_by(proactive_budget_reservations.c.id)
+        )
+    )
+    assert states == ("expired", "expired")
+    held_counts = tuple(
+        await db_session.scalars(
+            select(proactive_budget_buckets.c.held_count).where(
+                proactive_budget_buckets.c.account_id.in_(
+                    select(proactive_budget_reservations.c.account_id).where(
+                        proactive_budget_reservations.c.id.in_(reservation_ids)
+                    )
+                )
+            )
+        )
+    )
+    assert held_counts
+    assert set(held_counts) == {0}
 
 
 @pytest.mark.integration

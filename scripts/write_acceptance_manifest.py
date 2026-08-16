@@ -484,6 +484,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0015_context_preview_integrity.py",
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
+                    "alembic/versions/0018_m5_retry_budget_proof.py",
                     "tests/unit/adapters/test_context_control.py",
                     "tests/integration/test_m5_context_media.py",
                 ),
@@ -666,6 +667,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0015_context_preview_integrity.py",
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
+                    "alembic/versions/0018_m5_retry_budget_proof.py",
                     "deploy/postgres/m6_roles.sql",
                     "docs/compatibility/m6.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
@@ -749,6 +751,8 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "test_m7_concurrent_budget_replay_counts_one_hold",
                     "tests.integration.test_m7_proactive_pipeline::"
                     "test_m7_budget_target_binding_precedes_settlement",
+                    "tests.integration.test_m7_proactive_pipeline::"
+                    "test_m7_reaper_releases_terminal_bound_holds_before_side_effect",
                 ),
             ),
             (
@@ -815,6 +819,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0015_context_preview_integrity.py",
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
+                    "alembic/versions/0018_m5_retry_budget_proof.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
