@@ -20,6 +20,7 @@ from telegram_userbot.adapters.persistence.schema import (
     proactive_policies,
 )
 from telegram_userbot.domain.proactive.models import BudgetLimits, BudgetReservation
+from telegram_userbot.domain.proactive.pipeline import ProactiveTarget
 from tests.integration.test_m1_persistence import NOW, seed_conversation
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -37,7 +38,15 @@ async def seed_budget_binding(
     candidate_id = uuid7()
     decision_id = uuid7()
     await session.execute(
-        insert(proactive_policies).values(id=policy_id, account_id=account_id, version_no=1)
+        insert(proactive_policies).values(
+            id=policy_id,
+            account_id=account_id,
+            version_no=1,
+            enabled=True,
+            timezone_name="UTC",
+            account_daily_limit=10,
+            contact_bypass_daily_limit=1,
+        )
     )
     await session.execute(
         insert(proactive_candidates).values(
@@ -48,7 +57,7 @@ async def seed_budget_binding(
             candidate_key=candidate_id.bytes + candidate_id.bytes,
             generation=1,
             membership_hash=b"m" * 32,
-            state="open",
+            state="send_selected",
             window_start_at=NOW,
             window_end_at=NOW + timedelta(hours=1),
             due_at=NOW,
@@ -89,7 +98,7 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
     )
     assert set(rows) == set(M7_TABLES)
     assert await db_session.scalar(text("SELECT version_num FROM alembic_version")) == (
-        "0014_m7_budget_integrity"
+        "0015_context_preview_integrity"
     )
     indexes = set(
         await db_session.scalars(
@@ -273,6 +282,75 @@ async def test_m7_concurrent_job_replay_and_same_owner_reclaim_are_fenced(
 
 
 @pytest.mark.integration
+async def test_m7_terminal_candidate_job_is_not_reclaimed(db_session: AsyncSession) -> None:
+    account_id, conversation_id, _account_peer_id = await seed_conversation(db_session)
+    contact_id = await db_session.scalar(
+        select(conversations.c.contact_id).where(conversations.c.id == conversation_id)
+    )
+    assert contact_id is not None
+    policy_id, candidate_id, job_id = uuid7(), uuid7(), uuid7()
+    await db_session.execute(
+        insert(proactive_policies).values(
+            id=policy_id,
+            account_id=account_id,
+            version_no=1,
+            enabled=True,
+            timezone_name="UTC",
+            account_daily_limit=10,
+            contact_bypass_daily_limit=1,
+        )
+    )
+    await db_session.execute(
+        insert(proactive_candidates).values(
+            id=candidate_id,
+            account_id=account_id,
+            contact_id=contact_id,
+            conversation_id=conversation_id,
+            candidate_key=candidate_id.bytes + candidate_id.bytes,
+            generation=1,
+            membership_hash=b"m" * 32,
+            state="evaluated_none",
+            window_start_at=NOW,
+            window_end_at=NOW + timedelta(hours=1),
+            due_at=NOW,
+            policy_version_id=policy_id,
+            timezone_name="UTC",
+            mode_version=1,
+            content_revision=0,
+            activity_revision=0,
+        )
+    )
+    await db_session.execute(
+        insert(proactive_jobs).values(
+            id=job_id,
+            account_id=account_id,
+            candidate_id=candidate_id,
+            job_kind="candidate_due",
+            idempotency_key=b"t" * 32,
+            available_at=NOW,
+            state="pending",
+        )
+    )
+    repository = ProactiveRepository(db_session)
+    assert await repository.claim_next(now=NOW, owner=uuid7()) is None
+    terminal_job = (
+        (await db_session.execute(select(proactive_jobs).where(proactive_jobs.c.id == job_id)))
+        .mappings()
+        .one()
+    )
+    assert terminal_job["state"] == "succeeded"
+    assert terminal_job["completed_at"] == NOW
+    with pytest.raises(ValueError, match="already terminal"):
+        await repository.enqueue_job(
+            account_id=account_id,
+            idempotency_key=b"u" * 32,
+            available_at=NOW,
+            candidate_id=candidate_id,
+            now=NOW,
+        )
+
+
+@pytest.mark.integration
 async def test_m7_concurrent_budget_replay_counts_one_hold(postgres_engine: AsyncEngine) -> None:
     factory = async_sessionmaker(postgres_engine, expire_on_commit=False)
     async with factory() as setup, setup.begin():
@@ -303,6 +381,7 @@ async def test_m7_concurrent_budget_replay_counts_one_hold(postgres_engine: Asyn
                 decision_id=decision_id,
                 policy_version_id=policy_id,
                 authorization_generation=1,
+                target=ProactiveTarget.AUTO_SEND,
             )
 
     first, second = await asyncio.gather(reserve(), reserve())
@@ -352,6 +431,7 @@ async def test_m7_budget_limits_only_shrink_without_breaking_count_constraint(
             decision_id=decision_id,
             policy_version_id=policy_id,
             authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
         )
     assert first is not None
 
@@ -372,6 +452,7 @@ async def test_m7_budget_limits_only_shrink_without_breaking_count_constraint(
                 decision_id=decision_id,
                 policy_version_id=policy_id,
                 authorization_generation=1,
+                target=ProactiveTarget.AUTO_SEND,
             )
             is None
         )
@@ -410,6 +491,7 @@ async def test_m7_budget_limits_only_shrink_without_breaking_count_constraint(
                 decision_id=decision_id,
                 policy_version_id=policy_id,
                 authorization_generation=1,
+                target=ProactiveTarget.AUTO_SEND,
             )
             is None
         )

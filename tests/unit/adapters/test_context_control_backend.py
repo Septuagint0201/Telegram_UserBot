@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import cast
 from uuid import UUID
@@ -141,6 +141,31 @@ def backend(
         max_chunks=max_chunks,
         on_delete_failure=on_delete_failure,
     )
+
+
+@pytest.mark.unit
+def test_durable_preview_settings_are_bounded_before_side_effects() -> None:
+    repository = RepositoryFake()
+    rebuilder = RebuilderFake()
+    gateway = GatewayFake()
+    invalid = (
+        {"bot_identity": " "},
+        {"max_chunk_chars": 4_097},
+        {"max_chunks": 9},
+        {"delete_after": timedelta(0)},
+        {"delete_after": timedelta(minutes=10, seconds=1)},
+    )
+    for overrides in invalid:
+        with pytest.raises(ValueError, match="settings are invalid"):
+            DurableContextControlBackend(
+                repository=repository,
+                target_tokens=ConversationTargetTokenCodec(
+                    SensitiveValue(b"k" * 32), deployment_id="m5-test"
+                ),
+                rebuilder=rebuilder,
+                gateway=gateway,
+                **overrides,
+            )
 
 
 @pytest.mark.unit

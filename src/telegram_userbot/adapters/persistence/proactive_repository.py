@@ -22,6 +22,7 @@ from telegram_userbot.adapters.persistence.schema import (
     proactive_jobs,
     proactive_occurrence_evidence,
     proactive_occurrences,
+    proactive_policies,
     proactive_state_transitions,
 )
 from telegram_userbot.domain.proactive.jobs import DueJob, DueJobState
@@ -30,12 +31,27 @@ from telegram_userbot.domain.proactive.models import (
     BudgetLimits,
     BudgetReservation,
     Candidate,
+    CandidateState,
     ProactiveAction,
     ReservationState,
     membership_digest,
 )
+from telegram_userbot.domain.proactive.pipeline import ProactiveTarget
 from telegram_userbot.domain.proactive.time import local_interval_to_utc
 from telegram_userbot.domain.shared.time import require_aware
+
+RUNNABLE_JOB_CANDIDATE_STATES = (
+    "open",
+    "evaluating",
+    "send_selected",
+    "deferred_once",
+)
+NON_RUNNABLE_JOB_CANDIDATE_STATES = (
+    "evaluated_none",
+    "failed_model",
+    "superseded",
+    "expired",
+)
 
 
 class ProactiveRepository:
@@ -46,6 +62,8 @@ class ProactiveRepository:
 
     async def enqueue_candidate(self, candidate: Candidate, *, now: datetime) -> UUID:
         current_time = require_aware(now, "now")
+        if candidate.state is not CandidateState.OPEN:
+            raise ValueError("new candidate must be open")
         if candidate.policy_version_id is None or not candidate.timezone_name:
             raise ValueError("candidate policy and timezone snapshots are required")
         occurrence_keys = [occurrence.occurrence_key for occurrence in candidate.occurrences]
@@ -262,14 +280,16 @@ class ProactiveRepository:
                 raise ValueError("proactive job replay does not match durable identity")
             return job_id
         if candidate_id is not None:
-            candidate_exists = await self._session.scalar(
-                select(proactive_candidates.c.id).where(
+            candidate_state = await self._session.scalar(
+                select(proactive_candidates.c.state).where(
                     proactive_candidates.c.id == candidate_id,
                     proactive_candidates.c.account_id == account_id,
                 )
             )
-            if candidate_exists is None:
+            if candidate_state is None:
                 raise ValueError("proactive job candidate is outside the requested scope")
+            if job_kind == "candidate_due" and candidate_state not in RUNNABLE_JOB_CANDIDATE_STATES:
+                raise ValueError("proactive job candidate is already terminal")
         await self._session.execute(
             postgresql_insert(proactive_jobs)
             .values(
@@ -308,6 +328,16 @@ class ProactiveRepository:
             max_attempts=max_attempts,
             retry_delay=retry_delay,
         )
+        candidate_not_runnable = and_(
+            proactive_jobs.c.candidate_id.is_not(None),
+            exists(
+                select(1).where(
+                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                    proactive_candidates.c.account_id == proactive_jobs.c.account_id,
+                    proactive_candidates.c.state.in_(NON_RUNNABLE_JOB_CANDIDATE_STATES),
+                )
+            ),
+        )
         await self._session.execute(
             update(proactive_jobs)
             .where(
@@ -315,6 +345,7 @@ class ProactiveRepository:
             )
             .values(
                 state=case(
+                    (candidate_not_runnable, "succeeded"),
                     (
                         and_(
                             proactive_jobs.c.candidate_id.is_not(None),
@@ -331,8 +362,22 @@ class ProactiveRepository:
                     ),
                     (proactive_jobs.c.attempt_count >= max_attempts, "dead_letter"),
                     else_=proactive_jobs.c.state,
-                )
+                ),
+                completed_at=case(
+                    (candidate_not_runnable, current_time),
+                    else_=proactive_jobs.c.completed_at,
+                ),
             )
+        )
+        candidate_runnable = or_(
+            proactive_jobs.c.candidate_id.is_(None),
+            exists(
+                select(1).where(
+                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                    proactive_candidates.c.account_id == proactive_jobs.c.account_id,
+                    proactive_candidates.c.state.in_(RUNNABLE_JOB_CANDIDATE_STATES),
+                )
+            ),
         )
         candidate_window_open = or_(
             proactive_jobs.c.candidate_id.is_(None),
@@ -361,6 +406,7 @@ class ProactiveRepository:
                         proactive_jobs.c.state.in_(("pending", "retry_wait")),
                         proactive_jobs.c.available_at <= current_time,
                         proactive_jobs.c.attempt_count < max_attempts,
+                        candidate_runnable,
                         candidate_window_open,
                     )
                     .order_by(proactive_jobs.c.available_at, proactive_jobs.c.id)
@@ -413,6 +459,16 @@ class ProactiveRepository:
         if fencing_token <= 0 or max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("proactive completion policy is invalid")
         current_time = require_aware(now, "now")
+        candidate_not_runnable = and_(
+            proactive_jobs.c.candidate_id.is_not(None),
+            exists(
+                select(1).where(
+                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                    proactive_candidates.c.account_id == proactive_jobs.c.account_id,
+                    proactive_candidates.c.state.in_(NON_RUNNABLE_JOB_CANDIDATE_STATES),
+                )
+            ),
+        )
         candidate_window_closed = and_(
             proactive_jobs.c.candidate_id.is_not(None),
             exists(
@@ -424,9 +480,14 @@ class ProactiveRepository:
             ),
         )
         next_state = (
-            case((candidate_window_closed, "expired"), else_="succeeded")
+            case(
+                (candidate_not_runnable, "succeeded"),
+                (candidate_window_closed, "expired"),
+                else_="succeeded",
+            )
             if succeeded
             else case(
+                (candidate_not_runnable, "succeeded"),
                 (candidate_window_closed, "expired"),
                 (proactive_jobs.c.attempt_count >= max_attempts, "dead_letter"),
                 else_="retry_wait",
@@ -458,6 +519,7 @@ class ProactiveRepository:
                     lease_owner=None,
                     lease_expires_at=None,
                     completed_at=case(
+                        (candidate_not_runnable, current_time),
                         (candidate_window_closed, None),
                         else_=current_time if succeeded else None,
                     ),
@@ -498,6 +560,16 @@ class ProactiveRepository:
         if max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("proactive recovery policy is invalid")
         current_time = require_aware(now, "now")
+        candidate_not_runnable = and_(
+            proactive_jobs.c.candidate_id.is_not(None),
+            exists(
+                select(1).where(
+                    proactive_candidates.c.id == proactive_jobs.c.candidate_id,
+                    proactive_candidates.c.account_id == proactive_jobs.c.account_id,
+                    proactive_candidates.c.state.in_(NON_RUNNABLE_JOB_CANDIDATE_STATES),
+                )
+            ),
+        )
         candidate_window_closed = and_(
             proactive_jobs.c.candidate_id.is_not(None),
             exists(
@@ -518,11 +590,13 @@ class ProactiveRepository:
                 )
                 .values(
                     state=case(
+                        (candidate_not_runnable, "succeeded"),
                         (candidate_window_closed, "expired"),
                         (proactive_jobs.c.attempt_count >= max_attempts, "dead_letter"),
                         else_="retry_wait",
                     ),
                     available_at=case(
+                        (candidate_not_runnable, proactive_jobs.c.available_at),
                         (candidate_window_closed, proactive_jobs.c.available_at),
                         (
                             proactive_jobs.c.attempt_count >= max_attempts,
@@ -532,12 +606,16 @@ class ProactiveRepository:
                     ),
                     lease_owner=None,
                     lease_expires_at=None,
+                    completed_at=case(
+                        (candidate_not_runnable, current_time),
+                        else_=proactive_jobs.c.completed_at,
+                    ),
                 )
             ),
         )
         return result.rowcount
 
-    async def reserve_budget(  # noqa: PLR0912,PLR0913 - durable authorization spans every budget scope
+    async def reserve_budget(  # noqa: PLR0912,PLR0913,PLR0915 - durable authorization spans every budget scope
         self,
         *,
         account_id: UUID,
@@ -554,6 +632,7 @@ class ProactiveRepository:
         decision_id: UUID,
         policy_version_id: UUID,
         authorization_generation: int,
+        target: ProactiveTarget,
         bypass: bool = False,
     ) -> BudgetReservation | None:
         if len(reservation_key) != 32:
@@ -562,12 +641,22 @@ class ProactiveRepository:
             raise ValueError("authorization generation must be positive")
         current_time = require_aware(now, "now")
         expiry = require_aware(expires_at, "expires_at")
+        if target not in {ProactiveTarget.AUTO_SEND, ProactiveTarget.COPILOT_DRAFT}:
+            raise ValueError("budget reservation target is invalid")
+        maximum_hold = timedelta(minutes=10 if target is ProactiveTarget.AUTO_SEND else 30)
+        if expiry > current_time + maximum_hold:
+            raise ValueError("budget reservation exceeds its hold deadline")
         account_start, account_end = local_interval_to_utc(
             account_local_date, datetime.min.time(), datetime.min.time(), account_timezone_name
         )
         contact_start, contact_end = local_interval_to_utc(
             contact_local_date, datetime.min.time(), datetime.min.time(), contact_timezone_name
         )
+        if not (
+            account_start <= current_time < account_end
+            and contact_start <= current_time < contact_end
+        ):
+            raise ValueError("budget reservation local date is not current")
         if bypass and limits.bypass_daily == 0:
             return None
         await self._session.execute(
@@ -583,6 +672,8 @@ class ProactiveRepository:
                         proactive_candidates.c.contact_id,
                         proactive_candidates.c.conversation_id,
                         proactive_candidates.c.generation,
+                        proactive_candidates.c.state.label("candidate_state"),
+                        proactive_candidates.c.window_end_at.label("candidate_window_end_at"),
                         proactive_candidates.c.policy_version_id.label("candidate_policy_id"),
                         proactive_candidates.c.timezone_name.label("candidate_timezone"),
                         proactive_decisions.c.id.label("decision_row_id"),
@@ -592,6 +683,12 @@ class ProactiveRepository:
                         proactive_decisions.c.conversation_id.label("decision_conversation_id"),
                         proactive_decisions.c.policy_version_id.label("decision_policy_id"),
                         proactive_decisions.c.timezone_name.label("decision_timezone"),
+                        proactive_decisions.c.action.label("decision_action"),
+                        proactive_decisions.c.state.label("decision_state"),
+                        proactive_policies.c.enabled.label("policy_enabled"),
+                        proactive_policies.c.timezone_name.label("account_timezone"),
+                        proactive_policies.c.account_daily_limit,
+                        proactive_policies.c.contact_bypass_daily_limit,
                     )
                     .select_from(
                         proactive_candidates.join(
@@ -600,6 +697,13 @@ class ProactiveRepository:
                             & (
                                 proactive_decisions.c.account_id
                                 == proactive_candidates.c.account_id
+                            ),
+                        ).join(
+                            proactive_policies,
+                            and_(
+                                proactive_policies.c.id == proactive_candidates.c.policy_version_id,
+                                proactive_policies.c.account_id
+                                == proactive_candidates.c.account_id,
                             ),
                         )
                     )
@@ -627,6 +731,17 @@ class ProactiveRepository:
             or binding["candidate_policy_id"] is None
             or binding["decision_generation"] != binding["generation"]
             or binding["decision_timezone"] != binding["candidate_timezone"]
+            or binding["candidate_state"] != "send_selected"
+            or binding["decision_action"] != "send_now"
+            or binding["decision_state"] != "accepted"
+            or not binding["policy_enabled"]
+            or binding["account_timezone"] != account_timezone_name
+            or binding["candidate_timezone"] != contact_timezone_name
+            or limits.account_daily > binding["account_daily_limit"]
+            or limits.bypass_daily > binding["contact_bypass_daily_limit"]
+            or limits.contact_daily > limits.account_daily
+            or binding["candidate_window_end_at"] <= current_time
+            or expiry > binding["candidate_window_end_at"]
         ):
             raise ValueError("budget reservation scope does not match decision/candidate")
 
@@ -685,6 +800,8 @@ class ProactiveRepository:
                 }
                 else None
             )
+        if expiry <= current_time:
+            raise ValueError("new budget reservation is already expired")
 
         scopes = [
             (

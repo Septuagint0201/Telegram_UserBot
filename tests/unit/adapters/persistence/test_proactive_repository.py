@@ -25,6 +25,7 @@ from telegram_userbot.domain.proactive.models import (
     ReservationState,
     membership_digest,
 )
+from telegram_userbot.domain.proactive.pipeline import ProactiveTarget
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
 
@@ -116,6 +117,11 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
             idempotency_key=b"short",
             available_at=NOW,
         )
+    with pytest.raises(ValueError, match="must be open"):
+        await repo.enqueue_candidate(
+            cast(Candidate, SimpleNamespace(state=CandidateState.EVALUATED_NONE)),
+            now=NOW,
+        )
     with pytest.raises(ValueError, match="lease"):
         await repo.claim_next(now=NOW, owner=uuid4(), lease=timedelta(0))
     with pytest.raises(ValueError, match="reservation identity"):
@@ -134,6 +140,7 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
             decision_id=uuid4(),
             policy_version_id=uuid4(),
             authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
         )
     with pytest.raises(ValueError, match="invalid budget settlement"):
         await repo.settle_budget(
@@ -141,6 +148,60 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
             reservation_key=b"k" * 32,
             target=cast(ReservationState, "invalid"),
             now=NOW,
+        )
+    with pytest.raises(ValueError, match="target is invalid"):
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
+            limits=BudgetLimits(1, 1),
+            now=NOW,
+            expires_at=NOW + timedelta(minutes=5),
+            reservation_key=b"t" * 32,
+            candidate_id=uuid4(),
+            decision_id=uuid4(),
+            policy_version_id=uuid4(),
+            authorization_generation=1,
+            target=ProactiveTarget.SKIP,
+        )
+    with pytest.raises(ValueError, match="hold deadline"):
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
+            limits=BudgetLimits(1, 1),
+            now=NOW,
+            expires_at=NOW + timedelta(minutes=11),
+            reservation_key=b"u" * 32,
+            candidate_id=uuid4(),
+            decision_id=uuid4(),
+            policy_version_id=uuid4(),
+            authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
+        )
+    with pytest.raises(ValueError, match="local date is not current"):
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            account_local_date=NOW.date() - timedelta(days=1),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
+            limits=BudgetLimits(1, 1),
+            now=NOW,
+            expires_at=NOW + timedelta(minutes=5),
+            reservation_key=b"v" * 32,
+            candidate_id=uuid4(),
+            decision_id=uuid4(),
+            policy_version_id=uuid4(),
+            authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
         )
 
     naive = NOW.replace(tzinfo=None)
@@ -177,6 +238,7 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
             decision_id=uuid4(),
             policy_version_id=uuid4(),
             authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
         )
     with pytest.raises(ValueError, match="timezone-aware"):
         await repo.settle_budget(
@@ -203,6 +265,7 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
             decision_id=uuid4(),
             policy_version_id=uuid4(),
             authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
         )
 
 
@@ -600,6 +663,8 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         "contact_id": contact_id,
         "conversation_id": conversation_id,
         "generation": 1,
+        "candidate_state": "send_selected",
+        "candidate_window_end_at": NOW + timedelta(hours=1),
         "candidate_policy_id": policy_id,
         "candidate_timezone": "UTC",
         "decision_row_id": decision_id,
@@ -609,6 +674,12 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         "decision_conversation_id": conversation_id,
         "decision_policy_id": policy_id,
         "decision_timezone": "UTC",
+        "decision_action": "send_now",
+        "decision_state": "accepted",
+        "policy_enabled": True,
+        "account_timezone": "UTC",
+        "account_daily_limit": 10,
+        "contact_bypass_daily_limit": 1,
     }
     row = {
         "id": uuid4(),
@@ -628,7 +699,7 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         "local_date": NOW.date(),
         "bypass": False,
         "state": "held",
-        "expires_at": NOW + timedelta(hours=1),
+        "expires_at": NOW + timedelta(minutes=5),
     }
     session = AsyncMock()
     repo = ProactiveRepository(cast(AsyncSession, session))
@@ -643,12 +714,35 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
             contact_timezone_name="UTC",
             limits=BudgetLimits(1, 1),
             now=NOW,
-            expires_at=NOW + timedelta(hours=1),
+            expires_at=NOW + timedelta(minutes=5),
             reservation_key=key,
             candidate_id=candidate_id,
             decision_id=decision_id,
             policy_version_id=policy_id,
             authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
+        )
+    session.execute.side_effect = [
+        _Result(),
+        _Result(binding | {"decision_action": "none"}),
+    ]
+    with pytest.raises(ValueError, match="scope"):
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
+            limits=BudgetLimits(1, 1),
+            now=NOW,
+            expires_at=NOW + timedelta(minutes=5),
+            reservation_key=key,
+            candidate_id=candidate_id,
+            decision_id=decision_id,
+            policy_version_id=policy_id,
+            authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
         )
     session.execute.side_effect = [_Result(), _Result(binding), _Result(row)]
     replay = await repo.reserve_budget(
@@ -660,12 +754,13 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         contact_timezone_name="UTC",
         limits=BudgetLimits(1, 1),
         now=NOW,
-        expires_at=NOW + timedelta(hours=1),
+        expires_at=NOW + timedelta(minutes=5),
         reservation_key=key,
         candidate_id=candidate_id,
         decision_id=decision_id,
         policy_version_id=policy_id,
         authorization_generation=1,
+        target=ProactiveTarget.AUTO_SEND,
     )
     assert replay is not None
     assert replay.state is ReservationState.HELD
@@ -684,12 +779,13 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
             contact_timezone_name="UTC",
             limits=BudgetLimits(1, 1),
             now=NOW,
-            expires_at=NOW + timedelta(hours=1),
+            expires_at=NOW + timedelta(minutes=5),
             reservation_key=key,
             candidate_id=candidate_id,
             decision_id=decision_id,
             policy_version_id=policy_id,
             authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
         )
         is None
     )
@@ -758,6 +854,8 @@ async def test_proactive_budget_expired_hold_is_not_replayed_as_authorization() 
         "contact_id": contact_id,
         "conversation_id": conversation_id,
         "generation": 1,
+        "candidate_state": "send_selected",
+        "candidate_window_end_at": NOW + timedelta(hours=1),
         "candidate_policy_id": policy_id,
         "candidate_timezone": "UTC",
         "decision_row_id": decision_id,
@@ -767,6 +865,12 @@ async def test_proactive_budget_expired_hold_is_not_replayed_as_authorization() 
         "decision_conversation_id": conversation_id,
         "decision_policy_id": policy_id,
         "decision_timezone": "UTC",
+        "decision_action": "send_now",
+        "decision_state": "accepted",
+        "policy_enabled": True,
+        "account_timezone": "UTC",
+        "account_daily_limit": 10,
+        "contact_bypass_daily_limit": 1,
     }
     row = {
         "id": uuid4(),
@@ -816,6 +920,7 @@ async def test_proactive_budget_expired_hold_is_not_replayed_as_authorization() 
             decision_id=decision_id,
             policy_version_id=policy_id,
             authorization_generation=1,
+            target=ProactiveTarget.AUTO_SEND,
         )
         is None
     )

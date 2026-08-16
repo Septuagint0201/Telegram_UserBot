@@ -311,6 +311,24 @@ def test_m7_budget_integrity_backfill_is_postgres_safe_and_idempotent() -> None:
 
 
 @pytest.mark.unit
+def test_context_preview_integrity_migration_supports_derived_sources_and_is_reversible() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0015_context_preview_integrity.py"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE OR REPLACE FUNCTION public.context_preview_sources" in migration
+    assert "WHEN 'memory_version' THEN mv.rendered_text" in migration
+    assert "WHEN 'summary_version' THEN sv.content_text" in migration
+    assert "msg.deleted_at IS NULL" in migration
+    assert "mo.expires_at > CURRENT_TIMESTAMP" in migration
+    assert "uq_context_manifest_omissions_ordinal" in migration
+    assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable

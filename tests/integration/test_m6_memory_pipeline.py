@@ -6,16 +6,26 @@ from typing import cast
 from uuid import uuid4, uuid7
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.persistence.memory_repository import MemoryRepository
-from telegram_userbot.adapters.persistence.schema import memory_jobs
+from telegram_userbot.adapters.persistence.schema import (
+    memory_jobs,
+    message_revisions,
+    summary_watermarks,
+)
 from telegram_userbot.adapters.telegram_bot.memory_control_backend import (
     DurableMemoryControlBackend,
     MemoryControlTargetTokenCodec,
 )
-from telegram_userbot.domain.memory.models import InputManifest, InputSource
+from telegram_userbot.domain.memory.models import (
+    InputManifest,
+    InputSource,
+    SummaryKind,
+    SummarySource,
+    SummaryVersion,
+)
 from telegram_userbot.domain.memory.trigger import EventRange
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 from tests.integration.test_m5_context_media import NOW, seed_scope
@@ -143,6 +153,78 @@ async def test_m6_manifest_membership_is_content_free_and_hash_bound(
     )
     assert content not in str(dumped)
     assert manifest.manifest_sha256.hex() in str(dumped).replace("\\x", "")
+
+
+@pytest.mark.integration
+async def test_m6_stale_summary_source_does_not_advance_watermark(
+    db_session: AsyncSession,
+) -> None:
+    account_id, conversation_id, _turn_id, revision_id = await seed_scope(db_session)
+    repository = MemoryRepository(db_session)
+    source = SummarySource(revision_id, "message_revision", b"h" * 32, 1)
+    summary_id = uuid4()
+    first = SummaryVersion(
+        id=uuid4(),
+        summary_id=summary_id,
+        version_no=1,
+        kind=SummaryKind.ROLLING,
+        range_start_event_id=1,
+        range_end_event_id=1,
+        content_text="synthetic summary one",
+        sources=(source,),
+        manifest_sha256=b"a" * 32,
+    )
+    watermark = await repository.publish_summary(
+        first,
+        account_id=account_id,
+        conversation_id=conversation_id,
+        now=NOW,
+    )
+    await db_session.execute(
+        update(message_revisions)
+        .where(
+            message_revisions.c.id == revision_id,
+            message_revisions.c.account_id == account_id,
+        )
+        .values(content_sha256=b"x" * 32)
+    )
+    second = SummaryVersion(
+        id=uuid4(),
+        summary_id=summary_id,
+        version_no=2,
+        kind=SummaryKind.ROLLING,
+        range_start_event_id=2,
+        range_end_event_id=2,
+        content_text="synthetic summary two",
+        sources=(source,),
+        manifest_sha256=b"b" * 32,
+    )
+    with pytest.raises(ValueError, match="summary message source is stale"):
+        await repository.publish_summary(
+            second,
+            account_id=account_id,
+            conversation_id=conversation_id,
+            expected_version=1,
+            now=NOW + timedelta(seconds=1),
+        )
+    persisted = (
+        await db_session.execute(
+            select(
+                summary_watermarks.c.last_included_event_id,
+                summary_watermarks.c.last_summary_version_id,
+                summary_watermarks.c.version,
+            ).where(
+                summary_watermarks.c.account_id == account_id,
+                summary_watermarks.c.conversation_id == conversation_id,
+                summary_watermarks.c.summary_kind == SummaryKind.ROLLING.value,
+            )
+        )
+    ).one()
+    assert persisted == (
+        watermark.last_included_event_id,
+        watermark.last_summary_version_id,
+        watermark.version,
+    )
 
 
 @pytest.mark.integration

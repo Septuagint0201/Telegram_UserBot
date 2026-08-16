@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime
 from uuid import UUID, uuid7
 
@@ -16,11 +17,15 @@ from telegram_userbot.adapters.persistence.schema import (
     context_policy_versions,
     conversation_turns,
     conversations,
+    memories,
+    memory_versions,
     message_events,
     message_revisions,
     messages,
     retrieval_policies,
     retrieval_policy_versions,
+    summaries,
+    summary_versions,
     telegram_peers,
 )
 from telegram_userbot.domain.context import (
@@ -138,7 +143,7 @@ async def seed_scope(session: AsyncSession) -> tuple[UUID, UUID, UUID, UUID]:
             text_content="SYNTHETIC_PRIVATE_CONTEXT_BODY",
             entities_schema_version=1,
             entities=[],
-            content_sha256=b"h" * 32,
+            content_sha256=hashlib.sha256(b"SYNTHETIC_PRIVATE_CONTEXT_BODY").digest(),
             source_event_id=event_id,
         )
     )
@@ -308,6 +313,54 @@ async def test_m5_manifest_persists_content_free_and_preview_is_one_time(
         manifest=built.manifest,
         created_at=NOW,
     )
+    await repository.save_manifest(
+        account_id=account_id,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        background_job_id=None,
+        context_policy_version_id=context_version_id,
+        retrieval_policy_version_id=retrieval_version_id,
+        prompt_bundle_sha256=b"p" * 32,
+        capability_snapshot_sha256=b"c" * 32,
+        manifest=built.manifest,
+        created_at=NOW,
+    )
+    changed = build_context(
+        manifest_id=built.manifest.id,
+        purpose="reactive_reply",
+        logical_role="main_ai",
+        sources=(
+            ContextSource(
+                source.candidate,
+                source.canonical_role,
+                source.source_actor,
+                source.trust_level,
+                source.content,
+                source.source_type,
+                selection_reasons=("eligible", "changed"),
+            ),
+        ),
+        budget=budget,
+        builder_version="context-builder-v1",
+        prompt_version="prompt-v1",
+        prompt_bundle_sha256=(b"p" * 32).hex(),
+        context_policy_version="context-v1",
+        retrieval_policy_version="retrieval-v1",
+        capability_snapshot_sha256=(b"c" * 32).hex(),
+    )
+    with pytest.raises(ValueError, match="context_manifest_replay_mismatch"):
+        await repository.save_manifest(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            background_job_id=None,
+            context_policy_version_id=context_version_id,
+            retrieval_policy_version_id=retrieval_version_id,
+            prompt_bundle_sha256=b"p" * 32,
+            capability_snapshot_sha256=b"c" * 32,
+            manifest=changed.manifest,
+            created_at=NOW,
+        )
     summary = await repository.latest_summary(
         account_id=account_id, conversation_id=conversation_id
     )
@@ -396,6 +449,209 @@ async def test_m5_manifest_persists_content_free_and_preview_is_one_time(
     )
     assert redacted["source_eligible"] is False
     assert redacted["source_content"] is None
+    with pytest.raises(ValueError, match="context_manifest_source_stale"):
+        await repository.save_manifest(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            background_job_id=None,
+            context_policy_version_id=context_version_id,
+            retrieval_policy_version_id=retrieval_version_id,
+            prompt_bundle_sha256=b"p" * 32,
+            capability_snapshot_sha256=b"c" * 32,
+            manifest=built.manifest,
+            created_at=NOW,
+        )
+
+
+@pytest.mark.integration
+async def test_m5_preview_rebuilds_current_memory_and_summary_sources(
+    db_session: AsyncSession,
+) -> None:
+    account_id, conversation_id, turn_id, revision_id = await seed_scope(db_session)
+    context_version_id, retrieval_version_id = await seed_policies(db_session)
+    memory_id, memory_version_id = uuid7(), uuid7()
+    summary_id, summary_version_id = uuid7(), uuid7()
+    summary_text = "SYNTHETIC_CURRENT_SUMMARY"
+    await db_session.execute(
+        insert(memories).values(
+            id=memory_id,
+            account_id=account_id,
+            memory_type="fact",
+            semantic_key_hash=b"k" * 32,
+            status="active",
+            current_version_no=1,
+        )
+    )
+    await db_session.execute(
+        insert(memory_versions).values(
+            id=memory_version_id,
+            account_id=account_id,
+            memory_id=memory_id,
+            version_no=1,
+            operation="create",
+            payload_schema_version=1,
+            payload={},
+            rendered_text="SYNTHETIC_CURRENT_MEMORY",
+            importance=0.5,
+            confidence=0.9,
+            time_precision="unknown",
+            validator_policy_version="memory-validator-v1",
+            acceptance_kind="automatic",
+        )
+    )
+    source_event_id = await db_session.scalar(
+        select(message_revisions.c.source_event_id).where(message_revisions.c.id == revision_id)
+    )
+    assert source_event_id is not None
+    await db_session.execute(
+        insert(summaries).values(
+            id=summary_id,
+            account_id=account_id,
+            conversation_id=conversation_id,
+            summary_kind="rolling",
+            status="active",
+            current_version_no=1,
+        )
+    )
+    await db_session.execute(
+        insert(summary_versions).values(
+            id=summary_version_id,
+            account_id=account_id,
+            summary_id=summary_id,
+            version_no=1,
+            range_start_event_id=source_event_id,
+            range_end_event_id=source_event_id,
+            content_text=summary_text,
+            content_sha256=hashlib.sha256(summary_text.encode()).digest(),
+            pipeline_version="summary-v1",
+            output_schema_version=1,
+            manifest_sha256=b"i" * 32,
+            invalidation_state="active",
+        )
+    )
+    sources = (
+        ContextSource(
+            Candidate(
+                memory_version_id,
+                "version-1",
+                "memory:1",
+                ContextLayer.STRUCTURED_MEMORY,
+                NOW,
+                30,
+            ),
+            "user",
+            "memory_agent",
+            TrustLevel.TRUSTED_DERIVED,
+            SensitiveValue("SYNTHETIC_CURRENT_MEMORY"),
+            "memory_version",
+        ),
+        ContextSource(
+            Candidate(
+                summary_version_id,
+                "version-1",
+                "summary:1",
+                ContextLayer.SUMMARY,
+                NOW,
+                30,
+            ),
+            "user",
+            "memory_agent",
+            TrustLevel.TRUSTED_DERIVED,
+            SensitiveValue(summary_text),
+            "summary_version",
+        ),
+    )
+    budget = calculate_budget(
+        ContextPolicy("context-v1"), ContextCapabilities(32_000, 2_000, False)
+    )
+    built = build_context(
+        manifest_id=uuid7(),
+        purpose="reactive_reply",
+        logical_role="main_ai",
+        sources=sources,
+        budget=budget,
+        builder_version="context-builder-v1",
+        prompt_version="prompt-v1",
+        prompt_bundle_sha256=(b"p" * 32).hex(),
+        context_policy_version="context-v1",
+        retrieval_policy_version="retrieval-v1",
+        capability_snapshot_sha256=(b"c" * 32).hex(),
+    )
+    repository = ContextRepository(db_session)
+    await repository.save_manifest(
+        account_id=account_id,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        background_job_id=None,
+        context_policy_version_id=context_version_id,
+        retrieval_policy_version_id=retrieval_version_id,
+        prompt_bundle_sha256=b"p" * 32,
+        capability_snapshot_sha256=b"c" * 32,
+        manifest=built.manifest,
+        created_at=NOW,
+    )
+    challenge = await repository.issue_preview(
+        account_id=account_id,
+        conversation_id=conversation_id,
+        manifest_id=built.manifest.id,
+        admin_user_id=42,
+        bot_chat_id=42,
+        bot_identity="control-bot",
+        now=NOW,
+    )
+    assert (
+        await repository.consume_preview(
+            token=challenge.confirmation_token,
+            admin_user_id=42,
+            bot_chat_id=42,
+            bot_identity="control-bot",
+            now=NOW,
+        )
+        is not None
+    )
+    rows = (
+        (
+            await db_session.execute(
+                text(
+                    "SELECT source_type, source_content, source_eligible "
+                    "FROM public.context_preview_sources(:request_id, 42, 42, 'control-bot') "
+                    "ORDER BY ordinal"
+                ),
+                {"request_id": challenge.request_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    assert [
+        (row["source_type"], row["source_content"], row["source_eligible"]) for row in rows
+    ] == [
+        ("memory_version", "SYNTHETIC_CURRENT_MEMORY", True),
+        ("summary_version", summary_text, True),
+    ]
+
+    await db_session.execute(
+        memories.update().where(memories.c.id == memory_id).values(status="invalidated")
+    )
+    stale = (
+        (
+            await db_session.execute(
+                text(
+                    "SELECT source_type, source_eligible "
+                    "FROM public.context_preview_sources(:request_id, 42, 42, 'control-bot') "
+                    "ORDER BY ordinal"
+                ),
+                {"request_id": challenge.request_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    assert [(row["source_type"], row["source_eligible"]) for row in stale] == [
+        ("memory_version", False),
+        ("summary_version", True),
+    ]
 
 
 @pytest.mark.integration

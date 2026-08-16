@@ -481,6 +481,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                 "M5-009",
                 (
                     "src/telegram_userbot/adapters/telegram_bot/context_control_backend.py",
+                    "alembic/versions/0015_context_preview_integrity.py",
                     "tests/unit/adapters/test_context_control.py",
                     "tests/integration/test_m5_context_media.py",
                 ),
@@ -491,6 +492,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "tests.unit.adapters.persistence.test_context_repository::test_context_preview_consume_delivery_and_deletion_state_branches",
                     "tests.integration.test_m5_context_media::test_m5_manifest_persists_content_free_and_preview_is_one_time",
                     "tests.integration.test_m5_context_media::test_m5_control_role_executes_preview_function_without_direct_content_access",
+                    "tests.integration.test_m5_context_media::test_m5_preview_rebuilds_current_memory_and_summary_sources",
                 ),
             ),
             (
@@ -658,6 +660,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0012_worker_lease_retry.py",
                     "alembic/versions/0013_m5_m7_consistency.py",
                     "alembic/versions/0014_m7_budget_integrity.py",
+                    "alembic/versions/0015_context_preview_integrity.py",
                     "deploy/postgres/m6_roles.sql",
                     "docs/compatibility/m6.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
@@ -795,6 +798,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0012_worker_lease_retry.py",
                     "alembic/versions/0013_m5_m7_consistency.py",
                     "alembic/versions/0014_m7_budget_integrity.py",
+                    "alembic/versions/0015_context_preview_integrity.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",

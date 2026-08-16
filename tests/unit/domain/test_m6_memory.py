@@ -602,6 +602,7 @@ def test_m6_version_summary_and_embedding_guards_are_fail_closed() -> None:
         SummarySource(uuid4(), "message_revision", b"short", 0)
     with pytest.raises(ValueError, match="kind"):
         SummarySource(uuid4(), "provider_raw", digest, 1)
+    summary_source = SummarySource(uuid4(), "message_revision", digest, 1)
     summary_values = {
         "id": uuid4(),
         "summary_id": uuid4(),
@@ -610,13 +611,28 @@ def test_m6_version_summary_and_embedding_guards_are_fail_closed() -> None:
         "range_start_event_id": 1,
         "range_end_event_id": 1,
         "content_text": "summary",
-        "sources": (SummarySource(uuid4(), "message_revision", digest, 1),),
+        "sources": (summary_source,),
         "manifest_sha256": digest,
     }
     for summary_changes, message in (
         ({"version_no": 0}, "range"),
+        ({"range_start_event_id": -1}, "range"),
         ({"content_text": " "}, "cannot be empty"),
         ({"manifest_sha256": b"short"}, "SHA-256"),
+        ({"sources": ()}, "ordinals"),
+        (
+            {"sources": (replace(summary_source, ordinal=2),)},
+            "ordinals",
+        ),
+        (
+            {
+                "sources": (
+                    summary_source,
+                    replace(summary_source, ordinal=2),
+                )
+            },
+            "unique",
+        ),
     ):
         with pytest.raises(ValueError, match=message):
             _construct(SummaryVersion, summary_values | summary_changes)

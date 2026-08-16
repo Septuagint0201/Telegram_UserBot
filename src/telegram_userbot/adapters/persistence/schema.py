@@ -2493,6 +2493,7 @@ context_manifest_omissions = Table(
     metadata,
     Column("id", BigInteger, Identity(), primary_key=True),
     Column("manifest_id", UUID_TYPE, ForeignKey("context_manifests.id"), nullable=False),
+    Column("ordinal", Integer, nullable=False),
     Column("layer", Text, nullable=False),
     Column("reason_code", Text, nullable=False),
     Column("source_type", Text),
@@ -2506,6 +2507,8 @@ context_manifest_omissions = Table(
         "omitted_count IS NULL OR omitted_count >= 0", name="omitted_count_nonnegative"
     ),
     CheckConstraint("estimated_tokens IS NULL OR estimated_tokens >= 0", name="tokens_nonnegative"),
+    CheckConstraint("ordinal > 0", name="ordinal_positive"),
+    UniqueConstraint("manifest_id", "ordinal", name="uq_context_manifest_omissions_ordinal"),
 )
 
 context_preview_requests = Table(

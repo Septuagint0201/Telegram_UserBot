@@ -132,7 +132,14 @@ class DurableContextControlBackend:
         delete_after: timedelta = timedelta(minutes=10),
         on_delete_failure: Callable[[str], None] | None = None,
     ) -> None:
-        if not bot_identity or max_chunk_chars <= 0 or max_chunks <= 0:
+        if (
+            not bot_identity
+            or bot_identity != bot_identity.strip()
+            or not 1 <= max_chunk_chars <= 4_096
+            or not 1 <= max_chunks <= 8
+            or delete_after <= timedelta(0)
+            or delete_after > timedelta(minutes=10)
+        ):
             raise ValueError("context control settings are invalid")
         self._repository = repository
         self._target_tokens = target_tokens

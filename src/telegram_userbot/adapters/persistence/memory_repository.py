@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -53,6 +54,7 @@ from telegram_userbot.domain.memory.models import (
     EmbeddingRecord,
     EmbeddingRecordState,
     EmbeddingSpace,
+    EmbeddingState,
     InputManifest,
     MemoryOperation,
     ProposalState,
@@ -154,50 +156,178 @@ class MemoryRepository:
         if found is None:
             raise ValueError("manifest source is outside the requested scope")
 
+    async def _require_summary_source_current(
+        self, source: Any, *, account_id: UUID, conversation_id: UUID
+    ) -> None:
+        if source.source_kind == "message_revision":
+            row = (
+                (
+                    await self._session.execute(
+                        select(
+                            message_revisions.c.revision_no,
+                            message_revisions.c.content_sha256,
+                            message_revisions.c.redacted_at,
+                            messages.c.current_revision_no,
+                            messages.c.deleted_at,
+                            messages.c.is_tombstone,
+                        )
+                        .select_from(
+                            message_revisions.join(
+                                messages,
+                                and_(
+                                    messages.c.id == message_revisions.c.message_id,
+                                    messages.c.account_id == message_revisions.c.account_id,
+                                ),
+                            )
+                        )
+                        .where(
+                            message_revisions.c.id == source.source_id,
+                            message_revisions.c.account_id == account_id,
+                            messages.c.conversation_id == conversation_id,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if row is None or any(
+                (
+                    row["redacted_at"] is not None,
+                    row["deleted_at"] is not None,
+                    row["is_tombstone"],
+                    row["revision_no"] != row["current_revision_no"],
+                    row["content_sha256"] != source.content_sha256,
+                )
+            ):
+                raise ValueError("summary message source is stale")
+            return
+        if source.source_kind != "prior_summary_version":
+            raise ValueError("summary source kind is unsupported")
+        row = (
+            (
+                await self._session.execute(
+                    select(
+                        summary_versions.c.version_no,
+                        summary_versions.c.content_sha256,
+                        summary_versions.c.invalidation_state,
+                        summary_versions.c.redacted_at,
+                        summaries.c.current_version_no,
+                        summaries.c.status,
+                    )
+                    .select_from(
+                        summary_versions.join(
+                            summaries,
+                            and_(
+                                summaries.c.id == summary_versions.c.summary_id,
+                                summaries.c.account_id == summary_versions.c.account_id,
+                            ),
+                        )
+                    )
+                    .where(
+                        summary_versions.c.id == source.source_id,
+                        summary_versions.c.account_id == account_id,
+                        summaries.c.conversation_id == conversation_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None or any(
+            (
+                row["redacted_at"] is not None,
+                row["invalidation_state"] != "active",
+                row["status"] != "active",
+                row["version_no"] != row["current_version_no"],
+                row["content_sha256"] != source.content_sha256,
+            )
+        ):
+            raise ValueError("prior summary source is stale")
+
     async def _require_embedding_target_scope(
         self, record: EmbeddingRecord, *, account_id: UUID
     ) -> None:
-        if record.target_kind == "memory_version":
+        await self._require_embedding_target_current(
+            target_kind=record.target_kind,
+            target_id=record.target_id,
+            account_id=account_id,
+        )
+
+    async def _require_embedding_target_current(
+        self, *, target_kind: str, target_id: UUID, account_id: UUID
+    ) -> None:
+        if target_kind == "memory_version":
             query = (
                 select(memory_versions.c.id)
-                .join(memories, memories.c.id == memory_versions.c.memory_id)
-                .where(
-                    memory_versions.c.id == record.target_id,
-                    memories.c.id == memory_versions.c.memory_id,
+                .join(
+                    memories,
+                    and_(
+                        memories.c.id == memory_versions.c.memory_id,
+                        memories.c.account_id == memory_versions.c.account_id,
+                    ),
                 )
+                .where(
+                    memory_versions.c.id == target_id,
+                    memory_versions.c.account_id == account_id,
+                    memories.c.account_id == account_id,
+                    memories.c.status == "active",
+                    memories.c.current_version_no == memory_versions.c.version_no,
+                    memory_versions.c.redacted_at.is_(None),
+                    memory_versions.c.rendered_text.is_not(None),
+                )
+                .with_for_update()
             )
-            query = query.where(
-                memory_versions.c.account_id == account_id,
-                memories.c.account_id == account_id,
-            )
-        elif record.target_kind == "summary_version":
+        elif target_kind == "summary_version":
             query = (
                 select(summary_versions.c.id)
-                .join(summaries, summaries.c.id == summary_versions.c.summary_id)
-                .where(
-                    summary_versions.c.id == record.target_id,
-                    summaries.c.id == summary_versions.c.summary_id,
+                .join(
+                    summaries,
+                    and_(
+                        summaries.c.id == summary_versions.c.summary_id,
+                        summaries.c.account_id == summary_versions.c.account_id,
+                    ),
                 )
+                .where(
+                    summary_versions.c.id == target_id,
+                    summary_versions.c.account_id == account_id,
+                    summaries.c.account_id == account_id,
+                    summaries.c.status == "active",
+                    summaries.c.current_version_no == summary_versions.c.version_no,
+                    summary_versions.c.invalidation_state == "active",
+                    summary_versions.c.redacted_at.is_(None),
+                    summary_versions.c.content_text.is_not(None),
+                )
+                .with_for_update()
             )
-            query = query.where(
-                summary_versions.c.account_id == account_id,
-                summaries.c.account_id == account_id,
-            )
-        else:
+        elif target_kind == "message_revision":
             query = (
                 select(message_revisions.c.id)
-                .join(messages, messages.c.id == message_revisions.c.message_id)
-                .where(
-                    message_revisions.c.id == record.target_id,
-                    messages.c.id == message_revisions.c.message_id,
+                .join(
+                    messages,
+                    and_(
+                        messages.c.id == message_revisions.c.message_id,
+                        messages.c.account_id == message_revisions.c.account_id,
+                    ),
                 )
+                .where(
+                    message_revisions.c.id == target_id,
+                    message_revisions.c.account_id == account_id,
+                    messages.c.account_id == account_id,
+                    messages.c.current_revision_no == message_revisions.c.revision_no,
+                    messages.c.deleted_at.is_(None),
+                    messages.c.is_tombstone.is_(False),
+                    message_revisions.c.redacted_at.is_(None),
+                    message_revisions.c.body_kind.in_(("text", "caption")),
+                    message_revisions.c.content_sha256.is_not(None),
+                )
+                .with_for_update()
             )
-            query = query.where(
-                message_revisions.c.account_id == account_id,
-                messages.c.account_id == account_id,
-            )
+        else:
+            raise ValueError("embedding target kind is unsupported")
         if await self._session.scalar(query) is None:
-            raise ValueError("embedding target is outside the requested account scope")
+            raise ValueError("embedding target is not currently eligible")
 
     async def _embedding_record_belongs_to_account(self, record: Any, *, account_id: UUID) -> bool:
         if record["memory_version_id"] is not None:
@@ -1161,25 +1291,11 @@ class MemoryRepository:
             {"lock_key": (f"summary:{account_id}:{conversation_id}:{summary.kind.value}")},
         )
         for source in summary.sources:
-            if source.source_kind == "message_revision":
-                await self._require_message_revision_scope(
-                    source.source_id,
-                    account_id=account_id,
-                    conversation_id=conversation_id,
-                )
-                continue
-            found = await self._session.scalar(
-                select(summary_versions.c.id)
-                .join(summaries, summaries.c.id == summary_versions.c.summary_id)
-                .where(
-                    summary_versions.c.id == source.source_id,
-                    summary_versions.c.account_id == account_id,
-                    summaries.c.account_id == account_id,
-                    summaries.c.conversation_id == conversation_id,
-                )
+            await self._require_summary_source_current(
+                source,
+                account_id=account_id,
+                conversation_id=conversation_id,
             )
-            if found is None:
-                raise ValueError("prior summary source is outside the requested scope")
         watermark_row = (
             (
                 await self._session.execute(
@@ -1263,6 +1379,22 @@ class MemoryRepository:
                     output_schema_version=output_schema_version,
                 ):
                     raise SummaryCoverageError("summary replay does not match its manifest")
+                persisted_sources = (
+                    (
+                        await self._session.execute(
+                            select(summary_version_sources)
+                            .where(
+                                summary_version_sources.c.summary_version_id == summary.id,
+                                summary_version_sources.c.account_id == account_id,
+                            )
+                            .order_by(summary_version_sources.c.ordinal)
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                if not _summary_sources_match(persisted_sources, summary):
+                    raise SummaryCoverageError("summary replay source membership changed")
                 return SummaryWatermark(
                     conversation_id,
                     summary.kind,
@@ -1303,8 +1435,7 @@ class MemoryRepository:
                 .values(invalidation_state="invalidated")
             )
         await self._session.execute(
-            postgresql_insert(summary_versions)
-            .values(
+            insert(summary_versions).values(
                 id=summary.id,
                 account_id=account_id,
                 summary_id=summary.summary_id,
@@ -1322,12 +1453,10 @@ class MemoryRepository:
                 invalidation_state=summary.status.value,
                 created_at=current_time,
             )
-            .on_conflict_do_nothing(constraint="summary_versions_pkey")
         )
         for source in summary.sources:
             await self._session.execute(
-                postgresql_insert(summary_version_sources)
-                .values(
+                insert(summary_version_sources).values(
                     summary_version_id=summary.id,
                     account_id=account_id,
                     ordinal=source.ordinal,
@@ -1341,7 +1470,6 @@ class MemoryRepository:
                     source_content_sha256=source.content_sha256,
                     created_at=current_time,
                 )
-                .on_conflict_do_nothing(constraint="pk_summary_version_sources")
             )
         if watermark_row is None:
             await self._session.execute(
@@ -1393,18 +1521,35 @@ class MemoryRepository:
         model_profile_id: UUID,
         config_version_id: UUID,
         activate: bool = False,
+        expected_target_chunks: Mapping[tuple[str, UUID], int] | None = None,
+        source_hashes_verified: bool = False,
+        sample_retrieval_verified: bool = False,
+        final_delta: int | None = None,
         now: datetime | None = None,
     ) -> int:
         current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
+        if space.state is not EmbeddingState.BUILDING:
+            raise ValueError("embedding writes require a building space")
         if any(
             record.space_id != space.id or len(record.vector) != space.dimensions
             for record in records
         ):
             raise ValueError("embedding record dimension or space mismatch")
-        if activate and not records:
-            raise ValueError("cannot activate an embedding space without records")
         if activate and any(record.state is not EmbeddingRecordState.READY for record in records):
             raise ValueError("embedding activation requires ready records")
+        if activate and (
+            not expected_target_chunks
+            or not source_hashes_verified
+            or not sample_retrieval_verified
+            or final_delta != 0
+        ):
+            raise ValueError("embedding activation proof is incomplete")
+        if expected_target_chunks is not None and any(
+            target_kind not in {"memory_version", "summary_version", "message_revision"}
+            or chunk_count <= 0
+            for (target_kind, _target_id), chunk_count in expected_target_chunks.items()
+        ):
+            raise ValueError("embedding expected coverage is invalid")
         target_indexes: dict[tuple[str, UUID], list[int]] = {}
         for record in records:
             target_indexes.setdefault((record.target_kind, record.target_id), []).append(
@@ -1416,6 +1561,11 @@ class MemoryRepository:
             raise ValueError("embedding record chunks are not contiguous")
         for record in records:
             await self._require_embedding_target_scope(record, account_id=account_id)
+        if activate:
+            await self._session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"embedding:{account_id}:{model_profile_id}"},
+            )
         await self._session.execute(
             postgresql_insert(embedding_spaces)
             .values(
@@ -1429,7 +1579,7 @@ class MemoryRepository:
                 distance_metric=space.distance_metric,
                 normalization=space.normalization,
                 chunker_version=space.chunker_version,
-                state=space.state.value,
+                state=EmbeddingState.BUILDING.value,
                 generation=space.generation,
                 created_at=current_time,
             )
@@ -1458,8 +1608,10 @@ class MemoryRepository:
             or persisted_space["generation"] != space.generation
         ):
             raise ValueError("embedding space replay does not match durable identity")
-        if activate and persisted_space["state"] not in {"building", "active"}:
-            raise ValueError("only a building or active embedding space can be activated")
+        if persisted_space["state"] != "building" and not (
+            activate and persisted_space["state"] == "active"
+        ):
+            raise ValueError("embedding records can only be written to a building space")
         for record in records:
             target_columns: dict[str, object] = {
                 "memory_version_id": record.target_id
@@ -1505,6 +1657,8 @@ class MemoryRepository:
                 "created_at": current_time,
             }
             if existing is None:
+                if persisted_space["state"] != EmbeddingState.BUILDING.value:
+                    raise ValueError("active embedding space is immutable")
                 await self._session.execute(insert(embedding_records).values(**values))
             elif (
                 existing["id"] != record.id
@@ -1517,16 +1671,56 @@ class MemoryRepository:
             ):
                 raise ValueError("embedding record replay does not match durable identity")
         if activate:
-            non_ready = await self._session.scalar(
-                select(func.count())
-                .select_from(embedding_records)
-                .where(
-                    embedding_records.c.embedding_space_id == space.id,
-                    embedding_records.c.state != EmbeddingRecordState.READY.value,
+            persisted_records = (
+                (
+                    await self._session.execute(
+                        select(
+                            embedding_records.c.memory_version_id,
+                            embedding_records.c.summary_version_id,
+                            embedding_records.c.message_revision_id,
+                            embedding_records.c.chunk_index,
+                            embedding_records.c.chunker_version,
+                            embedding_records.c.source_sha256,
+                            embedding_records.c.dimensions,
+                            embedding_records.c.state,
+                            embedding_records.c.invalidated_at,
+                        )
+                        .where(
+                            embedding_records.c.embedding_space_id == space.id,
+                            embedding_records.c.account_id == account_id,
+                        )
+                        .order_by(embedding_records.c.chunk_index)
+                        .with_for_update()
+                    )
                 )
+                .mappings()
+                .all()
             )
-            if non_ready:
-                raise ValueError("embedding space coverage is not fully ready")
+            actual_target_chunks: dict[tuple[str, UUID], list[int]] = {}
+            for persisted_record in persisted_records:
+                if (
+                    persisted_record["state"] != EmbeddingRecordState.READY.value
+                    or persisted_record["invalidated_at"] is not None
+                    or persisted_record["dimensions"] != space.dimensions
+                    or persisted_record["chunker_version"] != space.chunker_version
+                    or len(persisted_record["source_sha256"]) != 32
+                ):
+                    raise ValueError("embedding space coverage is not fully ready")
+                target = _embedding_target_identity(persisted_record)
+                await self._require_embedding_target_current(
+                    target_kind=target[0],
+                    target_id=target[1],
+                    account_id=account_id,
+                )
+                actual_target_chunks.setdefault(target, []).append(
+                    cast(int, persisted_record["chunk_index"])
+                )
+            expected = dict(expected_target_chunks or {})
+            if set(actual_target_chunks) != set(expected) or any(
+                sorted(actual_target_chunks[target]) != list(range(chunk_count))
+                for target, chunk_count in expected.items()
+            ):
+                raise ValueError("embedding space target coverage is incomplete")
             await self._session.execute(
                 update(embedding_spaces)
                 .where(
@@ -1537,15 +1731,24 @@ class MemoryRepository:
                 )
                 .values(state="retired", retired_at=current_time)
             )
-            await self._session.execute(
-                update(embedding_spaces)
-                .where(
-                    embedding_spaces.c.id == space.id,
-                    embedding_spaces.c.account_id == account_id,
-                    embedding_spaces.c.model_profile_id == model_profile_id,
-                )
-                .values(state="active", activated_at=current_time)
+            activated = cast(
+                CursorResult[Any],
+                await self._session.execute(
+                    update(embedding_spaces)
+                    .where(
+                        embedding_spaces.c.id == space.id,
+                        embedding_spaces.c.account_id == account_id,
+                        embedding_spaces.c.model_profile_id == model_profile_id,
+                        embedding_spaces.c.state.in_(("building", "active")),
+                    )
+                    .values(
+                        state="active",
+                        activated_at=func.coalesce(embedding_spaces.c.activated_at, current_time),
+                    )
+                ),
             )
+            if activated.rowcount != 1:
+                raise ValueError("embedding space activation state changed")
         return len(records)
 
     async def forget_memory(
@@ -2064,6 +2267,21 @@ class MemoryRepository:
         )
 
 
+def _embedding_target_identity(row: Any) -> tuple[str, UUID]:
+    targets = tuple(
+        (kind, cast(UUID, row[column]))
+        for kind, column in (
+            ("memory_version", "memory_version_id"),
+            ("summary_version", "summary_version_id"),
+            ("message_revision", "message_revision_id"),
+        )
+        if row[column] is not None
+    )
+    if len(targets) != 1:
+        raise ValueError("embedding record target identity is invalid")
+    return targets[0]
+
+
 def _target_role(operation: MemoryOperation, index: int) -> str:
     if operation is MemoryOperation.MERGE and index > 0:
         return "merge_source"
@@ -2127,4 +2345,26 @@ def _summary_version_matches(
             "manifest_sha256": summary.manifest_sha256,
             "invalidation_state": summary.status.value,
         }.items()
+    )
+
+
+def _summary_sources_match(rows: Sequence[Any], summary: SummaryVersion) -> bool:
+    if len(rows) != len(summary.sources):
+        return False
+    return all(
+        all(
+            row[column] == value
+            for column, value in {
+                "summary_version_id": summary.id,
+                "ordinal": source.ordinal,
+                "message_revision_id": source.source_id
+                if source.source_kind == "message_revision"
+                else None,
+                "prior_summary_version_id": source.source_id
+                if source.source_kind == "prior_summary_version"
+                else None,
+                "source_content_sha256": source.content_sha256,
+            }.items()
+        )
+        for row, source in zip(rows, summary.sources, strict=True)
     )

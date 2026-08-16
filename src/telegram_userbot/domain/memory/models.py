@@ -398,12 +398,23 @@ class SummaryVersion:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "created_at", require_aware(self.created_at, "created_at"))
-        if self.version_no <= 0 or self.range_end_event_id < self.range_start_event_id:
+        if (
+            self.version_no <= 0
+            or self.range_start_event_id < 0
+            or self.range_end_event_id < self.range_start_event_id
+        ):
             raise ValueError("summary version range is invalid")
         if not self.content_text.strip():
             raise ValueError("summary content cannot be empty")
         if len(self.manifest_sha256) != 32:
             raise ValueError("summary manifest hash must be SHA-256")
+        if not self.sources or tuple(source.ordinal for source in self.sources) != tuple(
+            range(1, len(self.sources) + 1)
+        ):
+            raise ValueError("summary source ordinals must be contiguous")
+        identities = tuple((source.source_kind, source.source_id) for source in self.sources)
+        if len(identities) != len(set(identities)):
+            raise ValueError("summary sources must be unique")
 
 
 @dataclass(frozen=True, slots=True)

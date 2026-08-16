@@ -21,6 +21,7 @@ from telegram_userbot.domain.memory.models import (
     EmbeddingRecord,
     EmbeddingRecordState,
     EmbeddingSpace,
+    EmbeddingState,
     Evidence,
     InputManifest,
     InputSource,
@@ -159,6 +160,75 @@ async def test_memory_scope_helpers_accept_each_supported_source_and_reject_mism
             account_id=account_id,
             conversation_id=conversation_id,
         )
+
+
+@pytest.mark.asyncio
+async def test_summary_sources_must_remain_current_and_hash_bound() -> None:
+    repo, session = _repository()
+    account_id, conversation_id = uuid4(), uuid4()
+    digest = b"s" * 32
+    message_source = SummarySource(uuid4(), "message_revision", digest, 1)
+    valid_message = {
+        "revision_no": 2,
+        "content_sha256": digest,
+        "redacted_at": None,
+        "current_revision_no": 2,
+        "deleted_at": None,
+        "is_tombstone": False,
+    }
+    session.execute.return_value = _Result(valid_message)
+    await repo._require_summary_source_current(
+        message_source,
+        account_id=account_id,
+        conversation_id=conversation_id,
+    )
+    assert "FOR UPDATE" in str(session.execute.await_args.args[0])
+    message_changes: tuple[dict[str, object], ...] = (
+        {"current_revision_no": 3},
+        {"content_sha256": b"x" * 32},
+        {"redacted_at": NOW},
+        {"deleted_at": NOW, "is_tombstone": True},
+    )
+    for changes in message_changes:
+        session.execute.return_value = _Result(valid_message | changes)
+        with pytest.raises(ValueError, match="message source is stale"):
+            await repo._require_summary_source_current(
+                message_source,
+                account_id=account_id,
+                conversation_id=conversation_id,
+            )
+
+    prior_source = SummarySource(uuid4(), "prior_summary_version", digest, 1)
+    valid_prior = {
+        "version_no": 3,
+        "content_sha256": digest,
+        "invalidation_state": "active",
+        "redacted_at": None,
+        "current_version_no": 3,
+        "status": "active",
+    }
+    session.execute.return_value = _Result(valid_prior)
+    await repo._require_summary_source_current(
+        prior_source,
+        account_id=account_id,
+        conversation_id=conversation_id,
+    )
+    assert "FOR UPDATE" in str(session.execute.await_args.args[0])
+    prior_changes: tuple[dict[str, object], ...] = (
+        {"current_version_no": 4},
+        {"content_sha256": b"x" * 32},
+        {"invalidation_state": "invalidated"},
+        {"status": "quarantined"},
+        {"redacted_at": NOW},
+    )
+    for changes in prior_changes:
+        session.execute.return_value = _Result(valid_prior | changes)
+        with pytest.raises(ValueError, match="prior summary source is stale"):
+            await repo._require_summary_source_current(
+                prior_source,
+                account_id=account_id,
+                conversation_id=conversation_id,
+            )
 
 
 @pytest.mark.asyncio
@@ -478,7 +548,7 @@ async def test_publish_summary_covers_initial_replay_and_watermark_cas() -> None
     account_id, conversation_id, summary_id = uuid4(), uuid4(), uuid4()
     first = _summary(summary_id)
     repo, session = _repository()
-    repo._require_message_revision_scope = AsyncMock()  # type: ignore[method-assign]
+    repo._require_summary_source_current = AsyncMock()  # type: ignore[method-assign]
     session.execute.side_effect = [
         _Result(),
         _Result(),
@@ -517,11 +587,21 @@ async def test_publish_summary_covers_initial_replay_and_watermark_cas() -> None
         "manifest_sha256": first.manifest_sha256,
         "invalidation_state": first.status.value,
     }
+    durable_sources = [
+        {
+            "summary_version_id": first.id,
+            "ordinal": first.sources[0].ordinal,
+            "message_revision_id": first.sources[0].source_id,
+            "prior_summary_version_id": None,
+            "source_content_sha256": first.sources[0].content_sha256,
+        }
+    ]
     session.execute.side_effect = [
         _Result(),
         _Result(durable_watermark),
         _Result(durable_summary),
         _Result(durable_summary_version),
+        _Result(rows=durable_sources),
     ]
     replay = await repo.publish_summary(
         first, account_id=account_id, conversation_id=conversation_id, now=NOW
@@ -535,6 +615,18 @@ async def test_publish_summary_covers_initial_replay_and_watermark_cas() -> None
         _Result(durable_summary_version | {"content_text": "tampered"}),
     ]
     with pytest.raises(SummaryCoverageError, match="summary replay"):
+        await repo.publish_summary(
+            first, account_id=account_id, conversation_id=conversation_id, now=NOW
+        )
+
+    session.execute.side_effect = [
+        _Result(),
+        _Result(durable_watermark),
+        _Result(durable_summary),
+        _Result(durable_summary_version),
+        _Result(rows=[durable_sources[0] | {"source_content_sha256": b"x" * 32}]),
+    ]
+    with pytest.raises(SummaryCoverageError, match="source membership changed"):
         await repo.publish_summary(
             first, account_id=account_id, conversation_id=conversation_id, now=NOW
         )
@@ -603,17 +695,37 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
         "state": "building",
     }
     repo._require_embedding_target_scope = AsyncMock()  # type: ignore[method-assign]
+    repo._require_embedding_target_current = AsyncMock()  # type: ignore[method-assign]
+    persisted_records = [
+        {
+            "memory_version_id": record.target_id
+            if record.target_kind == "memory_version"
+            else None,
+            "summary_version_id": record.target_id
+            if record.target_kind == "summary_version"
+            else None,
+            "message_revision_id": None,
+            "chunk_index": record.chunk_index,
+            "chunker_version": space.chunker_version,
+            "source_sha256": record.source_sha256,
+            "dimensions": space.dimensions,
+            "state": record.state.value,
+            "invalidated_at": None,
+        }
+        for record in records
+    ]
     session.execute.side_effect = [
+        _Result(),
         _Result(),
         _Result(durable_space),
         _Result(),
         _Result(),
         _Result(),
         _Result(),
+        _Result(rows=persisted_records),
         _Result(),
-        _Result(),
+        _Result(rowcount=1),
     ]
-    session.scalar.return_value = 0
     assert (
         await repo.write_embedding_records(
             space,
@@ -622,6 +734,12 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
             model_profile_id=profile_id,
             config_version_id=config_id,
             activate=True,
+            expected_target_chunks={
+                (record.target_kind, record.target_id): 1 for record in records
+            },
+            source_hashes_verified=True,
+            sample_retrieval_verified=True,
+            final_delta=0,
             now=NOW,
         )
         == 2
@@ -642,6 +760,14 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
         await repo.write_embedding_records(
             space,
             (wrong,),
+            account_id=account_id,
+            model_profile_id=profile_id,
+            config_version_id=config_id,
+        )
+    with pytest.raises(ValueError, match="building space"):
+        await repo.write_embedding_records(
+            replace(space, state=EmbeddingState.ACTIVE),
+            (),
             account_id=account_id,
             model_profile_id=profile_id,
             config_version_id=config_id,
@@ -688,6 +814,65 @@ async def test_write_embeddings_rejects_replay_mutation_and_non_ready_activation
             account_id=account_id,
             model_profile_id=profile_id,
             config_version_id=config_id,
+            now=NOW,
+        )
+
+    proof_repo, proof_session = _repository()
+    with pytest.raises(ValueError, match="activation proof is incomplete"):
+        await proof_repo.write_embedding_records(
+            space,
+            (record,),
+            account_id=account_id,
+            model_profile_id=profile_id,
+            config_version_id=config_id,
+            activate=True,
+            now=NOW,
+        )
+    proof_session.execute.assert_not_awaited()
+
+    coverage_repo, coverage_session = _repository()
+    coverage_repo._require_embedding_target_current = AsyncMock()  # type: ignore[method-assign]
+    coverage_session.execute.side_effect = [
+        _Result(),
+        _Result(),
+        _Result(durable_space),
+        _Result(rows=[]),
+    ]
+    with pytest.raises(ValueError, match="target coverage is incomplete"):
+        await coverage_repo.write_embedding_records(
+            space,
+            (),
+            account_id=account_id,
+            model_profile_id=profile_id,
+            config_version_id=config_id,
+            activate=True,
+            expected_target_chunks={(record.target_kind, record.target_id): 1},
+            source_hashes_verified=True,
+            sample_retrieval_verified=True,
+            final_delta=0,
+            now=NOW,
+        )
+
+    active_repo, active_session = _repository()
+    active_repo._require_embedding_target_scope = AsyncMock()  # type: ignore[method-assign]
+    active_session.execute.side_effect = [
+        _Result(),
+        _Result(),
+        _Result(durable_space | {"state": "active"}),
+        _Result(),
+    ]
+    with pytest.raises(ValueError, match="active embedding space is immutable"):
+        await active_repo.write_embedding_records(
+            space,
+            (record,),
+            account_id=account_id,
+            model_profile_id=profile_id,
+            config_version_id=config_id,
+            activate=True,
+            expected_target_chunks={(record.target_kind, record.target_id): 1},
+            source_hashes_verified=True,
+            sample_retrieval_verified=True,
+            final_delta=0,
             now=NOW,
         )
 

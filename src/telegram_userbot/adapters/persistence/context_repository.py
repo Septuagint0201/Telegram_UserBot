@@ -1,15 +1,16 @@
 """Transactions for immutable context manifests and content-free preview state."""
 
 import hashlib
-import hmac
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import cast
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, cast
 from uuid import UUID, uuid7
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import and_, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.persistence.schema import (
@@ -22,12 +23,34 @@ from telegram_userbot.adapters.persistence.schema import (
     context_preview_deliveries,
     context_preview_requests,
     context_preview_tokens,
+    media_objects,
+    memories,
+    memory_versions,
+    message_media,
+    message_revisions,
+    messages,
+    prompt_versions,
     retrieval_policies,
     retrieval_policy_versions,
+    summaries,
+    summary_versions,
 )
 from telegram_userbot.domain.context import ContextManifest, validate_manifest_integrity
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 from telegram_userbot.domain.shared.time import require_aware
+
+MAX_PREVIEW_TTL = timedelta(minutes=5)
+MAX_PREVIEW_DELETE_AFTER = timedelta(minutes=10)
+MAX_PREVIEW_CHUNKS = 8
+SCORE_QUANTUM = Decimal("0.0000001")
+
+
+def _scores_match(persisted: object, expected: float | None) -> bool:
+    if expected is None:
+        return persisted is None
+    return persisted is not None and Decimal(str(persisted)) == Decimal(str(expected)).quantize(
+        SCORE_QUANTUM, rounding=ROUND_HALF_UP
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +106,346 @@ class ContextRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def _require_manifest_source_current(
+        self, item: Any, *, account_id: UUID, now: datetime
+    ) -> None:
+        source_id = UUID(item.source_id)
+        if item.source_type == "trusted_instruction":
+            row = (
+                (
+                    await self._session.execute(
+                        select(
+                            prompt_versions.c.version_no,
+                            prompt_versions.c.template_sha256,
+                            prompt_versions.c.template_body,
+                        )
+                        .where(prompt_versions.c.id == source_id)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            eligible = (
+                row is not None
+                and item.source_revision == f"version-{row['version_no']}"
+                and row["template_sha256"] == bytes.fromhex(item.content_sha256)
+                and hashlib.sha256(row["template_body"].encode()).digest()
+                == bytes.fromhex(item.content_sha256)
+            )
+        elif item.source_type == "message_revision":
+            row = (
+                (
+                    await self._session.execute(
+                        select(
+                            message_revisions.c.revision_no,
+                            message_revisions.c.content_sha256,
+                            message_revisions.c.text_content,
+                            message_revisions.c.caption,
+                            message_revisions.c.redacted_at,
+                            messages.c.current_revision_no,
+                            messages.c.deleted_at,
+                            messages.c.is_tombstone,
+                        )
+                        .select_from(
+                            message_revisions.join(
+                                messages,
+                                and_(
+                                    messages.c.id == message_revisions.c.message_id,
+                                    messages.c.account_id == message_revisions.c.account_id,
+                                ),
+                            )
+                        )
+                        .where(
+                            message_revisions.c.id == source_id,
+                            message_revisions.c.account_id == account_id,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            content = (
+                None
+                if row is None
+                else row["text_content"]
+                if row["text_content"] is not None
+                else row["caption"]
+            )
+            expected_hash = bytes.fromhex(item.content_sha256)
+            eligible = (
+                row is not None
+                and content is not None
+                and row["redacted_at"] is None
+                and row["deleted_at"] is None
+                and not row["is_tombstone"]
+                and row["revision_no"] == row["current_revision_no"]
+                and item.source_revision == f"revision-{row['revision_no']}"
+                and row["content_sha256"] == expected_hash
+                and hashlib.sha256(content.encode()).digest() == expected_hash
+            )
+        elif item.source_type == "media_object":
+            row = (
+                (
+                    await self._session.execute(
+                        select(
+                            media_objects.c.id,
+                            media_objects.c.parent_object_id,
+                            media_objects.c.status,
+                            media_objects.c.sha256,
+                            media_objects.c.validated_mime,
+                            media_objects.c.width,
+                            media_objects.c.height,
+                            media_objects.c.expires_at,
+                        )
+                        .where(
+                            media_objects.c.id == source_id,
+                            media_objects.c.account_id == account_id,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            references: tuple[UUID, ...] = ()
+            if row is not None:
+                references = tuple(
+                    value for value in (row["id"], row["parent_object_id"]) if value is not None
+                )
+            current_reference = await self._session.scalar(
+                select(message_media.c.id)
+                .join(
+                    message_revisions,
+                    and_(
+                        message_revisions.c.id == message_media.c.message_revision_id,
+                        message_revisions.c.account_id == message_media.c.account_id,
+                    ),
+                )
+                .join(
+                    messages,
+                    and_(
+                        messages.c.id == message_revisions.c.message_id,
+                        messages.c.account_id == message_revisions.c.account_id,
+                    ),
+                )
+                .where(
+                    message_media.c.account_id == account_id,
+                    message_media.c.media_object_id.in_(references),
+                    message_revisions.c.redacted_at.is_(None),
+                    messages.c.deleted_at.is_(None),
+                    messages.c.is_tombstone.is_(False),
+                    messages.c.current_revision_no == message_revisions.c.revision_no,
+                )
+                .limit(1)
+                .with_for_update()
+            )
+            metadata = ""
+            if row is not None and row["sha256"] is not None:
+                values = (
+                    row["id"],
+                    bytes(row["sha256"]).hex(),
+                    row["validated_mime"],
+                    row["width"],
+                    row["height"],
+                )
+                rendered = tuple("" if value is None else str(value) for value in values)
+                metadata = (
+                    f"[IMAGE media_object_id={rendered[0]} sha256={rendered[1]} "
+                    f"mime={rendered[2]} width={rendered[3]} height={rendered[4]} detail=auto]"
+                )
+            expected_hash = bytes.fromhex(item.content_sha256)
+            eligible = (
+                row is not None
+                and row["status"] == "ready"
+                and row["sha256"] is not None
+                and (row["expires_at"] is None or row["expires_at"] > now)
+                and item.source_revision == f"sha256-{bytes(row['sha256']).hex()}"
+                and current_reference is not None
+                and hashlib.sha256(metadata.encode()).digest() == expected_hash
+            )
+        elif item.source_type == "memory_version":
+            row = (
+                (
+                    await self._session.execute(
+                        select(
+                            memory_versions.c.version_no,
+                            memory_versions.c.rendered_text,
+                            memory_versions.c.redacted_at,
+                            memories.c.current_version_no,
+                            memories.c.status,
+                        )
+                        .select_from(
+                            memory_versions.join(
+                                memories,
+                                and_(
+                                    memories.c.id == memory_versions.c.memory_id,
+                                    memories.c.account_id == memory_versions.c.account_id,
+                                ),
+                            )
+                        )
+                        .where(
+                            memory_versions.c.id == source_id,
+                            memory_versions.c.account_id == account_id,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            expected_hash = bytes.fromhex(item.content_sha256)
+            eligible = (
+                row is not None
+                and row["rendered_text"] is not None
+                and row["redacted_at"] is None
+                and row["status"] == "active"
+                and row["version_no"] == row["current_version_no"]
+                and item.source_revision == f"version-{row['version_no']}"
+                and hashlib.sha256(row["rendered_text"].encode()).digest() == expected_hash
+            )
+        elif item.source_type == "summary_version":
+            row = (
+                (
+                    await self._session.execute(
+                        select(
+                            summary_versions.c.version_no,
+                            summary_versions.c.content_text,
+                            summary_versions.c.content_sha256,
+                            summary_versions.c.invalidation_state,
+                            summary_versions.c.redacted_at,
+                            summaries.c.current_version_no,
+                            summaries.c.status,
+                        )
+                        .select_from(
+                            summary_versions.join(
+                                summaries,
+                                and_(
+                                    summaries.c.id == summary_versions.c.summary_id,
+                                    summaries.c.account_id == summary_versions.c.account_id,
+                                ),
+                            )
+                        )
+                        .where(
+                            summary_versions.c.id == source_id,
+                            summary_versions.c.account_id == account_id,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            expected_hash = bytes.fromhex(item.content_sha256)
+            eligible = (
+                row is not None
+                and row["content_text"] is not None
+                and row["redacted_at"] is None
+                and row["invalidation_state"] == "active"
+                and row["status"] == "active"
+                and row["version_no"] == row["current_version_no"]
+                and item.source_revision == f"version-{row['version_no']}"
+                and row["content_sha256"] == expected_hash
+                and hashlib.sha256(row["content_text"].encode()).digest() == expected_hash
+            )
+        else:
+            eligible = False
+        if not eligible:
+            raise ValueError("context_manifest_source_stale")
+
+    async def _require_manifest_replay(
+        self,
+        *,
+        manifest: ContextManifest,
+        manifest_values: Mapping[str, object],
+    ) -> None:
+        persisted = (
+            (
+                await self._session.execute(
+                    select(context_manifests).where(context_manifests.c.id == manifest.id)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        identity = {key: value for key, value in manifest_values.items() if key != "created_at"}
+        if persisted is None or any(persisted[key] != value for key, value in identity.items()):
+            raise ValueError("context_manifest_replay_mismatch")
+        item_rows = (
+            (
+                await self._session.execute(
+                    select(context_manifest_items)
+                    .where(context_manifest_items.c.manifest_id == manifest.id)
+                    .order_by(context_manifest_items.c.ordinal)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if len(item_rows) != len(manifest.items):
+            raise ValueError("context_manifest_replay_mismatch")
+        for row, item in zip(item_rows, manifest.items, strict=True):
+            source_id = UUID(item.source_id)
+            expected = {
+                "account_id": manifest_values["account_id"],
+                "ordinal": item.ordinal,
+                "layer": item.layer,
+                "canonical_role": item.canonical_role,
+                "source_actor": item.source_actor,
+                "source_type": item.source_type,
+                "source_id": source_id,
+                "source_revision": item.source_revision,
+                "prompt_version_id": source_id
+                if item.source_type == "trusted_instruction"
+                else None,
+                "message_revision_id": source_id
+                if item.source_type == "message_revision"
+                else None,
+                "media_object_id": source_id if item.source_type == "media_object" else None,
+                "memory_version_id": source_id if item.source_type == "memory_version" else None,
+                "summary_version_id": source_id if item.source_type == "summary_version" else None,
+                "trust_level": item.trust_level,
+                "rank_position": item.rank_position,
+                "image_detail": item.image_detail,
+                "token_estimate": item.token_estimate,
+                "estimated_image_tokens": item.estimated_image_tokens,
+                "content_sha256": bytes.fromhex(item.content_sha256),
+                "rendered_part_sha256": bytes.fromhex(item.rendered_part_sha256),
+            }
+            score_mismatch = any(
+                not _scores_match(row[name], value)
+                for name, value in (
+                    ("base_score", item.base_score),
+                    ("final_score", item.final_score),
+                )
+            )
+            if score_mismatch or any(row[key] != value for key, value in expected.items()):
+                raise ValueError("context_manifest_replay_mismatch")
+            reasons = tuple(
+                await self._session.scalars(
+                    select(context_manifest_item_reasons.c.reason_code)
+                    .where(context_manifest_item_reasons.c.manifest_item_id == row["id"])
+                    .order_by(context_manifest_item_reasons.c.reason_ordinal)
+                )
+            )
+            if reasons != item.reasons:
+                raise ValueError("context_manifest_replay_mismatch")
+        omission_rows = (
+            (
+                await self._session.execute(
+                    select(context_manifest_omissions)
+                    .where(context_manifest_omissions.c.manifest_id == manifest.id)
+                    .order_by(context_manifest_omissions.c.ordinal)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        omissions = tuple(f"{row['layer']}:{row['reason_code']}" for row in omission_rows)
+        if omissions != manifest.omissions:
+            raise ValueError("context_manifest_replay_mismatch")
+
     async def save_manifest(  # noqa: PLR0913 - manifest ownership is explicit
         self,
         *,
@@ -126,41 +489,55 @@ class ContextRepository:
         )
         if retrieval_binding != retrieval_policy_version_id:
             raise ValueError("retrieval_policy_version_binding_mismatch")
-        owner_kind = "turn" if turn_id is not None else "background_job"
-        await self._session.execute(
-            insert(context_manifests).values(
-                id=manifest.id,
-                account_id=account_id,
-                conversation_id=conversation_id,
-                owner_kind=owner_kind,
-                turn_id=turn_id,
-                background_job_id=background_job_id,
-                purpose=manifest.purpose,
-                logical_role=manifest.logical_role,
-                builder_version=manifest.builder_version,
-                prompt_version=manifest.prompt_version,
-                prompt_bundle_sha256=prompt_bundle_sha256,
-                context_policy_version_id=context_policy_version_id,
-                retrieval_policy_version_id=retrieval_policy_version_id,
-                retrieval_policy_version=manifest.retrieval_policy_version,
-                token_policy_version=manifest.context_policy_version,
-                token_estimator_version=manifest.token_estimator_version,
-                capability_snapshot_sha256=capability_snapshot_sha256,
-                memory_freshness=manifest.memory_freshness,
-                effective_input_budget=manifest.effective_input_budget,
-                safety_reserve_tokens=manifest.safety_reserve_tokens,
-                estimated_instruction_tokens=manifest.estimated_instruction_tokens,
-                estimated_text_tokens=manifest.estimated_text_tokens,
-                estimated_image_tokens=manifest.estimated_image_tokens,
-                estimated_structural_tokens=manifest.estimated_structural_tokens,
-                input_token_estimate=manifest.input_token_estimate,
-                image_count=sum(item.image_detail is not None for item in manifest.items),
-                omission_count=len(manifest.omissions),
-                source_revision_vector_sha256=bytes.fromhex(manifest.source_revision_vector_sha256),
-                manifest_sha256=bytes.fromhex(manifest.manifest_sha256),
-                created_at=created_time,
+        for item in manifest.items:
+            await self._require_manifest_source_current(
+                item, account_id=account_id, now=created_time
             )
+        owner_kind = "turn" if turn_id is not None else "background_job"
+        manifest_values: dict[str, object] = {
+            "id": manifest.id,
+            "account_id": account_id,
+            "conversation_id": conversation_id,
+            "owner_kind": owner_kind,
+            "turn_id": turn_id,
+            "background_job_id": background_job_id,
+            "purpose": manifest.purpose,
+            "logical_role": manifest.logical_role,
+            "builder_version": manifest.builder_version,
+            "prompt_version": manifest.prompt_version,
+            "prompt_bundle_sha256": prompt_bundle_sha256,
+            "context_policy_version_id": context_policy_version_id,
+            "retrieval_policy_version_id": retrieval_policy_version_id,
+            "retrieval_policy_version": manifest.retrieval_policy_version,
+            "token_policy_version": manifest.context_policy_version,
+            "token_estimator_version": manifest.token_estimator_version,
+            "capability_snapshot_sha256": capability_snapshot_sha256,
+            "memory_freshness": manifest.memory_freshness,
+            "effective_input_budget": manifest.effective_input_budget,
+            "safety_reserve_tokens": manifest.safety_reserve_tokens,
+            "estimated_instruction_tokens": manifest.estimated_instruction_tokens,
+            "estimated_text_tokens": manifest.estimated_text_tokens,
+            "estimated_image_tokens": manifest.estimated_image_tokens,
+            "estimated_structural_tokens": manifest.estimated_structural_tokens,
+            "input_token_estimate": manifest.input_token_estimate,
+            "image_count": sum(item.image_detail is not None for item in manifest.items),
+            "omission_count": len(manifest.omissions),
+            "source_revision_vector_sha256": bytes.fromhex(manifest.source_revision_vector_sha256),
+            "manifest_sha256": bytes.fromhex(manifest.manifest_sha256),
+            "created_at": created_time,
+        }
+        inserted_manifest_id = await self._session.scalar(
+            postgresql_insert(context_manifests)
+            .values(**manifest_values)
+            .on_conflict_do_nothing()
+            .returning(context_manifests.c.id)
         )
+        if inserted_manifest_id is None:
+            await self._require_manifest_replay(
+                manifest=manifest,
+                manifest_values=manifest_values,
+            )
+            return
         for item in manifest.items:
             inserted_id = await self._session.scalar(
                 insert(context_manifest_items)
@@ -211,11 +588,12 @@ class ContextRepository:
                         reason_code=reason,
                     )
                 )
-        for omission in manifest.omissions:
+        for ordinal, omission in enumerate(manifest.omissions, 1):
             layer, reason = omission.split(":", maxsplit=1)
             await self._session.execute(
                 insert(context_manifest_omissions).values(
                     manifest_id=manifest.id,
+                    ordinal=ordinal,
                     layer=layer,
                     reason_code=reason,
                 )
@@ -303,6 +681,15 @@ class ContextRepository:
         ttl: timedelta = timedelta(minutes=5),
     ) -> PreviewChallenge:
         current_time = require_aware(now, "now")
+        if (
+            admin_user_id <= 0
+            or bot_chat_id != admin_user_id
+            or not bot_identity
+            or bot_identity != bot_identity.strip()
+            or ttl <= timedelta(0)
+            or ttl > MAX_PREVIEW_TTL
+        ):
+            raise ValueError("context_preview_not_allowed")
         manifest = (
             (
                 await self._session.execute(
@@ -319,7 +706,7 @@ class ContextRepository:
             .mappings()
             .one_or_none()
         )
-        if manifest is None or bot_chat_id != admin_user_id:
+        if manifest is None:
             raise ValueError("context_preview_not_allowed")
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode()).digest()
@@ -370,8 +757,15 @@ class ContextRepository:
         now: datetime,
     ) -> PreviewRequestRecord | None:
         current_time = require_aware(now, "now")
+        if (
+            admin_user_id <= 0
+            or bot_chat_id != admin_user_id
+            or not bot_identity
+            or bot_identity != bot_identity.strip()
+        ):
+            return None
         token_hash = hashlib.sha256(token.reveal_for_use().encode()).digest()
-        row = (
+        matched = (
             (
                 await self._session.execute(
                     select(context_preview_tokens, context_preview_requests)
@@ -382,24 +776,19 @@ class ContextRepository:
                     .where(
                         context_preview_tokens.c.admin_user_id == admin_user_id,
                         context_preview_tokens.c.bot_chat_id == bot_chat_id,
+                        context_preview_tokens.c.purpose == "context_preview_confirm",
+                        context_preview_tokens.c.token_hash == token_hash,
                         context_preview_tokens.c.used_at.is_(None),
                         context_preview_tokens.c.expires_at > current_time,
                         context_preview_requests.c.bot_identity == bot_identity,
                         context_preview_requests.c.state == "pending_confirmation",
+                        context_preview_requests.c.token_expires_at > current_time,
                     )
                     .with_for_update()
                 )
             )
             .mappings()
-            .all()
-        )
-        matched = next(
-            (
-                item
-                for item in row
-                if hmac.compare_digest(cast(bytes, item["token_hash"]), token_hash)
-            ),
-            None,
+            .one_or_none()
         )
         if matched is None:
             return None
@@ -466,6 +855,22 @@ class ContextRepository:
     ) -> None:
         current_time = require_aware(now, "now")
         deletion_time = require_aware(delete_after, "delete_after")
+        if (
+            not states
+            or len(states) > MAX_PREVIEW_CHUNKS
+            or deletion_time <= current_time
+            or deletion_time > current_time + MAX_PREVIEW_DELETE_AFTER
+        ):
+            raise ValueError("context_preview_delivery_invalid")
+        sent_message_ids: set[int] = set()
+        for index, (state, message_id) in enumerate(states):
+            if state == "sent":
+                if message_id is None or message_id <= 0 or message_id in sent_message_ids:
+                    raise ValueError("context_preview_delivery_invalid")
+                sent_message_ids.add(message_id)
+                continue
+            if state != "send_unknown" or message_id is not None or index != len(states) - 1:
+                raise ValueError("context_preview_delivery_invalid")
         for ordinal, (state, message_id) in enumerate(states, 1):
             await self._session.execute(
                 insert(context_preview_deliveries).values(
@@ -502,7 +907,7 @@ class ContextRepository:
                 chunk_count=len(states),
                 delivered_chunk_count=delivered,
                 delivered_at=current_time,
-                delete_after=deletion_time,
+                delete_after=deletion_time if delivered else None,
                 last_error_code="send_unknown" if final_state == "send_unknown" else None,
             )
             .returning(context_preview_requests.c.id)
@@ -514,6 +919,8 @@ class ContextRepository:
         self, *, bot_identity: str, now: datetime, limit: int = 50
     ) -> tuple[PreviewDeletionRecord, ...]:
         current_time = require_aware(now, "now")
+        if not bot_identity or bot_identity != bot_identity.strip() or limit <= 0 or limit > 100:
+            raise ValueError("context_preview_deletion_query_invalid")
         rows = (
             (
                 await self._session.execute(
@@ -594,6 +1001,8 @@ class ContextRepository:
             request_state = "deleted"
         elif any(state == "delete_failed" for state in states):
             request_state = "delete_partial"
+        elif any(state == "send_unknown" for state in states):
+            request_state = "send_unknown"
         else:
             request_state = "delete_pending"
         completed_request = await self._session.scalar(
@@ -603,14 +1012,22 @@ class ContextRepository:
                 context_preview_requests.c.bot_identity == deletion.bot_identity,
                 context_preview_requests.c.bot_chat_id == deletion.bot_chat_id,
                 context_preview_requests.c.state.in_(
-                    ("delivered", "delete_pending", "delete_partial")
+                    ("delivered", "send_unknown", "delete_pending", "delete_partial")
                 ),
             )
             .values(
                 state=request_state,
-                completed_at=now if request_state in {"deleted", "delete_partial"} else None,
+                completed_at=(
+                    current_time
+                    if request_state in {"deleted", "delete_partial", "send_unknown"}
+                    else None
+                ),
                 last_error_code=(
-                    error_code or "delete_failed" if request_state == "delete_partial" else None
+                    error_code or "delete_failed"
+                    if request_state == "delete_partial"
+                    else "send_unknown"
+                    if request_state == "send_unknown"
+                    else None
                 ),
             )
             .returning(context_preview_requests.c.id)
