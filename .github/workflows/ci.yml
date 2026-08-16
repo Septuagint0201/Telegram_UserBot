@@ -26,7 +26,7 @@ jobs:
     container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Trust checked-out workspace
@@ -59,7 +59,7 @@ jobs:
           .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts
       - name: Upload preflight evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: preflight-evidence
           if-no-files-found: ignore
@@ -103,7 +103,7 @@ jobs:
       CI_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Trust checked-out workspace
@@ -131,7 +131,7 @@ jobs:
           .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m7
       - name: Upload integration evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: integration-evidence
           if-no-files-found: ignore
@@ -146,7 +146,7 @@ jobs:
     container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Trust checked-out workspace
@@ -169,7 +169,7 @@ jobs:
           .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/browser
       - name: Upload browser evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: browser-evidence
           if-no-files-found: ignore
