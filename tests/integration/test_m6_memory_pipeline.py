@@ -6,7 +6,7 @@ from typing import cast
 from uuid import uuid4, uuid7
 
 import pytest
-from sqlalchemy import select, text, update
+from sqlalchemy import null, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.persistence.memory_repository import MemoryRepository
@@ -194,7 +194,7 @@ async def test_m6_stale_summary_source_does_not_advance_watermark(
         .values(
             text_content=None,
             caption=None,
-            entities=None,
+            entities=null(),
             content_sha256=None,
             redacted_at=NOW + timedelta(seconds=1),
             redaction_reason="policy",
