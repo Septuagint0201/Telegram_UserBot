@@ -482,6 +482,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                 (
                     "src/telegram_userbot/adapters/telegram_bot/context_control_backend.py",
                     "alembic/versions/0015_context_preview_integrity.py",
+                    "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "tests/unit/adapters/test_context_control.py",
                     "tests/integration/test_m5_context_media.py",
                 ),
@@ -661,6 +662,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0013_m5_m7_consistency.py",
                     "alembic/versions/0014_m7_budget_integrity.py",
                     "alembic/versions/0015_context_preview_integrity.py",
+                    "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "deploy/postgres/m6_roles.sql",
                     "docs/compatibility/m6.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
@@ -799,6 +801,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0013_m5_m7_consistency.py",
                     "alembic/versions/0014_m7_budget_integrity.py",
                     "alembic/versions/0015_context_preview_integrity.py",
+                    "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",

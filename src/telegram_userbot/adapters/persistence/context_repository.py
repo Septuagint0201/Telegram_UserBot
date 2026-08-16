@@ -94,6 +94,14 @@ class PreviewRequestRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PreviewDeliveryRecord:
+    delivery_id: int
+    ordinal: int
+    state: str
+    bot_message_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class PreviewDeletionRecord:
     delivery_id: int
     request_id: UUID
@@ -105,6 +113,11 @@ class PreviewDeletionRecord:
 class ContextRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def commit_preview_boundary(self) -> None:
+        """Commit content-free preview state before or after a Bot RPC."""
+
+        await self._session.commit()
 
     async def _require_manifest_source_current(
         self, item: Any, *, account_id: UUID, now: datetime
@@ -826,7 +839,22 @@ class ContextRepository:
             bot_identity,
         )
 
-    async def begin_preview_delivery(self, *, request: PreviewRequestRecord) -> bool:
+    async def begin_preview_delivery(
+        self,
+        *,
+        request: PreviewRequestRecord,
+        chunk_count: int,
+        now: datetime,
+        delete_after: datetime,
+    ) -> tuple[PreviewDeliveryRecord, ...] | None:
+        current_time = require_aware(now, "now")
+        deletion_time = require_aware(delete_after, "delete_after")
+        if (
+            not 1 <= chunk_count <= MAX_PREVIEW_CHUNKS
+            or deletion_time <= current_time
+            or deletion_time > current_time + MAX_PREVIEW_DELETE_AFTER
+        ):
+            raise ValueError("context_preview_delivery_invalid")
         claimed = await self._session.scalar(
             update(context_preview_requests)
             .where(
@@ -840,54 +868,202 @@ class ContextRepository:
                 context_preview_requests.c.bot_chat_id == request.bot_chat_id,
                 context_preview_requests.c.state == "confirmed",
             )
-            .values(state="delivering")
+            .values(
+                state="delivering",
+                chunk_count=chunk_count,
+                delivered_chunk_count=0,
+                delete_after=deletion_time,
+            )
             .returning(context_preview_requests.c.id)
         )
-        return claimed == request.request_id
+        if claimed == request.request_id:
+            for ordinal in range(1, chunk_count + 1):
+                await self._session.execute(
+                    insert(context_preview_deliveries).values(
+                        request_id=request.request_id,
+                        bot_identity=request.bot_identity,
+                        bot_chat_id=request.bot_chat_id,
+                        ordinal=ordinal,
+                        state="pending",
+                    )
+                )
+        else:
+            existing_request = (
+                (
+                    await self._session.execute(
+                        select(
+                            context_preview_requests.c.state,
+                            context_preview_requests.c.chunk_count,
+                            context_preview_requests.c.delete_after,
+                        ).where(
+                            context_preview_requests.c.id == request.request_id,
+                            context_preview_requests.c.context_manifest_id == request.manifest_id,
+                            context_preview_requests.c.manifest_sha256 == request.manifest_sha256,
+                            context_preview_requests.c.source_revision_vector_sha256
+                            == request.source_revision_vector_sha256,
+                            context_preview_requests.c.admin_user_id == request.admin_user_id,
+                            context_preview_requests.c.bot_identity == request.bot_identity,
+                            context_preview_requests.c.bot_chat_id == request.bot_chat_id,
+                        )
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                existing_request is None
+                or existing_request["state"] != "delivering"
+                or existing_request["chunk_count"] != chunk_count
+                or existing_request["delete_after"] != deletion_time
+            ):
+                return None
+        rows = (
+            (
+                await self._session.execute(
+                    select(context_preview_deliveries)
+                    .where(
+                        context_preview_deliveries.c.request_id == request.request_id,
+                        context_preview_deliveries.c.bot_identity == request.bot_identity,
+                        context_preview_deliveries.c.bot_chat_id == request.bot_chat_id,
+                    )
+                    .order_by(context_preview_deliveries.c.ordinal)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if len(rows) != chunk_count or any(
+            row["ordinal"] != ordinal
+            or row["state"] not in {"pending", "sending", "sent", "send_unknown"}
+            or (row["state"] == "sent") != (row["bot_message_id"] is not None)
+            for ordinal, row in enumerate(rows, 1)
+        ):
+            raise RuntimeError("context_preview_delivery_conflict")
+        return tuple(
+            PreviewDeliveryRecord(
+                cast(int, row["id"]),
+                cast(int, row["ordinal"]),
+                cast(str, row["state"]),
+                cast(int | None, row["bot_message_id"]),
+            )
+            for row in rows
+        )
 
-    async def record_preview_delivery(
+    async def claim_preview_delivery_chunk(
+        self, *, request: PreviewRequestRecord, ordinal: int
+    ) -> bool:
+        claimed = await self._session.scalar(
+            update(context_preview_deliveries)
+            .where(
+                context_preview_deliveries.c.request_id == request.request_id,
+                context_preview_deliveries.c.bot_identity == request.bot_identity,
+                context_preview_deliveries.c.bot_chat_id == request.bot_chat_id,
+                context_preview_deliveries.c.ordinal == ordinal,
+                context_preview_deliveries.c.state == "pending",
+            )
+            .values(state="sending", last_error_code=None)
+            .returning(context_preview_deliveries.c.id)
+        )
+        return claimed is not None
+
+    async def retry_preview_delivery_chunk(
+        self, *, request: PreviewRequestRecord, ordinal: int
+    ) -> None:
+        reset = await self._session.scalar(
+            update(context_preview_deliveries)
+            .where(
+                context_preview_deliveries.c.request_id == request.request_id,
+                context_preview_deliveries.c.bot_identity == request.bot_identity,
+                context_preview_deliveries.c.bot_chat_id == request.bot_chat_id,
+                context_preview_deliveries.c.ordinal == ordinal,
+                context_preview_deliveries.c.state == "sending",
+            )
+            .values(state="pending", last_error_code="send_rejected")
+            .returning(context_preview_deliveries.c.id)
+        )
+        if reset is None:
+            raise RuntimeError("context_preview_delivery_conflict")
+
+    async def record_preview_delivery_chunk(  # noqa: PLR0913 - durable RPC result identity is explicit
         self,
         *,
         request: PreviewRequestRecord,
-        states: tuple[tuple[str, int | None], ...],
+        ordinal: int,
+        state: str,
+        message_id: int | None,
         now: datetime,
         delete_after: datetime,
     ) -> None:
         current_time = require_aware(now, "now")
         deletion_time = require_aware(delete_after, "delete_after")
         if (
-            not states
-            or len(states) > MAX_PREVIEW_CHUNKS
+            ordinal <= 0
             or deletion_time <= current_time
             or deletion_time > current_time + MAX_PREVIEW_DELETE_AFTER
+            or state not in {"sent", "send_unknown"}
+            or (state == "sent" and (message_id is None or message_id <= 0))
+            or (state == "send_unknown" and message_id is not None)
         ):
             raise ValueError("context_preview_delivery_invalid")
-        sent_message_ids: set[int] = set()
-        for index, (state, message_id) in enumerate(states):
-            if state == "sent":
-                if message_id is None or message_id <= 0 or message_id in sent_message_ids:
-                    raise ValueError("context_preview_delivery_invalid")
-                sent_message_ids.add(message_id)
-                continue
-            if state != "send_unknown" or message_id is not None or index != len(states) - 1:
-                raise ValueError("context_preview_delivery_invalid")
-        for ordinal, (state, message_id) in enumerate(states, 1):
-            await self._session.execute(
-                insert(context_preview_deliveries).values(
-                    request_id=request.request_id,
-                    bot_identity=request.bot_identity,
-                    bot_chat_id=request.bot_chat_id,
-                    ordinal=ordinal,
-                    state=state,
-                    bot_message_id=message_id,
-                    sent_at=current_time if state == "sent" else None,
-                    delete_after=deletion_time if message_id is not None else None,
-                    last_error_code="send_unknown" if state == "send_unknown" else None,
+        completed = await self._session.scalar(
+            update(context_preview_deliveries)
+            .where(
+                context_preview_deliveries.c.request_id == request.request_id,
+                context_preview_deliveries.c.bot_identity == request.bot_identity,
+                context_preview_deliveries.c.bot_chat_id == request.bot_chat_id,
+                context_preview_deliveries.c.ordinal == ordinal,
+                context_preview_deliveries.c.state == "sending",
+            )
+            .values(
+                state=state,
+                bot_message_id=message_id,
+                sent_at=current_time if state == "sent" else None,
+                delete_after=deletion_time if state == "sent" else None,
+                last_error_code="send_unknown" if state == "send_unknown" else None,
+            )
+            .returning(context_preview_deliveries.c.id)
+        )
+        if completed is None:
+            raise RuntimeError("context_preview_delivery_conflict")
+
+    async def finish_preview_delivery(
+        self, *, request: PreviewRequestRecord, now: datetime
+    ) -> tuple[str, int, int]:
+        current_time = require_aware(now, "now")
+        rows = (
+            (
+                await self._session.execute(
+                    select(
+                        context_preview_deliveries.c.state,
+                        context_preview_deliveries.c.bot_message_id,
+                        context_preview_deliveries.c.delete_after,
+                    )
+                    .where(
+                        context_preview_deliveries.c.request_id == request.request_id,
+                        context_preview_deliveries.c.bot_identity == request.bot_identity,
+                        context_preview_deliveries.c.bot_chat_id == request.bot_chat_id,
+                    )
+                    .order_by(context_preview_deliveries.c.ordinal)
+                    .with_for_update()
                 )
             )
-        delivered = sum(state == "sent" for state, _ in states)
+            .mappings()
+            .all()
+        )
+        if not rows or any(row["state"] in {"pending", "sending"} for row in rows):
+            raise RuntimeError("context_preview_delivery_conflict")
+        delivered = sum(row["state"] == "sent" for row in rows)
         final_state = (
-            "send_unknown" if any(state == "send_unknown" for state, _ in states) else "delivered"
+            "send_unknown" if any(row["state"] == "send_unknown" for row in rows) else "delivered"
+        )
+        deletion_time = max(
+            (
+                cast(datetime, row["delete_after"])
+                for row in rows
+                if row["delete_after"] is not None
+            ),
+            default=None,
         )
         completed = await self._session.scalar(
             update(context_preview_requests)
@@ -904,16 +1080,17 @@ class ContextRepository:
             )
             .values(
                 state=final_state,
-                chunk_count=len(states),
+                chunk_count=len(rows),
                 delivered_chunk_count=delivered,
                 delivered_at=current_time,
-                delete_after=deletion_time if delivered else None,
+                delete_after=deletion_time,
                 last_error_code="send_unknown" if final_state == "send_unknown" else None,
             )
             .returning(context_preview_requests.c.id)
         )
         if completed != request.request_id:
             raise RuntimeError("context_preview_delivery_conflict")
+        return final_state, delivered, len(rows)
 
     async def due_preview_deletions(
         self, *, bot_identity: str, now: datetime, limit: int = 50

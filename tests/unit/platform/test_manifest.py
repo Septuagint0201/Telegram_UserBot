@@ -29,7 +29,7 @@ def test_alembic_head_fits_default_version_column() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     head = ScriptDirectory.from_config(config).get_current_head()
-    assert head == "0015_context_preview_integrity"
+    assert head == "0016_m5_m7_delivery_integrity"
     assert len(head) <= 32
 
 

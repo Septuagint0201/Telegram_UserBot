@@ -13,7 +13,7 @@ import redis
 EXPECTED_POSTGRES_MAJOR = "17"
 EXPECTED_VECTOR_VERSION = "0.8.6"
 EXPECTED_REDIS_VERSION = "8.2.8"
-EXPECTED_REVISION = "0015_context_preview_integrity"
+EXPECTED_REVISION = "0016_m5_m7_delivery_integrity"
 
 
 def _hash(path: Path) -> str:
@@ -67,7 +67,7 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
         "schema_version": 2,
         "revision": EXPECTED_REVISION,
         "migration_sha256": _hash(
-            root / "alembic" / "versions" / "0015_context_preview_integrity.py"
+            root / "alembic" / "versions" / "0016_m5_m7_delivery_integrity.py"
         ),
         "migration_chain_sha256": {
             "0001_m1_durable_state": _hash(
@@ -114,6 +114,9 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
             ),
             "0015_context_preview_integrity": _hash(
                 root / "alembic" / "versions" / "0015_context_preview_integrity.py"
+            ),
+            "0016_m5_m7_delivery_integrity": _hash(
+                root / "alembic" / "versions" / "0016_m5_m7_delivery_integrity.py"
             ),
         },
         "roles_sha256": _hash(root / "deploy" / "postgres" / "m7_roles.sql"),

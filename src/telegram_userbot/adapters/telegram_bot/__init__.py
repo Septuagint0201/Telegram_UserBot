@@ -10,6 +10,7 @@ from telegram_userbot.adapters.telegram_bot.context_control_backend import (
     DurableContextControlBackend,
     ExactManifestPreviewRebuilder,
     PreviewGateway,
+    PreviewSendRejectedError,
     PreviewSendUnknownError,
 )
 from telegram_userbot.adapters.telegram_bot.conversation_control import (
@@ -86,6 +87,7 @@ __all__ = [
     "ModelProfileSummary",
     "PreviewDeliveryResult",
     "PreviewGateway",
+    "PreviewSendRejectedError",
     "PreviewSendUnknownError",
     "PublicEndpointAdmission",
 ]

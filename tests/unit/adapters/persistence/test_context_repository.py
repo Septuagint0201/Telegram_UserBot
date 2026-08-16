@@ -60,6 +60,7 @@ class FakeSession:
         self.scalar_values = deque(scalars)
         self.scalar_sequences = deque(tuple(item) for item in scalar_sequences)
         self.statements: list[object] = []
+        self.commit_count = 0
 
     async def execute(self, statement: object) -> FakeResult:
         self.statements.append(statement)
@@ -72,6 +73,9 @@ class FakeSession:
     async def scalars(self, statement: object) -> tuple[object, ...]:
         self.statements.append(statement)
         return self.scalar_sequences.popleft() if self.scalar_sequences else ()
+
+    async def commit(self) -> None:
+        self.commit_count += 1
 
 
 def source_item(
@@ -406,25 +410,77 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
         42,
         "control-bot",
     )
-    claim_fake = FakeSession(scalars=(request_id,))
-    assert await ContextRepository(cast(AsyncSession, claim_fake)).begin_preview_delivery(
-        request=request
+    delivery_rows = (
+        {
+            "id": 7,
+            "ordinal": 1,
+            "state": "pending",
+            "bot_message_id": None,
+        },
+        {
+            "id": 8,
+            "ordinal": 2,
+            "state": "pending",
+            "bot_message_id": None,
+        },
     )
-    assert len(claim_fake.statements) == 1
+    claim_fake = FakeSession(
+        scalars=(request_id,),
+        results=(FakeResult(), FakeResult(), FakeResult(rows=delivery_rows)),
+    )
+    claim_repository = ContextRepository(cast(AsyncSession, claim_fake))
+    prepared = await claim_repository.begin_preview_delivery(
+        request=request,
+        chunk_count=2,
+        now=NOW,
+        delete_after=NOW + timedelta(minutes=10),
+    )
+    assert prepared is not None
+    assert tuple(item.ordinal for item in prepared) == (1, 2)
+    assert len(claim_fake.statements) == 4
     claim_sql = str(claim_fake.statements[0])
     assert "context_preview_requests.bot_identity" in claim_sql
     assert "context_preview_requests.bot_chat_id" in claim_sql
     assert "context_preview_requests.state" in claim_sql
+    await claim_repository.commit_preview_boundary()
+    assert claim_fake.commit_count == 1
 
-    delivery_fake = FakeSession(scalars=(request_id,))
+    delivery_fake = FakeSession(scalars=(7, 7))
     delivery_repository = ContextRepository(cast(AsyncSession, delivery_fake))
-    await delivery_repository.record_preview_delivery(
+    assert await delivery_repository.claim_preview_delivery_chunk(request=request, ordinal=1)
+    await delivery_repository.record_preview_delivery_chunk(
         request=request,
-        states=(("sent", 100), ("send_unknown", None)),
+        ordinal=1,
+        state="sent",
+        message_id=100,
         now=NOW,
         delete_after=NOW + timedelta(minutes=10),
     )
-    assert len(delivery_fake.statements) == 3
+    assert len(delivery_fake.statements) == 2
+
+    finish_fake = FakeSession(
+        scalars=(request_id,),
+        results=(
+            FakeResult(
+                rows=(
+                    {
+                        "state": "sent",
+                        "bot_message_id": 100,
+                        "delete_after": NOW + timedelta(minutes=10),
+                    },
+                    {"state": "send_unknown", "bot_message_id": None, "delete_after": None},
+                )
+            ),
+        ),
+    )
+    assert await ContextRepository(cast(AsyncSession, finish_fake)).finish_preview_delivery(
+        request=request, now=NOW
+    ) == ("send_unknown", 1, 2)
+
+    retry_fake = FakeSession(scalars=(7,))
+    await ContextRepository(cast(AsyncSession, retry_fake)).retry_preview_delivery_chunk(
+        request=request, ordinal=1
+    )
 
     deletion = PreviewDeletionRecord(7, request_id, "control-bot", 42, 100)
     for states in (("deleted",), ("delete_failed",), ("sent",), ("deleted", "send_unknown")):
@@ -506,12 +562,22 @@ async def test_context_repository_rejects_invalid_owner_and_naive_times_before_s
             now=naive,
         )
     with pytest.raises(ValueError, match="now must be timezone-aware"):
-        await repository.record_preview_delivery(
-            request=request, states=(("sent", 9),), now=naive, delete_after=NOW
+        await repository.record_preview_delivery_chunk(
+            request=request,
+            ordinal=1,
+            state="sent",
+            message_id=9,
+            now=naive,
+            delete_after=NOW,
         )
     with pytest.raises(ValueError, match="delete_after must be timezone-aware"):
-        await repository.record_preview_delivery(
-            request=request, states=(("sent", 9),), now=NOW, delete_after=naive
+        await repository.record_preview_delivery_chunk(
+            request=request,
+            ordinal=1,
+            state="sent",
+            message_id=9,
+            now=NOW,
+            delete_after=naive,
         )
     with pytest.raises(ValueError, match="now must be timezone-aware"):
         await repository.due_preview_deletions(bot_identity="bot", now=naive)
@@ -539,20 +605,61 @@ async def test_context_preview_rejects_unbounded_or_incoherent_delivery_before_s
                 now=NOW,
                 ttl=ttl,
             )
-    for states, delete_after in (
-        ((), NOW + timedelta(minutes=10)),
-        ((("sent", None),), NOW + timedelta(minutes=10)),
-        ((("sent", 0),), NOW + timedelta(minutes=10)),
-        ((("send_unknown", 9),), NOW + timedelta(minutes=10)),
-        ((("send_unknown", None), ("sent", 9)), NOW + timedelta(minutes=10)),
-        ((("sent", 9), ("sent", 9)), NOW + timedelta(minutes=10)),
-        ((("sent", 9),), NOW),
-        ((("sent", 9),), NOW + timedelta(minutes=10, seconds=1)),
+    for chunk_count, delete_after in (
+        (0, NOW + timedelta(minutes=10)),
+        (9, NOW + timedelta(minutes=10)),
+        (1, NOW),
+        (1, NOW + timedelta(minutes=10, seconds=1)),
     ):
         with pytest.raises(ValueError, match="context_preview_delivery_invalid"):
-            await repository.record_preview_delivery(
+            await repository.begin_preview_delivery(
                 request=request,
-                states=states,
+                chunk_count=chunk_count,
                 now=NOW,
                 delete_after=delete_after,
             )
+    for ordinal, state, message_id, delete_after in (
+        (0, "sent", 9, NOW + timedelta(minutes=10)),
+        (1, "invalid", 9, NOW + timedelta(minutes=10)),
+        (1, "sent", None, NOW + timedelta(minutes=10)),
+        (1, "sent", 0, NOW + timedelta(minutes=10)),
+        (1, "send_unknown", 9, NOW + timedelta(minutes=10)),
+        (1, "sent", 9, NOW),
+        (1, "sent", 9, NOW + timedelta(minutes=10, seconds=1)),
+    ):
+        with pytest.raises(ValueError, match="context_preview_delivery_invalid"):
+            await repository.record_preview_delivery_chunk(
+                request=request,
+                ordinal=ordinal,
+                state=state,
+                message_id=message_id,
+                now=NOW,
+                delete_after=delete_after,
+            )
+
+
+@pytest.mark.unit
+async def test_context_preview_delivery_cas_and_completion_conflicts_fail_closed() -> None:
+    request = PreviewRequestRecord(
+        UUID(int=7), UUID(int=8), b"m" * 32, b"s" * 32, "confirmed", 42, 42, "bot"
+    )
+    with pytest.raises(RuntimeError, match="delivery_conflict"):
+        await ContextRepository(
+            cast(AsyncSession, FakeSession(scalars=(None,)))
+        ).retry_preview_delivery_chunk(request=request, ordinal=1)
+    with pytest.raises(RuntimeError, match="delivery_conflict"):
+        await ContextRepository(
+            cast(AsyncSession, FakeSession(scalars=(None,)))
+        ).record_preview_delivery_chunk(
+            request=request,
+            ordinal=1,
+            state="sent",
+            message_id=9,
+            now=NOW,
+            delete_after=NOW + timedelta(minutes=10),
+        )
+    for rows in ((), ({"state": "pending", "bot_message_id": None, "delete_after": None},)):
+        with pytest.raises(RuntimeError, match="delivery_conflict"):
+            await ContextRepository(
+                cast(AsyncSession, FakeSession(results=(FakeResult(rows=rows),)))
+            ).finish_preview_delivery(request=request, now=NOW)

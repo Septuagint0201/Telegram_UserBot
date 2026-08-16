@@ -678,8 +678,10 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
     repo, session = _repository()
     account_id, profile_id, config_id = uuid4(), uuid4(), uuid4()
     space = EmbeddingSpace(uuid4(), "fake-embedding", 2, "cosine", "l2", "v1", 1)
+    source_content = "SYNTHETIC_EMBEDDING_SOURCE"
+    source_hash = sha256(source_content.encode()).digest()
     records = tuple(
-        EmbeddingRecord(uuid4(), space.id, uuid4(), kind, 0, b"e" * 32, (0.1, 0.2))
+        EmbeddingRecord(uuid4(), space.id, uuid4(), kind, 0, source_hash, (0.1, 0.2))
         for kind in ("memory_version", "summary_version")
     )
     durable_space = {
@@ -695,7 +697,9 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
         "state": "building",
     }
     repo._require_embedding_target_scope = AsyncMock()  # type: ignore[method-assign]
-    repo._require_embedding_target_current = AsyncMock()  # type: ignore[method-assign]
+    repo._require_embedding_target_current = AsyncMock(  # type: ignore[method-assign]
+        return_value=source_content
+    )
     persisted_records = [
         {
             "memory_version_id": record.target_id
@@ -723,6 +727,13 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
         _Result(),
         _Result(),
         _Result(rows=persisted_records),
+        _Result(
+            {
+                "vector_payload": list(records[0].vector),
+                "dimensions": space.dimensions,
+                "source_sha256": source_hash,
+            }
+        ),
         _Result(),
         _Result(rowcount=1),
     ]
@@ -737,8 +748,6 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
             expected_target_chunks={
                 (record.target_kind, record.target_id): 1 for record in records
             },
-            source_hashes_verified=True,
-            sample_retrieval_verified=True,
             final_delta=0,
             now=NOW,
         )
@@ -847,8 +856,6 @@ async def test_write_embeddings_rejects_replay_mutation_and_non_ready_activation
             config_version_id=config_id,
             activate=True,
             expected_target_chunks={(record.target_kind, record.target_id): 1},
-            source_hashes_verified=True,
-            sample_retrieval_verified=True,
             final_delta=0,
             now=NOW,
         )
@@ -870,8 +877,6 @@ async def test_write_embeddings_rejects_replay_mutation_and_non_ready_activation
             config_version_id=config_id,
             activate=True,
             expected_target_chunks={(record.target_kind, record.target_id): 1},
-            source_hashes_verified=True,
-            sample_retrieval_verified=True,
             final_delta=0,
             now=NOW,
         )
@@ -898,6 +903,95 @@ async def test_write_embeddings_rejects_replay_mutation_and_non_ready_activation
             now=NOW,
         )
     fresh_session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "source_hash",
+        "sample_missing",
+        "sample_dimensions",
+        "sample_hash",
+        "sample_vector",
+        "sample_nonfinite",
+    ],
+)
+async def test_embedding_activation_verifies_canonical_hash_and_sample_retrieval(
+    failure: str,
+) -> None:
+    account_id, profile_id, config_id = uuid4(), uuid4(), uuid4()
+    space = EmbeddingSpace(uuid4(), "fake-embedding", 2, "cosine", "l2", "v1", 1)
+    content = "SYNTHETIC_EMBEDDING_SOURCE"
+    source_hash = sha256(content.encode()).digest()
+    record = EmbeddingRecord(
+        uuid4(), space.id, uuid4(), "memory_version", 0, source_hash, (0.1, 0.2)
+    )
+    durable_space = {
+        "account_id": account_id,
+        "model_profile_id": profile_id,
+        "config_version_id": config_id,
+        "model_name_snapshot": space.model_name,
+        "dimensions": space.dimensions,
+        "distance_metric": space.distance_metric,
+        "normalization": space.normalization,
+        "chunker_version": space.chunker_version,
+        "generation": space.generation,
+        "state": "building",
+    }
+    persisted = {
+        "memory_version_id": record.target_id,
+        "summary_version_id": None,
+        "message_revision_id": None,
+        "chunk_index": 0,
+        "chunker_version": space.chunker_version,
+        "source_sha256": source_hash,
+        "dimensions": space.dimensions,
+        "state": record.state.value,
+        "invalidated_at": None,
+    }
+    repo, session = _repository()
+    repo._require_embedding_target_scope = AsyncMock()  # type: ignore[method-assign]
+    repo._require_embedding_target_current = AsyncMock(  # type: ignore[method-assign]
+        return_value="CHANGED_SOURCE" if failure == "source_hash" else content
+    )
+    results = [
+        _Result(),
+        _Result(),
+        _Result(durable_space),
+        _Result(),
+        _Result(),
+        _Result(rows=[persisted]),
+    ]
+    if failure != "source_hash":
+        sample_row: dict[str, Any] = {
+            "vector_payload": list(record.vector),
+            "dimensions": space.dimensions,
+            "source_sha256": source_hash,
+        }
+        if failure == "sample_dimensions":
+            sample_row["dimensions"] = space.dimensions + 1
+        elif failure == "sample_hash":
+            sample_row["source_sha256"] = b"short"
+        elif failure == "sample_vector":
+            sample_row["vector_payload"] = [0.1]
+        elif failure == "sample_nonfinite":
+            sample_row["vector_payload"] = [0.1, float("nan")]
+        results.append(_Result(None if failure == "sample_missing" else sample_row))
+    session.execute.side_effect = results
+    expected_error = "source hashes are stale" if failure == "source_hash" else "sample retrieval"
+    with pytest.raises(ValueError, match=expected_error):
+        await repo.write_embedding_records(
+            space,
+            (record,),
+            account_id=account_id,
+            model_profile_id=profile_id,
+            config_version_id=config_id,
+            activate=True,
+            expected_target_chunks={(record.target_kind, record.target_id): 1},
+            final_delta=0,
+            now=NOW,
+        )
 
 
 @pytest.mark.asyncio

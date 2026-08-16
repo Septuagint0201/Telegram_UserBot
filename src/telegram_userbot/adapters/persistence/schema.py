@@ -4098,6 +4098,7 @@ proactive_budget_reservations = Table(
     Column("decision_id", UUID_TYPE, nullable=False),
     Column("policy_version_id", UUID_TYPE, nullable=False),
     Column("authorization_generation", Integer, nullable=False),
+    Column("target", Text, nullable=False),
     Column("account_bucket_id", UUID_TYPE, nullable=False),
     Column("contact_bucket_id", UUID_TYPE, nullable=False),
     Column("bypass_bucket_id", UUID_TYPE),
@@ -4174,6 +4175,12 @@ proactive_budget_reservations = Table(
     ),
     CheckConstraint("octet_length(reservation_key) = 32", name="reservation_key_32_bytes"),
     CheckConstraint("authorization_generation > 0", name="authorization_generation_positive"),
+    CheckConstraint("target IN ('auto_send','copilot_draft')", name="target_values"),
+    CheckConstraint(
+        "(target = 'auto_send' AND copilot_draft_id IS NULL) OR "
+        "(target = 'copilot_draft' AND outbound_group_id IS NULL)",
+        name="target_side_effect_match",
+    ),
     CheckConstraint(
         "(bypass AND bypass_bucket_id IS NOT NULL) OR (NOT bypass AND bypass_bucket_id IS NULL)",
         name="bypass_bucket_match",

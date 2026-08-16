@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -46,6 +47,7 @@ from telegram_userbot.adapters.persistence.schema import (
     summary_versions,
     summary_watermarks,
 )
+from telegram_userbot.domain.memory.embedding import chunk_text
 from telegram_userbot.domain.memory.lifecycle import (
     AcceptanceResult,
     MemoryConflictError,
@@ -257,10 +259,10 @@ class MemoryRepository:
 
     async def _require_embedding_target_current(
         self, *, target_kind: str, target_id: UUID, account_id: UUID
-    ) -> None:
+    ) -> str:
         if target_kind == "memory_version":
             query = (
-                select(memory_versions.c.id)
+                select(memory_versions.c.rendered_text)
                 .join(
                     memories,
                     and_(
@@ -281,7 +283,7 @@ class MemoryRepository:
             )
         elif target_kind == "summary_version":
             query = (
-                select(summary_versions.c.id)
+                select(summary_versions.c.content_text)
                 .join(
                     summaries,
                     and_(
@@ -303,7 +305,7 @@ class MemoryRepository:
             )
         elif target_kind == "message_revision":
             query = (
-                select(message_revisions.c.id)
+                select(func.coalesce(message_revisions.c.text_content, message_revisions.c.caption))
                 .join(
                     messages,
                     and_(
@@ -326,8 +328,10 @@ class MemoryRepository:
             )
         else:
             raise ValueError("embedding target kind is unsupported")
-        if await self._session.scalar(query) is None:
+        content = await self._session.scalar(query)
+        if content is None:
             raise ValueError("embedding target is not currently eligible")
+        return cast(str, content)
 
     async def _embedding_record_belongs_to_account(self, record: Any, *, account_id: UUID) -> bool:
         if record["memory_version_id"] is not None:
@@ -1512,7 +1516,7 @@ class MemoryRepository:
             summary.id,
         )
 
-    async def write_embedding_records(  # noqa: PLR0912, PLR0913 - explicit transition inputs
+    async def write_embedding_records(  # noqa: PLR0912, PLR0913, PLR0915 - explicit transition inputs
         self,
         space: EmbeddingSpace,
         records: tuple[EmbeddingRecord, ...],
@@ -1522,8 +1526,6 @@ class MemoryRepository:
         config_version_id: UUID,
         activate: bool = False,
         expected_target_chunks: Mapping[tuple[str, UUID], int] | None = None,
-        source_hashes_verified: bool = False,
-        sample_retrieval_verified: bool = False,
         final_delta: int | None = None,
         now: datetime | None = None,
     ) -> int:
@@ -1537,12 +1539,7 @@ class MemoryRepository:
             raise ValueError("embedding record dimension or space mismatch")
         if activate and any(record.state is not EmbeddingRecordState.READY for record in records):
             raise ValueError("embedding activation requires ready records")
-        if activate and (
-            not expected_target_chunks
-            or not source_hashes_verified
-            or not sample_retrieval_verified
-            or final_delta != 0
-        ):
+        if activate and (not expected_target_chunks or final_delta != 0):
             raise ValueError("embedding activation proof is incomplete")
         if expected_target_chunks is not None and any(
             target_kind not in {"memory_version", "summary_version", "message_revision"}
@@ -1697,6 +1694,8 @@ class MemoryRepository:
                 .all()
             )
             actual_target_chunks: dict[tuple[str, UUID], list[int]] = {}
+            actual_source_hashes: dict[tuple[str, UUID], list[bytes]] = {}
+            target_contents: dict[tuple[str, UUID], str] = {}
             for persisted_record in persisted_records:
                 if (
                     persisted_record["state"] != EmbeddingRecordState.READY.value
@@ -1707,13 +1706,17 @@ class MemoryRepository:
                 ):
                     raise ValueError("embedding space coverage is not fully ready")
                 target = _embedding_target_identity(persisted_record)
-                await self._require_embedding_target_current(
-                    target_kind=target[0],
-                    target_id=target[1],
-                    account_id=account_id,
-                )
+                if target not in target_contents:
+                    target_contents[target] = await self._require_embedding_target_current(
+                        target_kind=target[0],
+                        target_id=target[1],
+                        account_id=account_id,
+                    )
                 actual_target_chunks.setdefault(target, []).append(
                     cast(int, persisted_record["chunk_index"])
+                )
+                actual_source_hashes.setdefault(target, []).append(
+                    cast(bytes, persisted_record["source_sha256"])
                 )
             expected = dict(expected_target_chunks or {})
             if set(actual_target_chunks) != set(expected) or any(
@@ -1721,6 +1724,48 @@ class MemoryRepository:
                 for target, chunk_count in expected.items()
             ):
                 raise ValueError("embedding space target coverage is incomplete")
+            if space.chunker_version != "v1" or any(
+                actual_source_hashes[target]
+                != [chunk.source_sha256 for chunk in chunk_text(target_contents[target])]
+                for target in expected
+            ):
+                raise ValueError("embedding space source hashes are stale")
+            sample_target = min(expected, key=lambda item: (item[0], str(item[1])))
+            sample_column = {
+                "memory_version": embedding_records.c.memory_version_id,
+                "summary_version": embedding_records.c.summary_version_id,
+                "message_revision": embedding_records.c.message_revision_id,
+            }[sample_target[0]]
+            sample = (
+                (
+                    await self._session.execute(
+                        select(
+                            embedding_records.c.vector_payload,
+                            embedding_records.c.dimensions,
+                            embedding_records.c.source_sha256,
+                        )
+                        .where(
+                            embedding_records.c.embedding_space_id == space.id,
+                            embedding_records.c.account_id == account_id,
+                            sample_column == sample_target[1],
+                            embedding_records.c.state == EmbeddingRecordState.READY.value,
+                            embedding_records.c.invalidated_at.is_(None),
+                        )
+                        .order_by(embedding_records.c.chunk_index)
+                        .limit(1)
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                sample is None
+                or sample["dimensions"] != space.dimensions
+                or len(sample["source_sha256"]) != 32
+                or len(sample["vector_payload"]) != space.dimensions
+                or not all(math.isfinite(float(value)) for value in sample["vector_payload"])
+            ):
+                raise ValueError("embedding sample retrieval verification failed")
             await self._session.execute(
                 update(embedding_spaces)
                 .where(

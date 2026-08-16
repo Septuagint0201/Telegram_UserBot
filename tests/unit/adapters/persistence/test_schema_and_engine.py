@@ -21,6 +21,7 @@ from telegram_userbot.adapters.persistence.schema import (
     memory_review_actions,
     metadata,
     model_runs,
+    proactive_budget_reservations,
     proactive_decisions,
     summaries,
 )
@@ -326,6 +327,22 @@ def test_context_preview_integrity_migration_supports_derived_sources_and_is_rev
     assert "mo.expires_at > CURRENT_TIMESTAMP" in migration
     assert "uq_context_manifest_omissions_ordinal" in migration
     assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
+def test_delivery_integrity_migration_binds_proactive_target_conservatively() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0016_m5_m7_delivery_integrity.py"
+    ).read_text(encoding="utf-8")
+
+    assert "WHEN outbound_group_id IS NOT NULL THEN 'auto_send'" in migration
+    assert "ELSE 'copilot_draft'" in migration
+    assert "ck_proactive_budget_reservations_target_side_effect" in migration
+    assert "IF NOT EXISTS (SELECT 1 FROM pg_constraint" in migration
+    assert not proactive_budget_reservations.c.target.nullable
 
 
 @pytest.mark.unit

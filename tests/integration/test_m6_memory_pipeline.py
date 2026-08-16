@@ -161,7 +161,12 @@ async def test_m6_stale_summary_source_does_not_advance_watermark(
 ) -> None:
     account_id, conversation_id, _turn_id, revision_id = await seed_scope(db_session)
     repository = MemoryRepository(db_session)
-    source = SummarySource(revision_id, "message_revision", b"h" * 32, 1)
+    source = SummarySource(
+        revision_id,
+        "message_revision",
+        sha256(b"SYNTHETIC_PRIVATE_CONTEXT_BODY").digest(),
+        1,
+    )
     summary_id = uuid4()
     first = SummaryVersion(
         id=uuid4(),

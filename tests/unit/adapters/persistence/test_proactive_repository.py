@@ -691,6 +691,7 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         "decision_id": decision_id,
         "policy_version_id": policy_id,
         "authorization_generation": 1,
+        "target": ProactiveTarget.AUTO_SEND.value,
         "account_bucket_id": uuid4(),
         "contact_bucket_id": uuid4(),
         "bypass_bucket_id": None,
@@ -764,6 +765,29 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
     )
     assert replay is not None
     assert replay.state is ReservationState.HELD
+    session.execute.side_effect = [
+        _Result(),
+        _Result(binding),
+        _Result(row),
+    ]
+    with pytest.raises(ValueError, match="another scope"):
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
+            limits=BudgetLimits(1, 1),
+            now=NOW,
+            expires_at=NOW + timedelta(minutes=5),
+            reservation_key=key,
+            candidate_id=candidate_id,
+            decision_id=decision_id,
+            policy_version_id=policy_id,
+            authorization_generation=1,
+            target=ProactiveTarget.COPILOT_DRAFT,
+        )
     session.execute.side_effect = [
         _Result(),
         _Result(binding),
@@ -882,6 +906,7 @@ async def test_proactive_budget_expired_hold_is_not_replayed_as_authorization() 
         "decision_id": decision_id,
         "policy_version_id": policy_id,
         "authorization_generation": 1,
+        "target": ProactiveTarget.AUTO_SEND.value,
         "account_bucket_id": uuid4(),
         "contact_bucket_id": uuid4(),
         "bypass_bucket_id": None,

@@ -26,6 +26,10 @@ class PreviewSendUnknownError(RuntimeError):
     pass
 
 
+class PreviewSendRejectedError(RuntimeError):
+    """The gateway rejected the request before any Telegram side effect."""
+
+
 class PreviewGateway(Protocol):
     async def send_text(self, *, bot_chat_id: int, text: SensitiveValue[str]) -> int: ...
 
@@ -216,26 +220,74 @@ class DurableContextControlBackend:
         chunks: tuple[SensitiveValue[str], ...],
         now: datetime,
     ) -> PreviewDeliveryResult:
-        if not await self._repository.begin_preview_delivery(request=request):
+        delete_after = now + self._delete_after
+        deliveries = await self._repository.begin_preview_delivery(
+            request=request,
+            chunk_count=len(chunks),
+            now=now,
+            delete_after=delete_after,
+        )
+        if deliveries is None:
             raise RuntimeError("context_preview_delivery_conflict")
-        states: list[tuple[str, int | None]] = []
-        for chunk in chunks:
+        await self._repository.commit_preview_boundary()
+        for delivery, chunk in zip(deliveries, chunks, strict=True):
+            if delivery.state == "sent":
+                continue
+            if delivery.state in {"sending", "send_unknown"}:
+                if delivery.state == "sending":
+                    await self._repository.record_preview_delivery_chunk(
+                        request=request,
+                        ordinal=delivery.ordinal,
+                        state="send_unknown",
+                        message_id=None,
+                        now=now,
+                        delete_after=delete_after,
+                    )
+                    await self._repository.commit_preview_boundary()
+                return await self._finish_preview_delivery(request=request, now=now)
+            if (
+                delivery.state != "pending"
+                or not await self._repository.claim_preview_delivery_chunk(
+                    request=request, ordinal=delivery.ordinal
+                )
+            ):
+                raise RuntimeError("context_preview_delivery_conflict")
+            await self._repository.commit_preview_boundary()
             try:
                 message_id = await self._gateway.send_text(
                     bot_chat_id=request.bot_chat_id, text=chunk
                 )
+            except PreviewSendRejectedError:
+                await self._repository.retry_preview_delivery_chunk(
+                    request=request, ordinal=delivery.ordinal
+                )
+                await self._repository.commit_preview_boundary()
+                raise
             except PreviewSendUnknownError:
-                states.append(("send_unknown", None))
-                break
-            states.append(("sent", message_id))
-        await self._repository.record_preview_delivery(
-            request=request,
-            states=tuple(states),
-            now=now,
-            delete_after=now + self._delete_after,
+                message_id = None
+            except Exception:
+                message_id = None
+            await self._repository.record_preview_delivery_chunk(
+                request=request,
+                ordinal=delivery.ordinal,
+                state="sent" if message_id is not None else "send_unknown",
+                message_id=message_id,
+                now=now,
+                delete_after=delete_after,
+            )
+            await self._repository.commit_preview_boundary()
+            if message_id is None:
+                return await self._finish_preview_delivery(request=request, now=now)
+        return await self._finish_preview_delivery(request=request, now=now)
+
+    async def _finish_preview_delivery(
+        self, *, request: PreviewRequestRecord, now: datetime
+    ) -> PreviewDeliveryResult:
+        state, delivered, total = await self._repository.finish_preview_delivery(
+            request=request, now=now
         )
-        state = "send_unknown" if any(item[0] == "send_unknown" for item in states) else "delivered"
-        return PreviewDeliveryResult(state, sum(item[0] == "sent" for item in states), len(chunks))
+        await self._repository.commit_preview_boundary()
+        return PreviewDeliveryResult(state, delivered, total)
 
     async def delete_due(self, *, now: datetime) -> int:
         deleted = 0
