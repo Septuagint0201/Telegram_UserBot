@@ -62,6 +62,7 @@ from telegram_userbot.domain.memory.summary import SummaryCoverageError, Summary
 from telegram_userbot.domain.memory.trigger import EventRange
 from telegram_userbot.domain.memory.validation import ValidatedProposal
 from telegram_userbot.domain.shared.hashing import stable_json_bytes
+from telegram_userbot.domain.shared.time import require_aware
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +277,7 @@ class MemoryRepository:
         policy_version: str = "policy-v1",
         prompt_version: str = "prompt-v1",
     ) -> UUID:
+        current_time = require_aware(now, "now")
         if estimated_input_tokens < 0 or job_kind not in {
             "episode",
             "rolling_summary",
@@ -314,9 +316,9 @@ class MemoryRepository:
                     eligible_revision_count=memory_jobs.c.eligible_revision_count + 1,
                     estimated_input_tokens=memory_jobs.c.estimated_input_tokens
                     + estimated_input_tokens,
-                    quiet_until=now + timedelta(seconds=45),
+                    quiet_until=current_time + timedelta(seconds=45),
                     job_version=memory_jobs.c.job_version + 1,
-                    updated_at=now,
+                    updated_at=current_time,
                 )
             )
             return cast(UUID, row["id"])
@@ -356,15 +358,15 @@ class MemoryRepository:
                 eligible_revision_count=1,
                 estimated_input_tokens=estimated_input_tokens,
                 idempotency_key=idempotency_key,
-                quiet_until=now + timedelta(seconds=45),
-                hard_due_at=now + timedelta(minutes=10),
+                quiet_until=current_time + timedelta(seconds=45),
+                hard_due_at=current_time + timedelta(minutes=10),
                 pipeline_version=pipeline_version,
                 policy_version=policy_version,
                 prompt_version=prompt_version,
                 input_schema_version=1,
                 output_schema_version=1,
-                created_at=now,
-                updated_at=now,
+                created_at=current_time,
+                updated_at=current_time,
             )
         )
         return job_id
@@ -381,6 +383,7 @@ class MemoryRepository:
         max_attempts: int = 5,
         retry_delay: timedelta = timedelta(seconds=5),
     ) -> MemoryJobLease | None:
+        current_time = require_aware(now, "now")
         if (
             lease_duration <= timedelta(0)
             or revision_threshold <= 0
@@ -394,7 +397,7 @@ class MemoryRepository:
             .where(
                 memory_jobs.c.conversation_id == conversation_id,
                 memory_jobs.c.state == "running",
-                memory_jobs.c.lease_expires_at <= now,
+                memory_jobs.c.lease_expires_at <= current_time,
             )
             .values(
                 state=case(
@@ -405,10 +408,10 @@ class MemoryRepository:
                 lease_expires_at=None,
                 quiet_until=case(
                     (memory_jobs.c.attempt_count >= max_attempts, memory_jobs.c.quiet_until),
-                    else_=now + retry_delay,
+                    else_=current_time + retry_delay,
                 ),
                 job_version=memory_jobs.c.job_version + 1,
-                updated_at=now,
+                updated_at=current_time,
             )
         )
         await self._session.execute(
@@ -418,15 +421,17 @@ class MemoryRepository:
                 memory_jobs.c.state.in_(("pending", "retry_wait")),
                 memory_jobs.c.attempt_count >= max_attempts,
             )
-            .values(state="dead_letter", updated_at=now)
+            .values(state="dead_letter", updated_at=current_time)
         )
         pending_due = (memory_jobs.c.state == "pending") & (
-            (memory_jobs.c.quiet_until <= now)
-            | (memory_jobs.c.hard_due_at <= now)
+            (memory_jobs.c.quiet_until <= current_time)
+            | (memory_jobs.c.hard_due_at <= current_time)
             | (memory_jobs.c.eligible_revision_count >= revision_threshold)
             | (memory_jobs.c.estimated_input_tokens >= token_threshold)
         )
-        retry_due = (memory_jobs.c.state == "retry_wait") & (memory_jobs.c.quiet_until <= now)
+        retry_due = (memory_jobs.c.state == "retry_wait") & (
+            memory_jobs.c.quiet_until <= current_time
+        )
         row = (
             (
                 await self._session.execute(
@@ -458,10 +463,10 @@ class MemoryRepository:
                     .values(
                         state="running",
                         lease_owner=owner,
-                        lease_expires_at=now + lease_duration,
+                        lease_expires_at=current_time + lease_duration,
                         attempt_count=memory_jobs.c.attempt_count + 1,
                         job_version=memory_jobs.c.job_version + 1,
-                        updated_at=now,
+                        updated_at=current_time,
                     )
                     .returning(
                         memory_jobs.c.id,
@@ -503,6 +508,7 @@ class MemoryRepository:
         max_attempts: int = 5,
         retry_delay: timedelta = timedelta(seconds=5),
     ) -> bool:
+        current_time = require_aware(now, "now")
         if max_attempts <= 0 or retry_delay <= timedelta(0):
             raise ValueError("memory retry policy is invalid")
         statement = update(memory_jobs).where(
@@ -510,7 +516,7 @@ class MemoryRepository:
             memory_jobs.c.state == "running",
             memory_jobs.c.lease_owner == owner,
             memory_jobs.c.job_version == fencing_token,
-            memory_jobs.c.lease_expires_at > now,
+            memory_jobs.c.lease_expires_at > current_time,
         )
         if succeeded:
             statement = statement.where(memory_jobs.c.input_manifest_id.is_not(None))
@@ -527,15 +533,15 @@ class MemoryRepository:
                     state=state,
                     lease_owner=None,
                     lease_expires_at=None,
-                    completed_at=now if succeeded else None,
+                    completed_at=current_time if succeeded else None,
                     quiet_until=case(
                         (memory_jobs.c.attempt_count >= max_attempts, memory_jobs.c.quiet_until),
-                        else_=now + retry_delay,
+                        else_=current_time + retry_delay,
                     )
                     if not succeeded
                     else memory_jobs.c.quiet_until,
                     job_version=memory_jobs.c.job_version + 1,
-                    updated_at=now,
+                    updated_at=current_time,
                 )
             ),
         )
@@ -548,6 +554,7 @@ class MemoryRepository:
         lease: MemoryJobLease,
         now: datetime,
     ) -> None:
+        current_time = require_aware(now, "now")
         if (
             manifest.account_id != lease.account_id
             or manifest.conversation_id != lease.conversation_id
@@ -617,10 +624,14 @@ class MemoryRepository:
                     memory_jobs.c.state == "running",
                     memory_jobs.c.lease_owner == lease.lease_owner,
                     memory_jobs.c.job_version == lease.fencing_token,
-                    memory_jobs.c.lease_expires_at > now,
+                    memory_jobs.c.lease_expires_at > current_time,
                     memory_jobs.c.input_manifest_id.is_(None),
                 )
-                .values(input_manifest_id=manifest.id, sealed_at=now, updated_at=now)
+                .values(
+                    input_manifest_id=manifest.id,
+                    sealed_at=current_time,
+                    updated_at=current_time,
+                )
             ),
         )
         if sealed.rowcount != 1:
@@ -779,7 +790,7 @@ class MemoryRepository:
         """
 
         proposal = validated.proposal
-        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         if acceptance_kind not in {"automatic", "manual", "reconciliation", "migration"}:
             raise ValueError("unknown acceptance kind")
         proposal_row = await self._proposal_row(recorded_proposal_id, proposal)
@@ -1144,7 +1155,7 @@ class MemoryRepository:
         output_schema_version: int = 1,
         now: datetime | None = None,
     ) -> SummaryWatermark:
-        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
             {"lock_key": (f"summary:{account_id}:{conversation_id}:{summary.kind.value}")},
@@ -1384,7 +1395,7 @@ class MemoryRepository:
         activate: bool = False,
         now: datetime | None = None,
     ) -> int:
-        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         if any(
             record.space_id != space.id or len(record.vector) != space.dimensions
             for record in records
@@ -1545,7 +1556,7 @@ class MemoryRepository:
         reason: str = "policy",
         now: datetime | None = None,
     ) -> bool:
-        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         row = (
             (
                 await self._session.execute(
@@ -1609,7 +1620,7 @@ class MemoryRepository:
         memory_id = memory_id or source_id
         if memory_id is None:
             raise ValueError("erasure source is required")
-        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         memory_row = (
             (
                 await self._session.execute(
@@ -1726,6 +1737,7 @@ class MemoryRepository:
         expected_proposal_version: int | None = None,
         expected_memory_version: int | None = None,
     ) -> UUID:
+        expires_at = require_aware(expires_at, "expires_at")
         proposal_action = action in {"accept", "reject"}
         forget_action = action == "forget"
         target_matches = (proposal_action and proposal_id is not None and memory_id is None) or (
@@ -1765,6 +1777,7 @@ class MemoryRepository:
     async def consume_review_action(
         self, *, token: bytes, admin_actor_id: int, bot_chat_id: int, now: datetime
     ) -> ReviewAction | None:
+        current_time = require_aware(now, "now")
         row = (
             (
                 await self._session.execute(
@@ -1783,7 +1796,7 @@ class MemoryRepository:
         )
         if row is None:
             return None
-        failure = await self._review_action_failure(row, now=now)
+        failure = await self._review_action_failure(row, now=current_time)
         if failure is not None:
             state, reason = failure
             await self._terminalize_review_action(
@@ -1791,7 +1804,7 @@ class MemoryRepository:
                 expected_state="pending",
                 terminal_state=state,
                 reason_code=reason,
-                now=now,
+                now=current_time,
             )
             return None
         confirmed = await self._session.scalar(
@@ -1799,9 +1812,9 @@ class MemoryRepository:
             .where(
                 memory_review_actions.c.id == row["id"],
                 memory_review_actions.c.state == "pending",
-                memory_review_actions.c.expires_at > now,
+                memory_review_actions.c.expires_at > current_time,
             )
-            .values(state="confirmed", used_at=now)
+            .values(state="confirmed", used_at=current_time)
             .returning(memory_review_actions.c.id)
         )
         if confirmed != row["id"]:
@@ -1821,6 +1834,7 @@ class MemoryRepository:
     async def lock_confirmed_review_action(
         self, *, account_id: UUID, now: datetime
     ) -> ReviewAction | None:
+        current_time = require_aware(now, "now")
         row = (
             (
                 await self._session.execute(
@@ -1839,7 +1853,7 @@ class MemoryRepository:
         )
         if row is None:
             return None
-        failure = await self._review_action_failure(row, now=now)
+        failure = await self._review_action_failure(row, now=current_time)
         if failure is not None:
             state, reason = failure
             await self._terminalize_review_action(
@@ -1847,7 +1861,7 @@ class MemoryRepository:
                 expected_state="confirmed",
                 terminal_state=state,
                 reason_code=reason,
-                now=now,
+                now=current_time,
             )
             return None
         return ReviewAction(
@@ -1870,6 +1884,7 @@ class MemoryRepository:
         now: datetime,
         reason_code: str | None = None,
     ) -> bool:
+        current_time = require_aware(now, "now")
         result = cast(
             CursorResult[Any],
             await self._session.execute(
@@ -1880,7 +1895,7 @@ class MemoryRepository:
                 )
                 .values(
                     state="applied" if applied else "rejected",
-                    decided_at=now,
+                    decided_at=current_time,
                     reason_code=reason_code,
                 )
             ),
@@ -1890,7 +1905,8 @@ class MemoryRepository:
     async def _review_action_failure(  # noqa: PLR0911 - each stale reason is explicit
         self, row: RowMapping, *, now: datetime
     ) -> tuple[str, str] | None:
-        if cast(datetime, row["expires_at"]) <= now:
+        current_time = require_aware(now, "now")
+        if require_aware(cast(datetime, row["expires_at"]), "expires_at") <= current_time:
             return "expired", "review_action_expired"
         account_id = cast(UUID, row["account_id"])
         conversation_id = cast(UUID, row["conversation_id"])
@@ -1929,7 +1945,10 @@ class MemoryRepository:
             if proposal is None:
                 return "rejected", "review_target_scope_changed"
             proposal_expires_at = cast(datetime | None, proposal["expires_at"])
-            if proposal_expires_at is not None and proposal_expires_at <= now:
+            if (
+                proposal_expires_at is not None
+                and require_aware(proposal_expires_at, "proposal_expires_at") <= current_time
+            ):
                 return "expired", "memory_proposal_expired"
             if (
                 proposal["state"] != "candidate"
@@ -2029,6 +2048,7 @@ class MemoryRepository:
         reason_code: str,
         now: datetime,
     ) -> None:
+        current_time = require_aware(now, "now")
         await self._session.execute(
             update(memory_review_actions)
             .where(
@@ -2037,8 +2057,8 @@ class MemoryRepository:
             )
             .values(
                 state=terminal_state,
-                used_at=now,
-                decided_at=now,
+                used_at=current_time,
+                decided_at=current_time,
                 reason_code=reason_code,
             )
         )

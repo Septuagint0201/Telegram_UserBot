@@ -129,6 +129,45 @@ def _payload(
     }
 
 
+def test_memory_proposal_normalizes_valid_interval_and_rejects_naive_datetime() -> None:
+    source_id = uuid4()
+    source = InputSource(
+        source_id=source_id,
+        revision="revision-1",
+        content="synthetic",
+        content_sha256=sha256(b"synthetic").digest(),
+    )
+    proposal = MemoryProposal(
+        id=uuid4(),
+        account_id=ACCOUNT,
+        conversation_id=CONVERSATION,
+        operation=MemoryOperation.CREATE,
+        memory_type=MemoryType.FACT,
+        semantic_key="synthetic fact",
+        payload={"value": "synthetic"},
+        confidence=0.9,
+        importance=0.5,
+        evidence=(Evidence(source_id, "revision-1", source.content_sha256),),
+        valid_from=datetime(2030, 1, 1, 8, tzinfo=UTC),
+        valid_to=datetime(2030, 2, 1, 8, tzinfo=UTC),
+    )
+    assert proposal.valid_from == datetime(2030, 1, 1, 8, tzinfo=UTC)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        MemoryProposal(
+            id=uuid4(),
+            account_id=ACCOUNT,
+            conversation_id=CONVERSATION,
+            operation=MemoryOperation.CREATE,
+            memory_type=MemoryType.FACT,
+            semantic_key="synthetic fact",
+            payload={"value": "synthetic"},
+            confidence=0.9,
+            importance=0.5,
+            evidence=(Evidence(source_id, "revision-1", source.content_sha256),),
+            valid_from=datetime(2030, 1, 1),  # noqa: DTZ001 - deliberately naive input
+        )
+
+
 def test_trigger_conditions_are_independent_or_and_compensation_is_visible() -> None:
     decision = evaluate_triggers(
         TriggerInput(

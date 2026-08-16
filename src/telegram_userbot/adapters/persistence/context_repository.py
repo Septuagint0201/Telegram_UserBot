@@ -17,9 +17,13 @@ from telegram_userbot.adapters.persistence.schema import (
     context_manifest_items,
     context_manifest_omissions,
     context_manifests,
+    context_policies,
+    context_policy_versions,
     context_preview_deliveries,
     context_preview_requests,
     context_preview_tokens,
+    retrieval_policies,
+    retrieval_policy_versions,
 )
 from telegram_userbot.domain.context import ContextManifest
 from telegram_userbot.domain.shared.redaction import SensitiveValue
@@ -96,6 +100,27 @@ class ContextRepository:
             raise ValueError("context_prompt_snapshot_mismatch")
         if bytes.fromhex(manifest.capability_snapshot_sha256) != capability_snapshot_sha256:
             raise ValueError("context_capability_snapshot_mismatch")
+        context_binding = await self._session.scalar(
+            select(context_policy_versions.c.id)
+            .join(context_policies, context_policies.c.id == context_policy_versions.c.policy_id)
+            .where(
+                context_policy_versions.c.id == context_policy_version_id,
+                context_policies.c.logical_role == manifest.logical_role,
+                context_policies.c.purpose == manifest.purpose,
+            )
+        )
+        if context_binding != context_policy_version_id:
+            raise ValueError("context_policy_version_binding_mismatch")
+        retrieval_binding = await self._session.scalar(
+            select(retrieval_policy_versions.c.id)
+            .join(
+                retrieval_policies,
+                retrieval_policies.c.id == retrieval_policy_versions.c.policy_id,
+            )
+            .where(retrieval_policy_versions.c.id == retrieval_policy_version_id)
+        )
+        if retrieval_binding != retrieval_policy_version_id:
+            raise ValueError("retrieval_policy_version_binding_mismatch")
         owner_kind = "turn" if turn_id is not None else "background_job"
         await self._session.execute(
             insert(context_manifests).values(

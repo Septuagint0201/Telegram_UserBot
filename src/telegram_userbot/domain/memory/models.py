@@ -18,6 +18,7 @@ from typing import Any, Self
 from uuid import UUID, uuid4
 
 from telegram_userbot.domain.shared.hashing import JsonValue, stable_json_bytes
+from telegram_userbot.domain.shared.time import require_aware
 
 
 class MemoryType(StrEnum):
@@ -281,12 +282,14 @@ class MemoryProposal:
             raise ValueError("semantic key cannot be empty")
         if not 0 <= self.confidence <= 1 or not 0 <= self.importance <= 1:
             raise ValueError("confidence and importance must be between zero and one")
-        if (
-            self.valid_from is not None
-            and self.valid_to is not None
-            and self.valid_to < self.valid_from
-        ):
+        valid_from = (
+            require_aware(self.valid_from, "valid_from") if self.valid_from is not None else None
+        )
+        valid_to = require_aware(self.valid_to, "valid_to") if self.valid_to is not None else None
+        if valid_from is not None and valid_to is not None and valid_to < valid_from:
             raise ValueError("valid_to cannot precede valid_from")
+        object.__setattr__(self, "valid_from", valid_from)
+        object.__setattr__(self, "valid_to", valid_to)
         object.__setattr__(self, "payload", _json_object(self.payload))
 
     @property

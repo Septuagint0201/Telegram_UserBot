@@ -270,6 +270,32 @@ async def test_m5_manifest_persists_content_free_and_preview_is_one_time(
             manifest=built.manifest,
             created_at=NOW,
         )
+    with pytest.raises(ValueError, match="context_policy_version_binding_mismatch"):
+        await repository.save_manifest(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            background_job_id=None,
+            context_policy_version_id=retrieval_version_id,
+            retrieval_policy_version_id=retrieval_version_id,
+            prompt_bundle_sha256=b"p" * 32,
+            capability_snapshot_sha256=b"c" * 32,
+            manifest=built.manifest,
+            created_at=NOW,
+        )
+    with pytest.raises(ValueError, match="retrieval_policy_version_binding_mismatch"):
+        await repository.save_manifest(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            background_job_id=None,
+            context_policy_version_id=context_version_id,
+            retrieval_policy_version_id=context_version_id,
+            prompt_bundle_sha256=b"p" * 32,
+            capability_snapshot_sha256=b"c" * 32,
+            manifest=built.manifest,
+            created_at=NOW,
+        )
     await repository.save_manifest(
         account_id=account_id,
         conversation_id=conversation_id,
