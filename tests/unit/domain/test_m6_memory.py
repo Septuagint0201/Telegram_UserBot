@@ -285,12 +285,25 @@ def test_embedding_shadow_activation_isolated_and_dimension_checked() -> None:
     manager = EmbeddingSpaceManager()
     profile = uuid4()
     shadow = manager.create_shadow(profile_id=profile, model_name="fake", dimensions=8)
+    target_id = uuid4()
     result = manager.build(
         shadow,
         profile_id=profile,
-        targets=((uuid4(), "memory_version", "stable fact"),),
+        targets=((target_id, "memory_version", "stable fact"),),
         provider=FakeEmbeddingProvider(),
     )
+    replay = manager.build(
+        shadow,
+        profile_id=profile,
+        targets=((target_id, "memory_version", "stable fact"),),
+    )
+    assert replay.records == result.records
+    with pytest.raises(ValueError, match="content changed"):
+        manager.build(
+            shadow,
+            profile_id=profile,
+            targets=((target_id, "memory_version", "changed fact"),),
+        )
     active = manager.activate(result, profile_id=profile)
     assert active.state.value == "active"
     assert all(len(record.vector) == 8 for record in result.records)
@@ -298,12 +311,19 @@ def test_embedding_shadow_activation_isolated_and_dimension_checked() -> None:
     with pytest.raises(ValueError, match="selected profile"):
         manager.activate(result, profile_id=uuid4())
     empty = manager.create_shadow(profile_id=profile, model_name="fake-empty", dimensions=8)
+    empty_target_id = uuid4()
     uncovered = manager.build(
         empty,
         profile_id=profile,
-        targets=((uuid4(), "memory_version", ""),),
+        targets=((empty_target_id, "memory_version", ""),),
     )
     assert not uncovered.verified
+    with pytest.raises(ValueError, match="content changed"):
+        manager.build(
+            empty,
+            profile_id=profile,
+            targets=((empty_target_id, "memory_version", "now populated"),),
+        )
     with pytest.raises(ValueError, match="verification failed"):
         manager.activate(uncovered, profile_id=profile)
 
@@ -704,6 +724,8 @@ def test_trigger_generation_guards_and_fencing_fail_closed() -> None:
     with pytest.raises(KeyError):
         queue.claim(99, "worker", fencing_token=1)
     claimed = queue.claim(1, "worker", fencing_token=1)
+    with pytest.raises(ValueError, match="manifest identity"):
+        queue.seal(1, "worker", 1, " ")
     with pytest.raises(ValueError, match="already claimed"):
         queue.claim(1, "worker", fencing_token=2)
     with pytest.raises(ValueError, match="stale"):
@@ -746,6 +768,9 @@ def test_summary_version_watermark_and_period_guards() -> None:
     first = version(1, 1, 1)
     first_watermark = store.publish(first, conversation_id=conversation_id)
     assert first_watermark.conversation_id == conversation_id
+    assert store.publish(first, conversation_id=conversation_id) == first_watermark
+    with pytest.raises(SummaryCoverageError, match="replay"):
+        store.publish(replace(first, content_text="tampered"), conversation_id=conversation_id)
     with pytest.raises(SummaryCoverageError, match="kind"):
         store.publish(
             replace(version(2, 2, 2), kind=SummaryKind.DAILY),
@@ -1079,6 +1104,40 @@ def test_memory_store_rejects_cross_scope_merge_targets() -> None:
         target_memory_ids=(first_result.memory_id, second_result.memory_id),
     )
     with pytest.raises(MemoryConflictError, match="scope"):
+        store.accept(ValidatedProposal(merge, ProposalState.ACCEPTED))
+
+
+def test_memory_store_rejects_merge_target_identity_drift() -> None:
+    manifest, source_id = _manifest()
+    first = validate_proposal(
+        parse_agent_response(_payload(source_id), account_id=ACCOUNT, conversation_id=CONVERSATION)[
+            0
+        ],
+        manifest,
+    )
+    second_payload = _payload(source_id, semantic_key="another preference")
+    second_item = cast(list[dict[str, object]], second_payload["proposals"])[0]
+    second_item["id"] = str(uuid4())
+    second = validate_proposal(
+        parse_agent_response(
+            second_payload,
+            account_id=ACCOUNT,
+            conversation_id=CONVERSATION,
+        )[0],
+        manifest,
+    )
+    store = MemoryStore()
+    first_result = store.accept(first)
+    second_result = store.accept(second)
+    assert first_result.memory_id is not None
+    assert second_result.memory_id is not None
+    merge = replace(
+        first.proposal,
+        id=uuid4(),
+        operation=MemoryOperation.MERGE,
+        target_memory_ids=(first_result.memory_id, second_result.memory_id),
+    )
+    with pytest.raises(MemoryConflictError, match="identity"):
         store.accept(ValidatedProposal(merge, ProposalState.ACCEPTED))
 
 

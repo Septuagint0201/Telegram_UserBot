@@ -68,6 +68,16 @@ def test_structured_and_semantic_selection_are_stable_exact_and_single_space() -
             (candidate(ContextLayer.SEMANTIC_MEMORY, "memory:5", space=uuid7(), distance=0.1),),
             active_space_id=space,
         )
+    with pytest.raises(ValueError, match="limit must be positive"):
+        select_structured((first,), limit=0)
+    with pytest.raises(ValueError, match="limit must be positive"):
+        select_semantic((near,), active_space_id=space, limit=-1)
+
+
+@pytest.mark.unit
+def test_context_capabilities_reject_nonpositive_auto_image_budget() -> None:
+    with pytest.raises(ValueError, match="context_image_budget_unknown"):
+        ContextCapabilities(5_000, 100, True, auto_image_tokens=0)
 
 
 @pytest.mark.unit

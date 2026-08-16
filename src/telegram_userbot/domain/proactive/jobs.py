@@ -70,6 +70,8 @@ class DurableDueJobStore:
         with self._lock:
             current = self._jobs.get(job_key)
             if current is not None:
+                if current.available_at != available_time or current.expires_at != expiry_time:
+                    raise ValueError("due job key belongs to another schedule")
                 return current
             job = DueJob(
                 uuid4(), account_id, idempotency_key, available_time, expires_at=expiry_time

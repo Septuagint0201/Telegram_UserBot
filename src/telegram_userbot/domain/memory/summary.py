@@ -56,6 +56,15 @@ class SummaryStore:
         bound_conversation_id = self.conversations.get(summary.summary_id)
         if bound_conversation_id is not None and bound_conversation_id != conversation_id:
             raise SummaryCoverageError("summary belongs to another conversation")
+        key = (conversation_id, summary.kind)
+        existing_version = self.versions.get(summary.id)
+        if existing_version is not None:
+            if not _summary_replay_matches(existing_version, summary):
+                raise SummaryCoverageError("summary replay does not match its manifest")
+            watermark = self.watermarks.get(key)
+            if watermark is None:
+                raise SummaryCoverageError("summary replay has no durable watermark")
+            return watermark
         current_id = self.current.get(summary.summary_id)
         if current_id is not None:
             current = self.versions[current_id]
@@ -67,7 +76,6 @@ class SummaryStore:
                 raise SummaryCoverageError("summary versions must be contiguous")
         elif summary.version_no != 1:
             raise SummaryCoverageError("first summary version must be one")
-        key = (conversation_id, summary.kind)
         watermark = self.watermarks.get(
             key,
             SummaryWatermark(conversation_id, summary.kind),
@@ -100,6 +108,23 @@ class SummaryStore:
                 )
                 count += 1
         return count
+
+
+def _summary_replay_matches(existing: SummaryVersion, replay: SummaryVersion) -> bool:
+    """Compare immutable publication fields while ignoring a replay timestamp."""
+
+    return (
+        existing.id == replay.id
+        and existing.summary_id == replay.summary_id
+        and existing.version_no == replay.version_no
+        and existing.kind is replay.kind
+        and existing.range_start_event_id == replay.range_start_event_id
+        and existing.range_end_event_id == replay.range_end_event_id
+        and existing.content_text == replay.content_text
+        and existing.sources == replay.sources
+        and existing.manifest_sha256 == replay.manifest_sha256
+        and existing.status is replay.status
+    )
 
 
 def rolling_summary_due(*, eligible_revision_count: int, estimated_tokens: int) -> bool:

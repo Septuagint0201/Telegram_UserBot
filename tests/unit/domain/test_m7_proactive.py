@@ -379,6 +379,24 @@ def test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged() -> None:
         )
         == held
     )
+    with pytest.raises(ValueError, match="another scope"):
+        ledger.reserve(
+            account_id=account_id,
+            contact_id=uuid4(),
+            local_date=NOW.date(),
+            limits=limits,
+            expires_at=NOW + timedelta(minutes=1),
+            reservation_key=key,
+        )
+    with pytest.raises(ValueError, match="another scope"):
+        ledger.reserve(
+            account_id=account_id,
+            contact_id=contact_id,
+            local_date=NOW.date(),
+            limits=limits,
+            expires_at=NOW + timedelta(minutes=2),
+            reservation_key=key,
+        )
     assert (
         ledger.commit(key, account_id=account_id, unknown=True).state
         is ReservationState.SEND_UNKNOWN
@@ -482,6 +500,12 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     account_id, key = uuid4(), sha256(b"job").digest()
     first = store.enqueue(account_id=account_id, idempotency_key=key, available_at=NOW)
     assert store.enqueue(account_id=account_id, idempotency_key=key, available_at=NOW) == first
+    with pytest.raises(ValueError, match="another schedule"):
+        store.enqueue(
+            account_id=account_id,
+            idempotency_key=key,
+            available_at=NOW + timedelta(seconds=1),
+        )
     owner = uuid4()
     lease = store.claim(now=NOW, owner=owner, lease=timedelta(seconds=1))
     assert lease is not None
@@ -646,6 +670,23 @@ def test_m7_quiet_gate_uses_only_agent_selected_occurrences() -> None:
         == "QUIET_HOURS"
     )
 
+    invalid_selection = replace(
+        decision,
+        selected_occurrence_ids=(second.id, uuid4()),
+    )
+    assert (
+        preliminary_gate(
+            AuthorizationInput(
+                updated,
+                invalid_selection,
+                datetime(2026, 8, 16, 23, tzinfo=UTC),
+                policy(),
+                EffectiveMode.AUTO,
+            )
+        ).reason
+        == "SELECTED_OCCURRENCE_INVALID"
+    )
+
     bypass = replace(first, evidence=(evidence("intention"),))
     non_explicit = replace(
         first,
@@ -762,6 +803,10 @@ def test_m7_final_gate_maps_modes_and_rechecks_all_snapshots() -> None:
     assert preliminary_gate(authorization).allowed
     final = FinalGateInput(authorization, 1, 1, EffectiveMode.AUTO, 1, 1, 0, 0, 0, 0, NOW)
     assert final_gate(final).reason == "AUTHORIZED_FINAL"
+    assert (
+        final_gate(replace(final, snapshot_mode=2, current_mode_version=2)).reason
+        == "MODE_VERSION_SNAPSHOT_INVALID"
+    )
     assert final_gate(replace(final, current_now=candidate.window_end_at)).reason == "WINDOW_CLOSED"
     with pytest.raises(ValueError, match="current_now must be timezone-aware"):
         final_gate(replace(final, current_now=NOW.replace(tzinfo=None)))
@@ -847,6 +892,13 @@ def test_m7_context_is_text_only_and_candidate_local() -> None:
         build_text_only_context(
             candidate,
             AgentDecision(candidate.id, ProactiveAction.NONE, "not_natural_now", (), None, 0),
+            now=NOW,
+            relationship=RelationshipLevel.UNKNOWN,
+        )
+    with pytest.raises(ValueError, match="not bound"):
+        build_text_only_context(
+            candidate,
+            replace(decision, selected_occurrence_ids=(uuid4(),)),
             now=NOW,
             relationship=RelationshipLevel.UNKNOWN,
         )

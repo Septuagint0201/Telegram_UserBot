@@ -181,6 +181,8 @@ class GenerationQueue:
     def seal(
         self, generation: int, owner: str, fencing_token: int, manifest_id: str
     ) -> MemoryGeneration:
+        if not isinstance(manifest_id, str) or not manifest_id.strip():
+            raise ValueError("input manifest identity is required")
         for index, item in enumerate(self.generations):
             if item.generation == generation:
                 if (

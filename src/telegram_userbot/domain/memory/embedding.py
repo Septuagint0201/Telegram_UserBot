@@ -79,6 +79,7 @@ class ShadowBuildResult:
 class EmbeddingSpaceManager:
     spaces: dict[UUID, EmbeddingSpace] = field(default_factory=dict)
     records: dict[tuple[UUID, str, UUID, int], EmbeddingRecord] = field(default_factory=dict)
+    source_hashes: dict[tuple[UUID, str, UUID], tuple[bytes, ...]] = field(default_factory=dict)
     active_by_profile: dict[UUID, UUID] = field(default_factory=dict)
     profile_by_space: dict[UUID, UUID] = field(default_factory=dict)
 
@@ -113,7 +114,7 @@ class EmbeddingSpaceManager:
         self.profile_by_space[space.id] = profile_id
         return space
 
-    def build(
+    def build(  # noqa: PLR0912 - immutable replay validation is intentionally explicit
         self,
         space: EmbeddingSpace,
         *,
@@ -131,29 +132,53 @@ class EmbeddingSpaceManager:
         provider = provider or FakeEmbeddingProvider()
         records: list[EmbeddingRecord] = []
         covered_targets: set[tuple[UUID, str]] = set()
+        target_manifests: list[tuple[tuple[UUID, str, UUID], tuple[bytes, ...]]] = []
         for target_id, target_kind, content in targets:
             if target_kind not in {"memory_version", "summary_version", "message_revision"}:
                 raise ValueError("candidate, redacted, and raw media targets are not embeddable")
             chunks = chunk_text(content)
+            target_key = (space.id, target_kind, target_id)
+            source_hashes = tuple(chunk.source_sha256 for chunk in chunks)
+            known_hashes = self.source_hashes.get(target_key)
+            if known_hashes is not None and known_hashes != source_hashes:
+                raise ValueError("embedding target content changed for immutable target")
+            existing = sorted(
+                (
+                    record
+                    for record in self.records.values()
+                    if record.space_id == space.id
+                    and record.target_kind == target_kind
+                    and record.target_id == target_id
+                ),
+                key=lambda record: record.chunk_index,
+            )
+            if existing and tuple(record.source_sha256 for record in existing) != source_hashes:
+                raise ValueError("embedding target content changed for immutable target")
+            target_manifests.append((target_key, source_hashes))
             if chunks:
                 covered_targets.add((target_id, target_kind))
-            for chunk in chunks:
-                vector = provider.embed(chunk.text, dimensions=space.dimensions)
-                records.append(
-                    EmbeddingRecord(
-                        id=uuid4(),
-                        space_id=space.id,
-                        target_id=target_id,
-                        target_kind=target_kind,
-                        chunk_index=chunk.index,
-                        source_sha256=chunk.source_sha256,
-                        vector=vector,
+            if existing:
+                records.extend(existing)
+            else:
+                for chunk in chunks:
+                    vector = provider.embed(chunk.text, dimensions=space.dimensions)
+                    records.append(
+                        EmbeddingRecord(
+                            id=uuid4(),
+                            space_id=space.id,
+                            target_id=target_id,
+                            target_kind=target_kind,
+                            chunk_index=chunk.index,
+                            source_sha256=chunk.source_sha256,
+                            vector=vector,
+                        )
                     )
-                )
         for record in records:
             self.records[
                 (record.space_id, record.target_kind, record.target_id, record.chunk_index)
             ] = record
+        for target_key, source_hashes in target_manifests:
+            self.source_hashes[target_key] = source_hashes
         dimension_ok = all(len(record.vector) == space.dimensions for record in records)
         source_hashes_ok = all(len(record.source_sha256) == 32 for record in records)
         target_coverage_ok = len(covered_targets) == len(targets)
@@ -178,6 +203,10 @@ class EmbeddingSpaceManager:
         if result.space.state is not EmbeddingState.BUILDING or any(
             record.space_id != result.space.id
             or len(record.vector) != result.space.dimensions
+            or self.source_hashes.get((record.space_id, record.target_kind, record.target_id), ())[
+                record.chunk_index : record.chunk_index + 1
+            ]
+            != (record.source_sha256,)
             or self.records.get(
                 (record.space_id, record.target_kind, record.target_id, record.chunk_index)
             )

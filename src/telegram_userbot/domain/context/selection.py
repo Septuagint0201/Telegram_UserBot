@@ -75,6 +75,8 @@ class Candidate:
 def select_structured(
     candidates: tuple[Candidate, ...], *, limit: int = 12
 ) -> tuple[Candidate, ...]:
+    if limit <= 0:
+        raise ValueError("context selection limit must be positive")
     eligible = [item for item in candidates if item.layer is ContextLayer.STRUCTURED_MEMORY]
     covered: set[str] = set()
     selected: list[Candidate] = []
@@ -108,6 +110,8 @@ def select_structured(
 def select_semantic(
     candidates: tuple[Candidate, ...], *, active_space_id: UUID, limit: int = 8
 ) -> tuple[Candidate, ...]:
+    if limit <= 0:
+        raise ValueError("context selection limit must be positive")
     semantic = [item for item in candidates if item.layer is ContextLayer.SEMANTIC_MEMORY]
     if any(item.embedding_space_id != active_space_id for item in semantic):
         raise ValueError("context_embedding_space_mismatch")

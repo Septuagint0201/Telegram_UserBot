@@ -59,6 +59,13 @@ class BudgetLedger:
             reservation_identity = (account_id, reservation_key)
             existing = self._reservations.get(reservation_identity)
             if existing is not None:
+                if (
+                    existing.contact_id != contact_id
+                    or existing.local_date != local_date
+                    or existing.bypass != bypass
+                    or existing.expires_at != expiry
+                ):
+                    raise ValueError("budget reservation key belongs to another scope")
                 return (
                     existing
                     if existing.state

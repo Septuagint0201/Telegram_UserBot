@@ -108,7 +108,11 @@ class MemoryStore:
                 raise MemoryConflictError("target version changed before acceptance")
             if target.status is not MemoryStatus.ACTIVE:
                 raise MemoryConflictError("target memory is not active")
-            if proposal.operation in {MemoryOperation.UPDATE, MemoryOperation.INVALIDATE} and (
+            if proposal.operation in {
+                MemoryOperation.UPDATE,
+                MemoryOperation.INVALIDATE,
+                MemoryOperation.MERGE,
+            } and (
                 target.memory_type is not proposal.memory_type
                 or target.semantic_key_hash != proposal.semantic_key_hash
             ):

@@ -107,12 +107,14 @@ def preliminary_gate(value: AuthorizationInput) -> GateResult:  # noqa: PLR0911,
         return GateResult(False, "CONFLICTING_WORK")
     if not value.minimum_interval_ok:
         return GateResult(False, "MINIMUM_INTERVAL")
+    selected_ids = set(decision.selected_occurrence_ids)
+    candidate_occurrence_ids = {occurrence.id for occurrence in candidate.occurrences}
+    if not selected_ids or not selected_ids.issubset(candidate_occurrence_ids):
+        return GateResult(False, "SELECTED_OCCURRENCE_INVALID")
     selected_occurrences = tuple(
-        occurrence
-        for occurrence in candidate.occurrences
-        if occurrence.id in set(decision.selected_occurrence_ids)
+        occurrence for occurrence in candidate.occurrences if occurrence.id in selected_ids
     )
-    if not selected_occurrences:
+    if len(selected_occurrences) != len(selected_ids):
         return GateResult(False, "SELECTED_OCCURRENCE_INVALID")
     quiet_results = tuple(
         quiet_decision(
@@ -135,7 +137,7 @@ def preliminary_gate(value: AuthorizationInput) -> GateResult:  # noqa: PLR0911,
     return GateResult(True, "AUTHORIZED", map_mode(value.mode).value)
 
 
-def final_gate(value: FinalGateInput) -> GateResult:  # noqa: PLR0911 - every snapshot is an independent gate
+def final_gate(value: FinalGateInput) -> GateResult:  # noqa: PLR0911, PLR0912 - every snapshot is an independent gate
     """Re-run all preliminary checks and then compare every version snapshot."""
 
     preliminary = preliminary_gate(
@@ -152,6 +154,8 @@ def final_gate(value: FinalGateInput) -> GateResult:  # noqa: PLR0911 - every sn
         return GateResult(False, "EFFECTIVE_MODE_STALE")
     if value.snapshot_mode != value.current_mode_version:
         return GateResult(False, "MODE_VERSION_STALE")
+    if value.snapshot_mode != value.authorization.candidate.mode_version:
+        return GateResult(False, "MODE_VERSION_SNAPSHOT_INVALID")
     if value.snapshot_content_revision != value.authorization.candidate.content_revision:
         return GateResult(False, "CONTENT_REVISION_SNAPSHOT_INVALID")
     if value.snapshot_content_revision != value.current_content_revision:
@@ -183,10 +187,17 @@ def build_text_only_context(
     if decision.candidate_id != candidate.id or decision.topic is None:
         raise ValueError("decision does not bind candidate topic")
     selected = set(decision.selected_occurrence_ids)
+    candidate_occurrence_ids = {occurrence.id for occurrence in candidate.occurrences}
+    if not selected or not selected.issubset(candidate_occurrence_ids):
+        raise ValueError("selected occurrence IDs are not bound to candidate")
+    selected_occurrences = tuple(
+        occurrence for occurrence in candidate.occurrences if occurrence.id in selected
+    )
+    if len(selected_occurrences) != len(selected):
+        raise ValueError("selected occurrence IDs are not bound to candidate")
     reasons = tuple(
         (occurrence.reason.value, evidence.summary)
-        for occurrence in candidate.occurrences
-        if occurrence.id in selected
+        for occurrence in selected_occurrences
         for evidence in occurrence.evidence
     )
     if not reasons:

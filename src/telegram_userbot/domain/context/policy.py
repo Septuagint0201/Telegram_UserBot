@@ -69,6 +69,8 @@ class ContextCapabilities:
             raise ContextAdmissionError("context_capability_unknown")
         if self.max_images_per_request <= 0:
             raise ContextAdmissionError("context_image_budget_unknown")
+        if self.auto_image_tokens is not None and self.auto_image_tokens <= 0:
+            raise ContextAdmissionError("context_image_budget_unknown")
 
 
 @dataclass(frozen=True, slots=True)
