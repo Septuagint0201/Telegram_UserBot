@@ -4,6 +4,8 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
+from unittest.mock import AsyncMock
 from uuid import uuid7
 
 import pytest
@@ -11,12 +13,17 @@ from PIL import Image
 
 from telegram_userbot.adapters.media import (
     CleanupCandidate,
+    DurableMediaCleanup,
     ImageIngestionError,
     ImageIngestor,
     ImageLimits,
     PrivateMediaStore,
     StoredMedia,
     ValidatedImage,
+)
+from telegram_userbot.adapters.persistence.media_repository import (
+    MediaDeletionLease,
+    MediaRepository,
 )
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 
@@ -177,6 +184,70 @@ def test_private_store_is_atomic_hash_verified_and_provider_copy_clears_exif(
     directory.mkdir()
     with pytest.raises(ValueError, match="object_invalid"):
         store.resolve_key("not-a-file")
+
+
+@pytest.mark.unit
+def test_private_store_delete_is_hash_verified_and_missing_is_idempotent(tmp_path: Path) -> None:
+    payload = image_bytes()
+    image = ImageIngestor().validate_bytes(payload, declared_mime="image/png")
+    store = PrivateMediaStore(tmp_path / "verified-delete")
+    stored = store.store_original(account_id=uuid7(), object_id=uuid7(), image=image)
+
+    with pytest.raises(ValueError, match="hash_mismatch"):
+        store.delete_verified(storage_key=stored.storage_key, expected_sha256=b"x" * 32)
+    assert store.resolve_key(stored.storage_key).exists()
+    assert store.delete_verified(
+        storage_key=stored.storage_key,
+        expected_sha256=stored.sha256,
+    )
+    assert not store.delete_verified(
+        storage_key=stored.storage_key,
+        expected_sha256=stored.sha256,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_durable_media_cleanup_records_success_and_hash_failure(tmp_path: Path) -> None:
+    payload = image_bytes()
+    image = ImageIngestor().validate_bytes(payload, declared_mime="image/png")
+    store = PrivateMediaStore(tmp_path / "durable-cleanup")
+    stored = store.store_original(account_id=uuid7(), object_id=uuid7(), image=image)
+    account_id, object_id = uuid7(), uuid7()
+    repository = AsyncMock(spec=MediaRepository)
+    repository.claim_expired.return_value = (
+        MediaDeletionLease(
+            object_id,
+            account_id,
+            stored.storage_key,
+            stored.sha256,
+            1,
+            1,
+        ),
+    )
+    repository.finish_deletion.return_value = True
+
+    report = await DurableMediaCleanup(
+        repository=cast(MediaRepository, repository),
+        store=store,
+    ).run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
+    assert (report.deleted, report.already_missing, report.failed) == (1, 0, 0)
+    repository.finish_deletion.assert_awaited_once()
+    assert repository.finish_deletion.await_args.kwargs["deleted"] is True
+
+    damaged = store.store_original(account_id=uuid7(), object_id=uuid7(), image=image)
+    repository.reset_mock()
+    repository.claim_expired.return_value = (
+        MediaDeletionLease(uuid7(), uuid7(), damaged.storage_key, b"x" * 32, 2, 2),
+    )
+    repository.finish_deletion.return_value = True
+    report = await DurableMediaCleanup(
+        repository=cast(MediaRepository, repository),
+        store=store,
+    ).run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
+    assert (report.deleted, report.already_missing, report.failed) == (0, 0, 1)
+    assert store.resolve_key(damaged.storage_key).exists()
+    assert repository.finish_deletion.await_args.kwargs["deleted"] is False
 
 
 @pytest.mark.unit

@@ -25,6 +25,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    or_,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -392,6 +393,12 @@ media_objects = Table(
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     Column("ready_at", UTC_TIMESTAMP),
     Column("delete_requested_at", UTC_TIMESTAMP),
+    Column("delete_claimed_at", UTC_TIMESTAMP),
+    Column("delete_lease_expires_at", UTC_TIMESTAMP),
+    Column("delete_fencing_token", BigInteger, nullable=False, server_default=text("0")),
+    Column("delete_attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("delete_next_attempt_at", UTC_TIMESTAMP),
+    Column("delete_error_code", Text),
     Column("deleted_at", UTC_TIMESTAMP),
     Column("retention_class", Text, nullable=False),
     Column("expires_at", UTC_TIMESTAMP),
@@ -410,6 +417,23 @@ media_objects = Table(
     CheckConstraint("width IS NULL OR width > 0", name="width_positive"),
     CheckConstraint("height IS NULL OR height > 0", name="height_positive"),
     CheckConstraint("sha256 IS NULL OR octet_length(sha256) = 32", name="sha256_32_bytes"),
+    CheckConstraint("delete_fencing_token >= 0", name="delete_fencing_token_nonnegative"),
+    CheckConstraint("delete_attempt_count >= 0", name="delete_attempt_count_nonnegative"),
+    CheckConstraint(
+        "(status = 'delete_pending' AND delete_claimed_at IS NOT NULL AND "
+        "delete_lease_expires_at IS NOT NULL) OR "
+        "(status <> 'delete_pending' AND delete_claimed_at IS NULL AND "
+        "delete_lease_expires_at IS NULL)",
+        name="delete_lease_state_match",
+    ),
+    CheckConstraint(
+        "(status = 'failed' AND delete_requested_at IS NOT NULL AND "
+        "delete_next_attempt_at IS NOT NULL) OR "
+        "(status = 'failed' AND delete_requested_at IS NULL AND "
+        "delete_next_attempt_at IS NULL) OR "
+        "(status <> 'failed' AND delete_next_attempt_at IS NULL)",
+        name="delete_retry_state_match",
+    ),
     CheckConstraint(
         "storage_key IS NULL OR (storage_key !~ '(^/|(^|/)\\.\\.(/|$)|\\\\)')",
         name="storage_key_relative",
@@ -423,6 +447,19 @@ Index(
     "ix_media_objects_expiry",
     media_objects.c.expires_at,
     postgresql_where=(media_objects.c.status == "ready") & media_objects.c.expires_at.is_not(None),
+)
+Index(
+    "ix_media_objects_delete_due",
+    media_objects.c.status,
+    media_objects.c.delete_next_attempt_at,
+    media_objects.c.delete_lease_expires_at,
+    media_objects.c.expires_at,
+    media_objects.c.id,
+    postgresql_where=or_(
+        media_objects.c.status == "ready",
+        media_objects.c.status == "delete_pending",
+        media_objects.c.status == "failed",
+    ),
 )
 
 message_media = Table(

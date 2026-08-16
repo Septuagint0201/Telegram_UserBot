@@ -13,7 +13,7 @@ import redis
 EXPECTED_POSTGRES_MAJOR = "17"
 EXPECTED_VECTOR_VERSION = "0.8.6"
 EXPECTED_REDIS_VERSION = "8.2.8"
-EXPECTED_REVISION = "0018_m5_retry_budget_proof"
+EXPECTED_REVISION = "0019_m5_m6_recovery_execution"
 
 
 def _hash(path: Path) -> str:
@@ -66,7 +66,9 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
     return {
         "schema_version": 2,
         "revision": EXPECTED_REVISION,
-        "migration_sha256": _hash(root / "alembic" / "versions" / "0018_m5_retry_budget_proof.py"),
+        "migration_sha256": _hash(
+            root / "alembic" / "versions" / "0019_m5_m6_recovery_execution.py"
+        ),
         "migration_chain_sha256": {
             "0001_m1_durable_state": _hash(
                 root / "alembic" / "versions" / "0001_m1_durable_state.py"
@@ -121,6 +123,9 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
             ),
             "0018_m5_retry_budget_proof": _hash(
                 root / "alembic" / "versions" / "0018_m5_retry_budget_proof.py"
+            ),
+            "0019_m5_m6_recovery_execution": _hash(
+                root / "alembic" / "versions" / "0019_m5_m6_recovery_execution.py"
             ),
         },
         "roles_sha256": _hash(root / "deploy" / "postgres" / "m7_roles.sql"),

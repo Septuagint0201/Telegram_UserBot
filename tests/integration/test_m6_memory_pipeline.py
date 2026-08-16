@@ -3,15 +3,21 @@
 from datetime import timedelta
 from hashlib import sha256
 from typing import cast
-from uuid import uuid4, uuid7
+from uuid import UUID, uuid4, uuid7
 
 import pytest
-from sqlalchemy import null, select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import insert, null, select, text, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from telegram_userbot.adapters.persistence.memory_repository import MemoryRepository
 from telegram_userbot.adapters.persistence.schema import (
+    data_erasure_requests,
+    memories,
     memory_jobs,
+    memory_proposal_evidence,
+    memory_proposals,
+    memory_review_actions,
+    memory_versions,
     message_revisions,
     summary_watermarks,
 )
@@ -28,7 +34,12 @@ from telegram_userbot.domain.memory.models import (
 )
 from telegram_userbot.domain.memory.trigger import EventRange
 from telegram_userbot.domain.shared.redaction import SensitiveValue
+from telegram_userbot.processes.memory_runtime import MemoryReviewRuntimeService
 from tests.integration.test_m5_context_media import NOW, seed_scope
+from tests.integration.test_m6_account_scope_constraints import (
+    _seed_memory_run,
+    _seed_profile,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -475,3 +486,211 @@ async def test_m6_durable_control_backend_empty_scope_is_metadata_only(
         bot_chat_id=42,
         now=NOW,
     )
+
+
+@pytest.mark.integration
+async def test_m6_confirmed_review_actions_execute_accept_reject_and_forget(
+    postgres_engine: AsyncEngine,
+) -> None:
+    connection = await postgres_engine.connect()
+    outer = await connection.begin()
+    factory = async_sessionmaker(
+        connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    try:
+        async with factory() as setup, setup.begin():
+            account_id, conversation_id, _turn_id, revision_id = await seed_scope(setup)
+            profile_id, config_id, credential_version_id, _capability_id = await _seed_profile(
+                setup,
+                logical_role="memory_agent",
+                profile_kind="generation",
+                protocol="openai_responses",
+            )
+            model_run_id = await _seed_memory_run(
+                setup,
+                account_id=account_id,
+                conversation_id=conversation_id,
+                profile_id=profile_id,
+                config_id=config_id,
+                credential_version_id=credential_version_id,
+            )
+            job_id = await MemoryRepository(setup).refresh_pending_job(
+                account_id=account_id,
+                conversation_id=conversation_id,
+                job_kind="episode",
+                event_range=EventRange(1, 1),
+                estimated_input_tokens=10,
+                now=NOW,
+            )
+            content_hash = sha256(b"SYNTHETIC_PRIVATE_CONTEXT_BODY").digest()
+
+            async def seed_candidate(*, ordinal: int, key: bytes) -> UUID:
+                proposal_id = uuid7()
+                await setup.execute(
+                    insert(memory_proposals).values(
+                        id=proposal_id,
+                        account_id=account_id,
+                        conversation_id=conversation_id,
+                        memory_job_id=job_id,
+                        model_run_id=model_run_id,
+                        model_role="memory_agent",
+                        idempotency_key=sha256(b"review" + bytes([ordinal])).digest(),
+                        proposal_ordinal=ordinal,
+                        operation="create",
+                        memory_type="fact",
+                        semantic_key_hash=key,
+                        payload_schema_version=1,
+                        proposed_payload={"value": f"synthetic-{ordinal}"},
+                        proposed_text=f"synthetic-{ordinal}",
+                        proposed_confidence=0.9,
+                        proposed_importance=0.5,
+                        state="candidate",
+                        review_version=1,
+                        validator_policy_version="m6-v1",
+                        retention_class="memory_proposal",
+                        expires_at=NOW + timedelta(hours=1),
+                    )
+                )
+                await setup.execute(
+                    insert(memory_proposal_evidence).values(
+                        proposal_id=proposal_id,
+                        account_id=account_id,
+                        message_revision_id=revision_id,
+                        evidence_role="primary",
+                        source_content_sha256=content_hash,
+                        source_normalization_version="unicode-codepoint-v1",
+                        trust_class="untrusted_user",
+                    )
+                )
+                return proposal_id
+
+            accepted_proposal = await seed_candidate(ordinal=0, key=b"a" * 32)
+            rejected_proposal = await seed_candidate(ordinal=1, key=b"b" * 32)
+            accept_action, reject_action = uuid7(), uuid7()
+            for action_id, action, proposal_id, token_hash, used_at in (
+                (accept_action, "accept", accepted_proposal, b"a" * 32, NOW),
+                (
+                    reject_action,
+                    "reject",
+                    rejected_proposal,
+                    b"r" * 32,
+                    NOW + timedelta(seconds=1),
+                ),
+            ):
+                await setup.execute(
+                    insert(memory_review_actions).values(
+                        id=action_id,
+                        account_id=account_id,
+                        conversation_id=conversation_id,
+                        action=action,
+                        proposal_id=proposal_id,
+                        expected_proposal_version=1,
+                        admin_actor_id=42,
+                        bot_chat_id=42,
+                        action_token_hash=token_hash,
+                        expires_at=NOW + timedelta(minutes=5),
+                        used_at=used_at,
+                        state="confirmed",
+                    )
+                )
+
+        runtime = MemoryReviewRuntimeService(
+            factory,
+            erasure_scope_secret=SensitiveValue(b"e" * 32),
+            now=lambda: NOW,
+        )
+        accepted = await runtime.run_once(account_id=account_id)
+        assert accepted is not None
+        assert (accepted.action, accepted.applied) == ("accept", True)
+        rejected = await runtime.run_once(account_id=account_id)
+        assert rejected is not None
+        assert (rejected.action, rejected.applied) == ("reject", True)
+
+        async with factory() as reader:
+            accepted_row = (
+                await reader.execute(
+                    select(
+                        memory_proposals.c.state,
+                        memory_proposals.c.decision_actor_type,
+                        memory_proposals.c.decision_actor_id,
+                        memory_proposals.c.accepted_memory_version_id,
+                    ).where(memory_proposals.c.id == accepted_proposal)
+                )
+            ).one()
+            assert accepted_row[:3] == ("accepted", "human", "42")
+            assert accepted_row.accepted_memory_version_id is not None
+            memory_id = await reader.scalar(
+                select(memory_versions.c.memory_id).where(
+                    memory_versions.c.id == accepted_row.accepted_memory_version_id
+                )
+            )
+            assert memory_id is not None
+            assert (
+                await reader.scalar(
+                    select(memory_proposals.c.state).where(
+                        memory_proposals.c.id == rejected_proposal
+                    )
+                )
+                == "rejected"
+            )
+
+        forget_action = uuid7()
+        async with factory() as setup, setup.begin():
+            await setup.execute(
+                insert(memory_review_actions).values(
+                    id=forget_action,
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    action="forget",
+                    memory_id=memory_id,
+                    expected_memory_version=1,
+                    admin_actor_id=42,
+                    bot_chat_id=42,
+                    action_token_hash=b"f" * 32,
+                    expires_at=NOW + timedelta(minutes=5),
+                    used_at=NOW + timedelta(seconds=1),
+                    state="confirmed",
+                )
+            )
+        forgotten = await runtime.run_once(account_id=account_id)
+        assert forgotten is not None
+        assert (forgotten.action, forgotten.applied) == ("forget", True)
+
+        async with factory() as reader:
+            memory_row = (
+                await reader.execute(
+                    select(memories.c.status, memories.c.forgotten_at).where(
+                        memories.c.id == memory_id
+                    )
+                )
+            ).one()
+            assert memory_row == ("forgotten", NOW)
+            version_row = (
+                await reader.execute(
+                    select(memory_versions.c.payload, memory_versions.c.rendered_text).where(
+                        memory_versions.c.memory_id == memory_id
+                    )
+                )
+            ).one()
+            assert version_row == ({}, None)
+            assert (
+                await reader.scalar(
+                    select(memory_review_actions.c.state).where(
+                        memory_review_actions.c.id == forget_action
+                    )
+                )
+                == "applied"
+            )
+            assert (
+                await reader.scalar(
+                    select(data_erasure_requests.c.requested_by).where(
+                        data_erasure_requests.c.memory_id == memory_id
+                    )
+                )
+                == "control_admin:42"
+            )
+    finally:
+        await outer.rollback()
+        await connection.close()

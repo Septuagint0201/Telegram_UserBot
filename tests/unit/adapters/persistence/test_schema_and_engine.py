@@ -399,6 +399,24 @@ def test_preview_delete_retry_migration_is_bounded_indexed_and_reversible() -> N
 
 
 @pytest.mark.unit
+def test_media_cleanup_and_review_execution_migration_is_recoverable() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0019_m5_m6_recovery_execution.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'down_revision: str | Sequence[str] | None = "0018_m5_retry_budget_proof"' in migration
+    assert "delete_lease_expires_at timestamptz" in migration
+    assert "delete_fencing_token bigint NOT NULL DEFAULT 0" in migration
+    assert "delete_attempt_count integer NOT NULL DEFAULT 0" in migration
+    assert "delete_retry_recovered" in migration
+    assert "ix_media_objects_delete_due" in migration
+    assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable

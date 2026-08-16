@@ -485,6 +485,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "alembic/versions/0018_m5_retry_budget_proof.py",
+                    "alembic/versions/0019_m5_m6_recovery_execution.py",
                     "tests/unit/adapters/test_context_control.py",
                     "tests/integration/test_m5_context_media.py",
                 ),
@@ -493,6 +494,8 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "tests.unit.adapters.test_context_control::test_preview_send_unknown_is_explicit_and_not_retried",
                     "tests.unit.adapters.test_context_control_backend::test_exact_manifest_rebuilder_checks_vector_content_render_and_eligibility",
                     "tests.unit.adapters.persistence.test_context_repository::test_context_preview_consume_delivery_and_deletion_state_branches",
+                    "tests.unit.adapters.test_context_control_backend::test_durable_preview_retries_one_explicit_rejection_in_the_same_call",
+                    "tests.unit.adapters.test_context_control_backend::test_durable_preview_reentry_preserves_original_delete_deadline",
                     "tests.integration.test_m5_context_media::test_m5_manifest_persists_content_free_and_preview_is_one_time",
                     "tests.integration.test_m5_context_media::test_m5_preview_delete_claim_is_fenced_and_reclaimable",
                     "tests.integration.test_m5_context_media::test_m5_control_role_executes_preview_function_without_direct_content_access",
@@ -501,9 +504,17 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
             ),
             (
                 "M5-010",
-                ("src/telegram_userbot/adapters/media/storage.py", "deploy/postgres/m5_roles.sql"),
+                (
+                    "src/telegram_userbot/adapters/media/storage.py",
+                    "src/telegram_userbot/adapters/media/cleanup.py",
+                    "src/telegram_userbot/adapters/persistence/media_repository.py",
+                    "alembic/versions/0019_m5_m6_recovery_execution.py",
+                    "deploy/postgres/m5_roles.sql",
+                ),
                 (
                     "tests.unit.adapters.test_media::test_media_cleanup_respects_expiry_references_and_missing_files",
+                    "tests.unit.adapters.test_media::test_durable_media_cleanup_records_success_and_hash_failure",
+                    "tests.integration.test_m5_context_media::test_m5_media_cleanup_reclaims_lease_fences_stale_worker_and_retries",
                 ),
             ),
             (
@@ -623,6 +634,9 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                 (
                     "src/telegram_userbot/adapters/telegram_bot/memory_control.py",
                     "src/telegram_userbot/adapters/telegram_bot/memory_control_backend.py",
+                    "src/telegram_userbot/adapters/persistence/memory_repository.py",
+                    "src/telegram_userbot/processes/memory_runtime.py",
+                    "alembic/versions/0019_m5_m6_recovery_execution.py",
                 ),
                 (
                     "tests.unit.adapters.test_memory_control::"
@@ -631,6 +645,8 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "test_memory_target_tokens_are_private_principal_bound_and_expiring",
                     "tests.integration.test_m6_memory_pipeline::"
                     "test_m6_durable_control_backend_empty_scope_is_metadata_only",
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_confirmed_review_actions_execute_accept_reject_and_forget",
                 ),
             ),
             (
@@ -668,6 +684,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "alembic/versions/0018_m5_retry_budget_proof.py",
+                    "alembic/versions/0019_m5_m6_recovery_execution.py",
                     "deploy/postgres/m6_roles.sql",
                     "docs/compatibility/m6.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
@@ -678,6 +695,8 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                 (
                     "tests.integration.test_m6_memory_pipeline::"
                     "test_m6_roles_keep_control_out_of_derived_truth_and_allow_review_commands",
+                    "tests.integration.test_m6_memory_pipeline::"
+                    "test_m6_confirmed_review_actions_execute_accept_reject_and_forget",
                     "tests.integration.test_m6_account_scope_constraints::"
                     "test_m5_m6_cross_account_references_are_rejected",
                     "tests.integration.test_account_scope_references::"
@@ -820,6 +839,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0016_m5_m7_delivery_integrity.py",
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "alembic/versions/0018_m5_retry_budget_proof.py",
+                    "alembic/versions/0019_m5_m6_recovery_execution.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",

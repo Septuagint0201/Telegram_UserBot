@@ -5,9 +5,10 @@ from uuid import UUID, uuid7
 import pytest
 from sqlalchemy import insert, null, select, text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from telegram_userbot.adapters.persistence.context_repository import ContextRepository
+from telegram_userbot.adapters.persistence.media_repository import MediaRepository
 from telegram_userbot.adapters.persistence.schema import (
     account_peers,
     accounts,
@@ -18,6 +19,7 @@ from telegram_userbot.adapters.persistence.schema import (
     context_preview_deliveries,
     conversation_turns,
     conversations,
+    media_objects,
     memories,
     memory_versions,
     message_events,
@@ -883,3 +885,107 @@ async def test_m5_control_role_executes_preview_function_without_direct_content_
             assert rows.one_or_none() is None
         finally:
             await transaction.rollback()
+
+
+@pytest.mark.integration
+async def test_m5_media_cleanup_reclaims_lease_fences_stale_worker_and_retries(
+    postgres_engine: AsyncEngine,
+) -> None:
+    connection = await postgres_engine.connect()
+    outer = await connection.begin()
+    factory = async_sessionmaker(
+        connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    try:
+        object_id = uuid7()
+        async with factory() as setup, setup.begin():
+            account_id, _conversation_id, _turn_id, _revision_id = await seed_scope(setup)
+            await setup.execute(
+                insert(media_objects).values(
+                    id=object_id,
+                    account_id=account_id,
+                    object_kind="original",
+                    status="ready",
+                    storage_key=f"{account_id}/synthetic.png",
+                    sha256=b"m" * 32,
+                    validated_mime="image/png",
+                    byte_size=128,
+                    width=8,
+                    height=8,
+                    ready_at=NOW - timedelta(days=31),
+                    retention_class="media_original_30d",
+                    expires_at=NOW - timedelta(days=1),
+                )
+            )
+
+        async with factory() as first_worker, first_worker.begin():
+            first = await MediaRepository(first_worker).claim_expired(
+                now=NOW,
+                lease=timedelta(minutes=1),
+            )
+        assert len(first) == 1
+
+        async with factory() as early_worker, early_worker.begin():
+            assert not await MediaRepository(early_worker).claim_expired(
+                now=NOW + timedelta(seconds=59)
+            )
+
+        async with factory() as replacement_worker, replacement_worker.begin():
+            replacement = await MediaRepository(replacement_worker).claim_expired(
+                now=NOW + timedelta(minutes=1)
+            )
+        assert len(replacement) == 1
+        assert replacement[0].fencing_token > first[0].fencing_token
+
+        async with factory() as stale_worker, stale_worker.begin():
+            assert not await MediaRepository(stale_worker).finish_deletion(
+                deletion=first[0],
+                deleted=True,
+                now=NOW + timedelta(minutes=1),
+            )
+
+        async with factory() as failed_worker, failed_worker.begin():
+            assert await MediaRepository(failed_worker).finish_deletion(
+                deletion=replacement[0],
+                deleted=False,
+                now=NOW + timedelta(minutes=1),
+                error_code="synthetic_delete_failure",
+            )
+
+        async with factory() as backoff_worker, backoff_worker.begin():
+            assert not await MediaRepository(backoff_worker).claim_expired(
+                now=NOW + timedelta(minutes=2, seconds=59)
+            )
+
+        async with factory() as retry_worker, retry_worker.begin():
+            retry = await MediaRepository(retry_worker).claim_expired(
+                now=NOW + timedelta(minutes=3)
+            )
+        assert len(retry) == 1
+        assert retry[0].attempt_count == 3
+
+        async with factory() as final_worker, final_worker.begin():
+            assert await MediaRepository(final_worker).finish_deletion(
+                deletion=retry[0],
+                deleted=True,
+                now=NOW + timedelta(minutes=3),
+            )
+
+        async with factory() as reader:
+            row = (
+                await reader.execute(
+                    select(
+                        media_objects.c.status,
+                        media_objects.c.storage_key,
+                        media_objects.c.sha256,
+                        media_objects.c.delete_attempt_count,
+                        media_objects.c.delete_fencing_token,
+                    ).where(media_objects.c.id == object_id)
+                )
+            ).one()
+        assert row == ("deleted", None, None, 3, retry[0].fencing_token)
+    finally:
+        await outer.rollback()
+        await connection.close()

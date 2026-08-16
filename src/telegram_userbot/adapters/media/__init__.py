@@ -1,5 +1,9 @@
 """Private image validation and storage adapters."""
 
+from telegram_userbot.adapters.media.cleanup import (
+    DurableMediaCleanup,
+    DurableMediaCleanupReport,
+)
 from telegram_userbot.adapters.media.storage import (
     CleanupCandidate,
     CleanupReport,
@@ -17,6 +21,8 @@ from telegram_userbot.adapters.media.validation import (
 __all__ = [
     "CleanupCandidate",
     "CleanupReport",
+    "DurableMediaCleanup",
+    "DurableMediaCleanupReport",
     "ImageIngestionError",
     "ImageIngestor",
     "ImageLimits",

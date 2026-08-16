@@ -6,7 +6,7 @@ from decimal import Decimal
 from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,8 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from telegram_userbot.adapters.persistence.memory_repository import (
     MemoryJobLease,
     MemoryRepository,
+    ReviewAction,
 )
-from telegram_userbot.domain.memory.lifecycle import MemoryConflictError
+from telegram_userbot.domain.memory.lifecycle import AcceptanceResult, MemoryConflictError
 from telegram_userbot.domain.memory.models import (
     EmbeddingRecord,
     EmbeddingRecordState,
@@ -37,6 +38,7 @@ from telegram_userbot.domain.memory.summary import SummaryCoverageError
 from telegram_userbot.domain.memory.validation import ValidatedProposal
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+ERASURE_SECRET = b"e" * 32
 
 
 class _Result:
@@ -68,6 +70,19 @@ class _Result:
 
     def scalar_one_or_none(self) -> Any:
         return self._scalar
+
+
+class _NestedTransaction:
+    async def __aenter__(self) -> _NestedTransaction:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> bool:
+        return False
 
 
 def _repository(session: AsyncMock | None = None) -> tuple[MemoryRepository, AsyncMock]:
@@ -1018,6 +1033,7 @@ async def test_forget_and_erasure_are_account_scoped_and_idempotently_shaped() -
         account_id=account_id,
         memory_id=memory_id,
         derived_ids={"embedding": {embedding_id}, "summary": {summary_id}},
+        scope_secret=ERASURE_SECRET,
         now=NOW,
     )
     assert request_id
@@ -1026,13 +1042,29 @@ async def test_forget_and_erasure_are_account_scoped_and_idempotently_shaped() -
 
     session.execute.side_effect = [_Result()]
     with pytest.raises(ValueError, match="outside"):
-        await repo.record_erasure(account_id=account_id, memory_id=memory_id, now=NOW)
+        await repo.record_erasure(
+            account_id=account_id,
+            memory_id=memory_id,
+            scope_secret=ERASURE_SECRET,
+            now=NOW,
+        )
     with pytest.raises(ValueError, match="metadata"):
         await repo.record_erasure(
-            account_id=account_id, memory_id=memory_id, policy_version=0, now=NOW
+            account_id=account_id,
+            memory_id=memory_id,
+            policy_version=0,
+            scope_secret=ERASURE_SECRET,
+            now=NOW,
         )
     with pytest.raises(ValueError, match="source"):
-        await repo.record_erasure(account_id=account_id, now=NOW)
+        await repo.record_erasure(account_id=account_id, scope_secret=ERASURE_SECRET, now=NOW)
+    with pytest.raises(ValueError, match="metadata"):
+        await repo.record_erasure(
+            account_id=account_id,
+            memory_id=memory_id,
+            scope_secret=b"short",
+            now=NOW,
+        )
 
 
 @pytest.mark.asyncio
@@ -1066,6 +1098,7 @@ async def test_review_action_requires_and_returns_the_expected_proposal_version(
         "memory_id": None,
         "expected_proposal_version": 3,
         "expected_memory_version": None,
+        "admin_actor_id": 42,
         "expires_at": NOW + timedelta(minutes=5),
     }
     proposal_row = {
@@ -1103,6 +1136,7 @@ async def test_review_action_rechecks_evidence_and_expiry_before_confirmation_or
         "memory_id": None,
         "expected_proposal_version": 1,
         "expected_memory_version": None,
+        "admin_actor_id": 42,
         "expires_at": NOW + timedelta(minutes=5),
     }
     proposal_row = {
@@ -1134,3 +1168,105 @@ async def test_review_action_rechecks_evidence_and_expiry_before_confirmation_or
     assert await repo.lock_confirmed_review_action(account_id=account_id, now=NOW) is None
     expiry_statement = session.execute.await_args_list[-1].args[0]
     assert "review_action_expired" in expiry_statement.compile().params.values()
+
+
+def _review_action(action: str) -> ReviewAction:
+    proposal_id = uuid4() if action in {"accept", "reject"} else None
+    memory_id = uuid4() if action == "forget" else None
+    return ReviewAction(
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        action,
+        proposal_id,
+        memory_id,
+        2 if proposal_id is not None else None,
+        3 if memory_id is not None else None,
+        42,
+        NOW + timedelta(minutes=5),
+    )
+
+
+@pytest.mark.asyncio
+async def test_review_action_executor_terminalizes_success_and_conflict() -> None:
+    repo, session = _repository()
+    action = _review_action("reject")
+    session.begin_nested = MagicMock(return_value=_NestedTransaction())
+    repo.lock_confirmed_review_action = AsyncMock(return_value=action)  # type: ignore[method-assign]
+    repo._apply_review_action = AsyncMock()  # type: ignore[method-assign]
+    repo.finish_review_action = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    execution = await repo.execute_next_review_action(
+        account_id=action.account_id,
+        now=NOW,
+        erasure_scope_secret=ERASURE_SECRET,
+    )
+    assert execution is not None
+    assert (execution.action, execution.applied, execution.reason_code) == (
+        "reject",
+        True,
+        None,
+    )
+
+    repo._apply_review_action.side_effect = MemoryConflictError("synthetic conflict")
+    execution = await repo.execute_next_review_action(
+        account_id=action.account_id,
+        now=NOW,
+        erasure_scope_secret=ERASURE_SECRET,
+    )
+    assert execution is not None
+    assert (execution.applied, execution.reason_code) == (False, "memory_review_conflict")
+    finish_call = repo.finish_review_action.await_args
+    assert finish_call is not None
+    assert finish_call.kwargs["reason_code"] == "memory_review_conflict"
+
+
+@pytest.mark.asyncio
+async def test_review_action_apply_paths_bind_actor_version_and_erasure_key() -> None:
+    repo, session = _repository()
+    accepted = _review_action("accept")
+    validated = SimpleNamespace()
+    repo._persisted_candidate_for_review = AsyncMock(  # type: ignore[method-assign]
+        return_value=(validated, {})
+    )
+    repo._accept_proposal = AsyncMock(  # type: ignore[method-assign]
+        return_value=AcceptanceResult(
+            cast(UUID, accepted.proposal_id),
+            ProposalState.ACCEPTED,
+            uuid4(),
+            uuid4(),
+        )
+    )
+    await repo._apply_review_action(
+        action=accepted,
+        now=NOW,
+        erasure_scope_secret=ERASURE_SECRET,
+    )
+    acceptance_call = repo._accept_proposal.await_args
+    assert acceptance_call is not None
+    assert acceptance_call.kwargs["decision_actor_type"] == "human"
+    assert acceptance_call.kwargs["decision_actor_id"] == "42"
+
+    rejected = _review_action("reject")
+    session.execute.return_value = _Result(rowcount=1)
+    await repo._apply_review_action(
+        action=rejected,
+        now=NOW,
+        erasure_scope_secret=ERASURE_SECRET,
+    )
+    reject_params = session.execute.await_args.args[0].compile().params.values()
+    assert "manual_reject" in reject_params
+    assert "42" in reject_params
+    assert rejected.expected_proposal_version in reject_params
+
+    forgotten = _review_action("forget")
+    repo.record_erasure = AsyncMock(return_value=uuid4())  # type: ignore[method-assign]
+    await repo._apply_review_action(
+        action=forgotten,
+        now=NOW,
+        erasure_scope_secret=ERASURE_SECRET,
+    )
+    erasure_call = repo.record_erasure.await_args
+    assert erasure_call is not None
+    assert erasure_call.kwargs["scope_secret"] == ERASURE_SECRET
+    assert erasure_call.kwargs["requested_by"] == "control_admin:42"

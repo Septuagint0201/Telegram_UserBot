@@ -134,6 +134,7 @@ class DurableContextControlBackend:
         max_chunk_chars: int = 3_500,
         max_chunks: int = 8,
         delete_after: timedelta = timedelta(minutes=10),
+        max_rejected_retries: int = 1,
         on_delete_failure: Callable[[str], None] | None = None,
     ) -> None:
         if (
@@ -143,6 +144,7 @@ class DurableContextControlBackend:
             or not 1 <= max_chunks <= 8
             or delete_after <= timedelta(0)
             or delete_after > timedelta(minutes=10)
+            or not 0 <= max_rejected_retries <= 3
         ):
             raise ValueError("context control settings are invalid")
         self._repository = repository
@@ -153,6 +155,7 @@ class DurableContextControlBackend:
         self._max_chunk_chars = max_chunk_chars
         self._max_chunks = max_chunks
         self._delete_after = delete_after
+        self._max_rejected_retries = max_rejected_retries
         self._on_delete_failure = on_delete_failure
 
     async def summary(
@@ -213,7 +216,7 @@ class DurableContextControlBackend:
             raise ValueError("context_preview_chunk_overflow")
         return request, chunks
 
-    async def deliver_preview(
+    async def deliver_preview(  # noqa: PLR0912 - explicit durable RPC states
         self,
         *,
         request: PreviewRequestRecord,
@@ -227,7 +230,10 @@ class DurableContextControlBackend:
             now=now,
             delete_after=delete_after,
         )
-        if deliveries is None:
+        if not deliveries:
+            raise RuntimeError("context_preview_delivery_conflict")
+        persisted_delete_after = deliveries[0].delete_after
+        if any(delivery.delete_after != persisted_delete_after for delivery in deliveries):
             raise RuntimeError("context_preview_delivery_conflict")
         await self._repository.commit_preview_boundary()
         for delivery, chunk in zip(deliveries, chunks, strict=True):
@@ -241,39 +247,52 @@ class DurableContextControlBackend:
                         state="send_unknown",
                         message_id=None,
                         now=now,
-                        delete_after=delete_after,
+                        delete_after=persisted_delete_after,
                     )
                     await self._repository.commit_preview_boundary()
                 return await self._finish_preview_delivery(request=request, now=now)
-            if (
-                delivery.state != "pending"
-                or not await self._repository.claim_preview_delivery_chunk(
-                    request=request, ordinal=delivery.ordinal
-                )
-            ):
+            if delivery.state != "pending":
                 raise RuntimeError("context_preview_delivery_conflict")
-            await self._repository.commit_preview_boundary()
-            try:
-                message_id = await self._gateway.send_text(
-                    bot_chat_id=request.bot_chat_id, text=chunk
-                )
-            except PreviewSendRejectedError:
-                await self._repository.retry_preview_delivery_chunk(
+            rejected_retries = 0
+            while True:
+                if not await self._repository.claim_preview_delivery_chunk(
                     request=request, ordinal=delivery.ordinal
-                )
+                ):
+                    raise RuntimeError("context_preview_delivery_conflict")
                 await self._repository.commit_preview_boundary()
-                raise
-            except PreviewSendUnknownError:
-                message_id = None
-            except Exception:
-                message_id = None
+                try:
+                    message_id = await self._gateway.send_text(
+                        bot_chat_id=request.bot_chat_id, text=chunk
+                    )
+                except PreviewSendRejectedError as error:
+                    await self._repository.retry_preview_delivery_chunk(
+                        request=request, ordinal=delivery.ordinal
+                    )
+                    await self._repository.commit_preview_boundary()
+                    if rejected_retries >= self._max_rejected_retries:
+                        failed = await self._repository.fail_preview_delivery(
+                            request=request,
+                            now=now,
+                            error_code="preview_send_rejected",
+                        )
+                        await self._repository.commit_preview_boundary()
+                        if not failed:
+                            raise RuntimeError("context_preview_delivery_conflict") from error
+                        raise
+                    rejected_retries += 1
+                    continue
+                except PreviewSendUnknownError:
+                    message_id = None
+                except Exception:
+                    message_id = None
+                break
             await self._repository.record_preview_delivery_chunk(
                 request=request,
                 ordinal=delivery.ordinal,
                 state="sent" if message_id is not None else "send_unknown",
                 message_id=message_id,
                 now=now,
-                delete_after=delete_after,
+                delete_after=persisted_delete_after,
             )
             await self._repository.commit_preview_boundary()
             if message_id is None:

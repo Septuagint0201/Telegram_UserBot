@@ -110,6 +110,7 @@ class PreviewDeliveryRecord:
     ordinal: int
     state: str
     bot_message_id: int | None
+    delete_after: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -891,6 +892,7 @@ class ContextRepository:
             )
             .returning(context_preview_requests.c.id)
         )
+        effective_deletion_time = deletion_time
         if claimed == request.request_id:
             for ordinal in range(1, chunk_count + 1):
                 await self._session.execute(
@@ -929,9 +931,11 @@ class ContextRepository:
                 existing_request is None
                 or existing_request["state"] != "delivering"
                 or existing_request["chunk_count"] != chunk_count
-                or existing_request["delete_after"] != deletion_time
+                or existing_request["delete_after"] is None
+                or existing_request["delete_after"] <= current_time
             ):
                 return None
+            effective_deletion_time = cast(datetime, existing_request["delete_after"])
         rows = (
             (
                 await self._session.execute(
@@ -961,6 +965,7 @@ class ContextRepository:
                 cast(int, row["ordinal"]),
                 cast(str, row["state"]),
                 cast(int | None, row["bot_message_id"]),
+                effective_deletion_time,
             )
             for row in rows
         )
@@ -999,6 +1004,38 @@ class ContextRepository:
         )
         if reset is None:
             raise RuntimeError("context_preview_delivery_conflict")
+
+    async def fail_preview_delivery(
+        self,
+        *,
+        request: PreviewRequestRecord,
+        now: datetime,
+        error_code: str,
+    ) -> bool:
+        current_time = require_aware(now, "now")
+        if not error_code:
+            raise ValueError("context_preview_failure_invalid")
+        failed = await self._session.scalar(
+            update(context_preview_requests)
+            .where(
+                context_preview_requests.c.id == request.request_id,
+                context_preview_requests.c.context_manifest_id == request.manifest_id,
+                context_preview_requests.c.manifest_sha256 == request.manifest_sha256,
+                context_preview_requests.c.source_revision_vector_sha256
+                == request.source_revision_vector_sha256,
+                context_preview_requests.c.admin_user_id == request.admin_user_id,
+                context_preview_requests.c.bot_identity == request.bot_identity,
+                context_preview_requests.c.bot_chat_id == request.bot_chat_id,
+                context_preview_requests.c.state == "delivering",
+            )
+            .values(
+                state="failed",
+                completed_at=current_time,
+                last_error_code=error_code,
+            )
+            .returning(context_preview_requests.c.id)
+        )
+        return failed == request.request_id
 
     async def record_preview_delivery_chunk(  # noqa: PLR0913 - durable RPC result identity is explicit
         self,

@@ -285,7 +285,7 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ### M7 Evidence
 
-- [x] GitHub Actions [#31942739207](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31942739207) 绑定签名提交 `b738a9c3b1b9bef6da547be81eb6ddf383407cde`、source tree `90c45ec00c8e349b8b65f13108fae2d26cc710e1`；Preflight 为 346 tests、0 failures，PostgreSQL/Redis integration 为 393 tests、0 failures，line/branch coverage 为 92.25%/84.22%，migration head `0014_m7_budget_integrity`、SHA256 `a6154211b324a19c4c73de60e555c61b771009825eca0c3e4aa1cb6278679c71`、migration paths 与 M7 acceptance manifest 均为 `PASS`，Chromium browser contract 为 `PASS`。
+- [x] GitHub Actions [#31952960402](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31952960402) 绑定签名提交 `ff8d32a6d9998d4e242ab2c5d407511c4e1cf6bd`、source tree `d34a313b5d7c063716cbc197f48517cf9a19f9e9`；Preflight 为 382 passed、54 deselected，line/branch coverage 为 89.21%/80.38%；PostgreSQL/Redis integration 为 435 passed、1 deselected，line/branch coverage 为 92.37%/84.63%。Migration head `0018_m5_retry_budget_proof`、SHA256 `a55afa1d6df1337f14b7ce56d4a3eb5bdf59319a7feb20716560c8b301a81508`、96 张表、零匿名约束、五条 migration path 与 M7-001—M7-012 acceptance 均为 `PASS`，Chromium browser contract 为 `PASS`。
 - [x] 本机 Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为 `PASS`；本机无 Docker，Windows 本地 PostgreSQL/Redis service test 仍为 `NOT RUN`。
 
 ## 13. M8 — Production Compose与 Operations

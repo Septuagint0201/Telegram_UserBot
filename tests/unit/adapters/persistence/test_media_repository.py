@@ -1,17 +1,35 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid7
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from telegram_userbot.adapters.persistence.media_repository import MediaRepository
+from telegram_userbot.adapters.persistence.media_repository import (
+    MediaDeletionLease,
+    MediaRepository,
+)
 
 
 class _Result:
-    def __init__(self, value: object | None = None) -> None:
+    def __init__(
+        self,
+        value: object | None = None,
+        *,
+        rows: list[dict[str, object]] | None = None,
+        rowcount: int = 0,
+    ) -> None:
         self._value = value
+        self._rows = rows or []
+        self.rowcount = rowcount
+
+    def mappings(self) -> _Result:
+        return self
+
+    def all(self) -> list[dict[str, object]]:
+        return self._rows
 
     def scalar_one_or_none(self) -> object | None:
         return self._value
@@ -64,14 +82,78 @@ async def test_media_attach_rejects_non_ready_object_before_revision_update() ->
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_media_cleanup_claim_rechecks_references_after_lock_wait() -> None:
-    first, second = uuid7(), uuid7()
+    account_id, first, second = uuid7(), uuid7(), uuid7()
     session = AsyncMock()
-    session.scalars.side_effect = [(first, second), (second,)]
+    session.execute.return_value = _Result(
+        rows=[
+            {
+                "id": first,
+                "account_id": account_id,
+                "status": "ready",
+                "storage_key": "first.png",
+                "sha256": b"a" * 32,
+                "delete_fencing_token": 0,
+                "delete_attempt_count": 0,
+            },
+            {
+                "id": second,
+                "account_id": account_id,
+                "status": "failed",
+                "storage_key": "second.png",
+                "sha256": b"b" * 32,
+                "delete_fencing_token": 3,
+                "delete_attempt_count": 2,
+            },
+        ]
+    )
+    session.scalar.side_effect = [None, 4]
     repository = MediaRepository(cast(AsyncSession, session))
 
-    assert await repository.claim_expired(now=datetime(2030, 1, 1, tzinfo=UTC)) == (second,)
-    assert session.scalars.await_count == 2
-    claim_sql = str(session.scalars.await_args_list[1].args[0])
+    assert await repository.claim_expired(now=datetime(2030, 1, 1, tzinfo=UTC)) == (
+        MediaDeletionLease(second, account_id, "second.png", b"b" * 32, 4, 3),
+    )
+    pg_dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
+    select_sql = str(session.execute.await_args.args[0].compile(dialect=pg_dialect))
+    assert "FOR UPDATE" in select_sql
+    assert "SKIP LOCKED" in select_sql
+    assert session.scalar.await_count == 2
+    claim_sql = str(session.scalar.await_args_list[1].args[0])
     assert claim_sql.startswith("UPDATE media_objects")
     assert "message_media.media_object_id" in claim_sql
-    assert "RETURNING media_objects.id" in claim_sql
+    assert "RETURNING media_objects.delete_fencing_token" in claim_sql
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_media_cleanup_finish_uses_fencing_and_exponential_backoff() -> None:
+    session = AsyncMock()
+    session.execute.return_value = _Result(rowcount=1)
+    repository = MediaRepository(cast(AsyncSession, session))
+    lease = MediaDeletionLease(uuid7(), uuid7(), "object.png", b"h" * 32, 7, 3)
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    assert await repository.finish_deletion(
+        deletion=lease,
+        deleted=False,
+        now=now,
+        error_code="synthetic_failure",
+    )
+    statement = session.execute.await_args.args[0]
+    params = statement.compile().params
+    assert lease.fencing_token in params.values()
+    assert now + timedelta(minutes=4) in params.values()
+    assert "synthetic_failure" in params.values()
+
+    session.execute.return_value = _Result(rowcount=0)
+    assert not await repository.finish_deletion(deletion=lease, deleted=True, now=now)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_media_cleanup_claim_rejects_invalid_policy() -> None:
+    repository = MediaRepository(cast(AsyncSession, AsyncMock()))
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    with pytest.raises(ValueError, match="claim policy"):
+        await repository.claim_expired(now=now, limit=0)
+    with pytest.raises(ValueError, match="claim policy"):
+        await repository.claim_expired(now=now, lease=timedelta(minutes=16))

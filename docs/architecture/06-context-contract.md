@@ -1302,7 +1302,7 @@ Contact purge/account wipe 清除 group logical content hash、intent content/ha
 
 ### 23.7 Context preview metadata
 
-完整preview由Data Model的`context_preview_requests`、`context_preview_tokens`和`context_preview_deliveries`持久化控制，但三者均不保存canonical正文。Request绑定exact manifest、manifest hash和source revision vector；token hash绑定管理员、Bot identity/chat和默认5分钟deadline；delivery只保存ordinal、Bot message ID、默认10分钟delete deadline、状态和稳定错误码。
+完整preview由Data Model的`context_preview_requests`、`context_preview_tokens`和`context_preview_deliveries`持久化控制，但三者均不保存canonical正文。Request绑定exact manifest、manifest hash和source revision vector；token hash绑定管理员、Bot identity/chat和默认5分钟deadline；delivery只保存ordinal、Bot message ID、默认10分钟delete deadline、状态和稳定错误码。delivery重入必须复用request已持久化的原始delete deadline，不能按重试时间延后删除。Bot明确拒绝且确认未产生副作用时默认在同一调用内重试一次；再次拒绝后request进入`failed`，管理员必须创建新的preview request，不能留下已消费token对应的永久`delivering/pending`状态。
 
 正文只在二次确认通过后由受限exact-manifest reconstruction function在`control`内存中重建。Images只输出reference/hash/MIME/尺寸/detail metadata，不读取或复制media二进制。`send_unknown`不自动重发；已知Bot message ID尽力删除，未知发送、通知、客户端缓存、转发、截图和平台副本均属于不可宣称已擦除的残余风险。
 

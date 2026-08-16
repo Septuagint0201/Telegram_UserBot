@@ -57,10 +57,14 @@ from telegram_userbot.domain.memory.models import (
     EmbeddingRecordState,
     EmbeddingSpace,
     EmbeddingState,
+    Evidence,
+    EvidenceRole,
     InputManifest,
     MemoryOperation,
+    MemoryType,
     ProposalState,
     SummaryVersion,
+    TrustClass,
 )
 from telegram_userbot.domain.memory.summary import SummaryCoverageError, SummaryWatermark
 from telegram_userbot.domain.memory.trigger import EventRange
@@ -93,7 +97,42 @@ class ReviewAction:
     memory_id: UUID | None
     expected_proposal_version: int | None
     expected_memory_version: int | None
+    admin_actor_id: int
     expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewActionExecution:
+    action_id: UUID
+    action: str
+    applied: bool
+    reason_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedProposalSnapshot:
+    id: UUID
+    account_id: UUID
+    conversation_id: UUID
+    operation: MemoryOperation
+    memory_type: MemoryType
+    semantic_key_hash: bytes
+    payload: Mapping[str, Any]
+    confidence: float
+    importance: float
+    evidence: tuple[Evidence, ...]
+    target_memory_ids: tuple[UUID, ...]
+    rendered_text: str | None
+    valid_from: datetime | None
+    valid_to: datetime | None
+    visual_only: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedValidatedProposal:
+    proposal: _PersistedProposalSnapshot
+    state: ProposalState
+    issues: tuple[()] = ()
 
 
 class MemoryRepository:
@@ -907,7 +946,7 @@ class MemoryRepository:
             )
         return persisted_proposal_id
 
-    async def accept_validated_proposal(  # noqa: PLR0912, PLR0913, PLR0915 - transaction transitions are explicit
+    async def accept_validated_proposal(  # noqa: PLR0913 - public compatibility boundary
         self,
         validated: ValidatedProposal,
         *,
@@ -916,6 +955,31 @@ class MemoryRepository:
         expected_versions: dict[UUID, int] | None = None,
         now: datetime | None = None,
         allow_candidate: bool = False,
+        decision_actor_type: str = "service",
+        decision_actor_id: str = "memory_worker",
+    ) -> AcceptanceResult:
+        return await self._accept_proposal(
+            validated,
+            recorded_proposal_id=recorded_proposal_id,
+            acceptance_kind=acceptance_kind,
+            expected_versions=expected_versions,
+            now=now,
+            allow_candidate=allow_candidate,
+            decision_actor_type=decision_actor_type,
+            decision_actor_id=decision_actor_id,
+        )
+
+    async def _accept_proposal(  # noqa: PLR0912, PLR0913, PLR0915 - transaction transitions are explicit
+        self,
+        validated: ValidatedProposal | _PersistedValidatedProposal,
+        *,
+        recorded_proposal_id: UUID,
+        acceptance_kind: str = "automatic",
+        expected_versions: dict[UUID, int] | None = None,
+        now: datetime | None = None,
+        allow_candidate: bool = False,
+        decision_actor_type: str = "service",
+        decision_actor_id: str = "memory_worker",
     ) -> AcceptanceResult:
         """Apply one validated proposal using row locks and deterministic IDs.
 
@@ -925,7 +989,11 @@ class MemoryRepository:
 
         proposal = validated.proposal
         current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
-        if acceptance_kind not in {"automatic", "manual", "reconciliation", "migration"}:
+        if (
+            acceptance_kind not in {"automatic", "manual", "reconciliation", "migration"}
+            or decision_actor_type not in {"service", "human"}
+            or not decision_actor_id
+        ):
             raise ValueError("unknown acceptance kind")
         proposal_row = await self._proposal_row(recorded_proposal_id, proposal)
         if proposal_row is None:
@@ -1267,8 +1335,8 @@ class MemoryRepository:
                 state="accepted",
                 review_version=memory_proposals.c.review_version + 1,
                 accepted_memory_version_id=version_id,
-                decision_actor_type="service",
-                decision_actor_id="memory_worker",
+                decision_actor_type=decision_actor_type,
+                decision_actor_id=decision_actor_id,
                 decision_reason_code=None,
                 decided_at=current_time,
             )
@@ -1859,11 +1927,11 @@ class MemoryRepository:
         reason: str = "policy",
         policy_version: int = 1,
         requested_by: str = "memory_worker",
-        scope_secret: bytes = b"memory-erasure-v1",
+        scope_secret: bytes,
         now: datetime | None = None,
         derived_ids: dict[str, set[UUID]] | None = None,
     ) -> UUID:
-        if policy_version < 1 or not requested_by or not scope_secret:
+        if policy_version < 1 or not requested_by or len(scope_secret) < 32:
             raise ValueError("erasure request metadata is invalid")
         memory_id = memory_id or source_id
         if memory_id is None:
@@ -1947,6 +2015,233 @@ class MemoryRepository:
                     .values(invalidation_state="invalidated", redacted_at=current_time)
                 )
         return request_id
+
+    async def execute_next_review_action(
+        self,
+        *,
+        account_id: UUID,
+        now: datetime,
+        erasure_scope_secret: bytes,
+    ) -> ReviewActionExecution | None:
+        """Apply one confirmed Control Bot action inside the caller transaction."""
+
+        current_time = require_aware(now, "now")
+        if len(erasure_scope_secret) < 32:
+            raise ValueError("erasure scope secret must contain at least 32 bytes")
+        action = await self.lock_confirmed_review_action(
+            account_id=account_id,
+            now=current_time,
+        )
+        if action is None:
+            return None
+        try:
+            async with self._session.begin_nested():
+                await self._apply_review_action(
+                    action=action,
+                    now=current_time,
+                    erasure_scope_secret=erasure_scope_secret,
+                )
+        except (MemoryConflictError, ValueError) as error:
+            finished = await self.finish_review_action(
+                action_id=action.id,
+                applied=False,
+                now=current_time,
+                reason_code="memory_review_conflict",
+            )
+            if not finished:
+                raise RuntimeError("memory review action completion CAS failed") from error
+            return ReviewActionExecution(
+                action.id,
+                action.action,
+                False,
+                "memory_review_conflict",
+            )
+        if not await self.finish_review_action(
+            action_id=action.id,
+            applied=True,
+            now=current_time,
+        ):
+            raise RuntimeError("memory review action completion CAS failed")
+        return ReviewActionExecution(action.id, action.action, True)
+
+    async def _apply_review_action(
+        self,
+        *,
+        action: ReviewAction,
+        now: datetime,
+        erasure_scope_secret: bytes,
+    ) -> None:
+        if action.action == "accept":
+            if action.proposal_id is None:
+                raise MemoryConflictError("review proposal target is missing")
+            validated, expected_versions = await self._persisted_candidate_for_review(action=action)
+            result = await self._accept_proposal(
+                validated,
+                recorded_proposal_id=action.proposal_id,
+                acceptance_kind="manual",
+                expected_versions=expected_versions,
+                now=now,
+                allow_candidate=True,
+                decision_actor_type="human",
+                decision_actor_id=str(action.admin_actor_id),
+            )
+            if result.state is not ProposalState.ACCEPTED:
+                raise MemoryConflictError("review proposal was not accepted")
+            return
+        if action.action == "reject":
+            if action.proposal_id is None or action.expected_proposal_version is None:
+                raise MemoryConflictError("review proposal target is missing")
+            rejected = cast(
+                CursorResult[Any],
+                await self._session.execute(
+                    update(memory_proposals)
+                    .where(
+                        memory_proposals.c.id == action.proposal_id,
+                        memory_proposals.c.account_id == action.account_id,
+                        memory_proposals.c.conversation_id == action.conversation_id,
+                        memory_proposals.c.state == ProposalState.CANDIDATE.value,
+                        memory_proposals.c.review_version == action.expected_proposal_version,
+                    )
+                    .values(
+                        state=ProposalState.REJECTED.value,
+                        review_version=memory_proposals.c.review_version + 1,
+                        decision_actor_type="human",
+                        decision_actor_id=str(action.admin_actor_id),
+                        decision_reason_code="manual_reject",
+                        decided_at=now,
+                    )
+                ),
+            )
+            if rejected.rowcount != 1:
+                raise MemoryConflictError("review proposal changed before rejection")
+            return
+        if action.action == "forget":
+            if action.memory_id is None:
+                raise MemoryConflictError("review memory target is missing")
+            await self.record_erasure(
+                account_id=action.account_id,
+                memory_id=action.memory_id,
+                reason="manual_forget",
+                requested_by=f"control_admin:{action.admin_actor_id}",
+                scope_secret=erasure_scope_secret,
+                now=now,
+            )
+            return
+        raise ValueError("review action is unsupported")
+
+    async def _persisted_candidate_for_review(
+        self, *, action: ReviewAction
+    ) -> tuple[_PersistedValidatedProposal, dict[UUID, int]]:
+        if action.proposal_id is None or action.expected_proposal_version is None:
+            raise MemoryConflictError("review proposal target is missing")
+        proposal = (
+            (
+                await self._session.execute(
+                    select(memory_proposals)
+                    .where(
+                        memory_proposals.c.id == action.proposal_id,
+                        memory_proposals.c.account_id == action.account_id,
+                        memory_proposals.c.conversation_id == action.conversation_id,
+                        memory_proposals.c.state == ProposalState.CANDIDATE.value,
+                        memory_proposals.c.review_version == action.expected_proposal_version,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if proposal is None:
+            raise MemoryConflictError("review proposal changed before acceptance")
+        target_rows = (
+            (
+                await self._session.execute(
+                    select(memory_proposal_targets)
+                    .where(
+                        memory_proposal_targets.c.proposal_id == action.proposal_id,
+                        memory_proposal_targets.c.account_id == action.account_id,
+                    )
+                    .order_by(
+                        case(
+                            (
+                                memory_proposal_targets.c.target_role.in_(
+                                    ("primary", "superseded", "invalidated")
+                                ),
+                                0,
+                            ),
+                            else_=1,
+                        ),
+                        memory_proposal_targets.c.target_memory_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        evidence_rows = (
+            (
+                await self._session.execute(
+                    select(
+                        memory_proposal_evidence,
+                        message_revisions.c.revision_no,
+                    )
+                    .join(
+                        message_revisions,
+                        and_(
+                            message_revisions.c.id
+                            == memory_proposal_evidence.c.message_revision_id,
+                            message_revisions.c.account_id == memory_proposal_evidence.c.account_id,
+                        ),
+                    )
+                    .where(
+                        memory_proposal_evidence.c.proposal_id == action.proposal_id,
+                        memory_proposal_evidence.c.account_id == action.account_id,
+                    )
+                    .order_by(
+                        memory_proposal_evidence.c.message_revision_id,
+                        memory_proposal_evidence.c.evidence_role,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        expected_versions = {
+            cast(UUID, row["target_memory_id"]): cast(int, row["target_version_no_snapshot"])
+            for row in target_rows
+        }
+        snapshot = _PersistedProposalSnapshot(
+            id=cast(UUID, proposal["id"]),
+            account_id=cast(UUID, proposal["account_id"]),
+            conversation_id=cast(UUID, proposal["conversation_id"]),
+            operation=MemoryOperation(cast(str, proposal["operation"])),
+            memory_type=MemoryType(cast(str, proposal["memory_type"])),
+            semantic_key_hash=cast(bytes, proposal["semantic_key_hash"]),
+            payload=cast(Mapping[str, Any], proposal["proposed_payload"]),
+            confidence=float(proposal["proposed_confidence"]),
+            importance=float(proposal["proposed_importance"]),
+            evidence=tuple(
+                Evidence(
+                    source_id=cast(UUID, row["message_revision_id"]),
+                    source_revision=str(row["revision_no"]),
+                    source_content_sha256=cast(bytes, row["source_content_sha256"]),
+                    role=EvidenceRole(cast(str, row["evidence_role"])),
+                    trust=TrustClass(cast(str, row["trust_class"])),
+                    span_start=cast(int | None, row["quoted_span_start"]),
+                    span_end=cast(int | None, row["quoted_span_end"]),
+                    visual_only=False,
+                )
+                for row in evidence_rows
+            ),
+            target_memory_ids=tuple(cast(UUID, row["target_memory_id"]) for row in target_rows),
+            rendered_text=cast(str | None, proposal["proposed_text"]),
+            valid_from=cast(datetime | None, proposal["proposed_valid_from"]),
+            valid_to=cast(datetime | None, proposal["proposed_valid_to"]),
+            visual_only=cast(bool, proposal["visual_only"]),
+        )
+        return _PersistedValidatedProposal(snapshot, ProposalState.CANDIDATE), expected_versions
 
     async def _proposal_row(self, recorded_proposal_id: UUID, proposal: Any) -> Any:
         row = (
@@ -2076,6 +2371,7 @@ class MemoryRepository:
             memory_id=cast(UUID | None, row["memory_id"]),
             expected_proposal_version=cast(int | None, row["expected_proposal_version"]),
             expected_memory_version=cast(int | None, row["expected_memory_version"]),
+            admin_actor_id=cast(int, row["admin_actor_id"]),
             expires_at=cast(datetime, row["expires_at"]),
         )
 
@@ -2121,6 +2417,7 @@ class MemoryRepository:
             memory_id=cast(UUID | None, row["memory_id"]),
             expected_proposal_version=cast(int | None, row["expected_proposal_version"]),
             expected_memory_version=cast(int | None, row["expected_memory_version"]),
+            admin_actor_id=cast(int, row["admin_actor_id"]),
             expires_at=cast(datetime, row["expires_at"]),
         )
 

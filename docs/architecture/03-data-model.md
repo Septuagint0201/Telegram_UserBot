@@ -439,11 +439,17 @@ CHECK redacted_at IS NULL OR 正文、entities、content_sha256 全部已清空
 | `created_at` | TIMESTAMPTZ | DB default |
 | `ready_at` | TIMESTAMPTZ | nullable |
 | `delete_requested_at` | TIMESTAMPTZ | nullable |
+| `delete_claimed_at` | TIMESTAMPTZ | nullable；仅 `delete_pending` 非空 |
+| `delete_lease_expires_at` | TIMESTAMPTZ | nullable；到期后允许重领 |
+| `delete_fencing_token` | BIGINT | 非负，每次 claim 递增 |
+| `delete_attempt_count` | INTEGER | 非负，驱动有界指数退避 |
+| `delete_next_attempt_at` | TIMESTAMPTZ | nullable；清理失败后的下一次资格时间 |
+| `delete_error_code` | TEXT | nullable；稳定错误码，不保存路径或正文 |
 | `deleted_at` | TIMESTAMPTZ | nullable |
 | `retention_class` | TEXT | `media_original_30d/media_provider_copy_24h` |
 | `expires_at` | TIMESTAMPTZ | nullable |
 
-ready、rejected 和 deleted 状态使用 CHECK 保证字段组合一致。`storage_key` 不得包含绝对路径、`..` 或联系人原始文件名。
+清理worker在事务中锁定到期且无引用的ready row，写入`delete_pending`、lease和递增fencing token后先提交，再执行hash-verified文件删除；worker崩溃后由lease到期重领，旧token不能覆盖新claim。失败从1分钟开始指数退避并在1小时封顶；成功后清除`storage_key/sha256`，文件已不存在按幂等成功处理。`storage_key`不得包含绝对路径、`..`或联系人原始文件名。
 
 ### 6.6 `message_media`
 
@@ -1514,23 +1520,25 @@ candidate、superseded/invalidated/forgotten/redacted version 和 raw image pixe
 Memory 管理复用第 12.2 节 `control_commands` 的 Bot update 幂等 identity，并使用 typed extension `memory_review_actions`：
 
 ```text
-control_command_id UUIDv7 PRIMARY KEY/FK
+id UUIDv7 PRIMARY KEY
 account_id
+conversation_id NOT NULL
 action accept|reject|forget
 proposal_id?
 memory_id?
-conversation_id NOT NULL
 expected_proposal_version?
 expected_memory_version_no?
+admin_actor_id
+bot_chat_id
 action_token_hash BYTEA
 expires_at
 used_at?
-state awaiting_confirmation|applied|rejected|expired
+state pending|confirmed|applied|rejected|expired
 reason_code?
 CHECK accept/reject targets proposal and forget targets memory
 ```
 
-proposal和memory target都通过`(id, account_id, conversation_id)`复合外键绑定review action，禁止同账号跨conversation错配。token 绑定 allowlisted admin、Bot chat、action、target 和 expected version，只保存 hash、单次使用。Control确认和worker延迟消费都必须重新检查token/proposal expiry、proposal review version、current evidence revision、target memory version与conversation row lock；command/action 不复制 memory/proposal/message 正文，UI 显示时从仍有效 source 临时渲染最小摘要。
+proposal和memory target都通过`(id, account_id, conversation_id)`复合外键绑定review action，禁止同账号跨conversation错配。token绑定allowlisted admin、Bot chat、action、target和expected version，只保存hash、单次使用。Control确认只把`pending`变为`confirmed`；worker runtime随后使用savepoint执行accept/reject/forget，成功写`applied`，版本或证据冲突写`rejected`和稳定reason code。accept必须记录`human/<admin_actor_id>`决策归属；forget必须注入与credential key分离的至少32-byte erasure-ledger HMAC key。command/action不复制memory/proposal/message正文。
 
 ## 10. Proactive 与关系投影
 

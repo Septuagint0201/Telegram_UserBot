@@ -203,6 +203,21 @@ class PrivateMediaStore:
             raise ValueError("media_hash_mismatch")
         return payload
 
+    def delete_verified(self, *, storage_key: str, expected_sha256: bytes) -> bool:
+        if len(expected_sha256) != 32:
+            raise ValueError("media_hash_invalid")
+        with self._quota_guard():
+            try:
+                target = self.resolve_key(storage_key)
+            except FileNotFoundError:
+                return False
+            with target.open("rb") as handle:
+                actual_sha256 = hashlib.file_digest(handle, "sha256").digest()
+            if actual_sha256 != expected_sha256:
+                raise ValueError("media_hash_mismatch")
+            target.unlink()
+            return True
+
     def cleanup(self, candidates: Iterable[CleanupCandidate], *, now: datetime) -> CleanupReport:
         deleted: list[str] = []
         protected: list[str] = []

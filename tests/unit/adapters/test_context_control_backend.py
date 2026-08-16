@@ -44,12 +44,15 @@ REQUEST = PreviewRequestRecord(
 class RepositoryFake(ContextRepository):
     def __init__(self) -> None:
         self.deliveries: list[tuple[int, str, int | None]] = []
+        self.delivery_deadlines: list[datetime] = []
+        self.preview_failures: list[str] = []
         self.deletion_results: list[tuple[bool, str | None]] = []
         self.deletion_critical = False
         self.claim_result = True
         self.commit_count = 0
         self.initial_states: tuple[str, ...] = ()
         self.prepared_count = 0
+        self.persisted_delete_after: datetime | None = None
         self.summary_record: ContextSummaryRecord | None = None
         self.preview_challenge = PreviewChallenge(
             UUID(int=3), "00000000", NOW + timedelta(minutes=1), SensitiveValue("challenge")
@@ -92,8 +95,15 @@ class RepositoryFake(ContextRepository):
             return None
         self.prepared_count = chunk_count
         states = self.initial_states or ("pending",) * chunk_count
+        effective_delete_after = self.persisted_delete_after or delete_after
         return tuple(
-            PreviewDeliveryRecord(index, index, state, 100 + index if state == "sent" else None)
+            PreviewDeliveryRecord(
+                index,
+                index,
+                state,
+                100 + index if state == "sent" else None,
+                effective_delete_after,
+            )
             for index, state in enumerate(states, 1)
         )
 
@@ -107,6 +117,16 @@ class RepositoryFake(ContextRepository):
     ) -> None:
         self.deliveries.append((ordinal, "pending", None))
 
+    async def fail_preview_delivery(
+        self,
+        *,
+        request: PreviewRequestRecord,
+        now: datetime,
+        error_code: str,
+    ) -> bool:
+        self.preview_failures.append(error_code)
+        return request == REQUEST
+
     async def record_preview_delivery_chunk(  # noqa: PLR0913 - mirrors the repository boundary
         self,
         *,
@@ -118,6 +138,7 @@ class RepositoryFake(ContextRepository):
         delete_after: datetime,
     ) -> None:
         self.deliveries.append((ordinal, state, message_id))
+        self.delivery_deadlines.append(delete_after)
 
     async def finish_preview_delivery(
         self, *, request: PreviewRequestRecord, now: datetime
@@ -173,18 +194,22 @@ class GatewayFake:
         *,
         send_unknown: bool = False,
         send_rejected: bool = False,
+        rejections: int = 0,
         send_unexpected: bool = False,
         delete_fails: bool = False,
     ) -> None:
         self.send_unknown = send_unknown
         self.send_rejected = send_rejected
+        self.rejections = rejections
         self.send_unexpected = send_unexpected
         self.delete_fails = delete_fails
         self.sent = 0
 
     async def send_text(self, *, bot_chat_id: int, text: SensitiveValue[str]) -> int:
         self.sent += 1
-        if self.send_rejected:
+        if self.send_rejected or self.rejections > 0:
+            if self.rejections > 0:
+                self.rejections -= 1
             raise PreviewSendRejectedError("synthetic")
         if self.send_unknown:
             raise PreviewSendUnknownError("synthetic")
@@ -447,7 +472,40 @@ async def test_durable_preview_explicit_rejection_restores_retryable_ordinal() -
             chunks=(SensitiveValue("one"),),
             now=NOW,
         )
-    assert repository.deliveries == [(1, "pending", None)]
+    assert gateway.sent == 2
+    assert repository.deliveries == [(1, "pending", None), (1, "pending", None)]
+    assert repository.preview_failures == ["preview_send_rejected"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_durable_preview_retries_one_explicit_rejection_in_the_same_call() -> None:
+    repository = RepositoryFake()
+    gateway = GatewayFake(rejections=1)
+    result = await backend(repository, RebuilderFake(), gateway).deliver_preview(
+        request=REQUEST,
+        chunks=(SensitiveValue("one"),),
+        now=NOW,
+    )
+    assert result == PreviewDeliveryResult("delivered", 1, 1)
+    assert gateway.sent == 2
+    assert repository.deliveries == [(1, "pending", None), (1, "sent", 102)]
+    assert repository.preview_failures == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_durable_preview_reentry_preserves_original_delete_deadline() -> None:
+    repository = RepositoryFake()
+    repository.persisted_delete_after = NOW + timedelta(minutes=4)
+    later = NOW + timedelta(minutes=1)
+    result = await backend(repository, RebuilderFake(), GatewayFake()).deliver_preview(
+        request=REQUEST,
+        chunks=(SensitiveValue("one"),),
+        now=later,
+    )
+    assert result.state == "delivered"
+    assert repository.delivery_deadlines == [NOW + timedelta(minutes=4)]
 
 
 @pytest.mark.unit

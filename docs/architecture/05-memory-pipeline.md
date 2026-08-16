@@ -1471,6 +1471,8 @@ created_at / decided_at
 
 `memory_proposals.review_version`从1开始，任何使candidate审查快照变化的state/evidence/target变更都使旧expected version失效。Control确认与worker消费分别重检expiry和version；worker在conversation row lock内进一步重检current message revision/hash/redaction以及target memory version，失败时只写受控reason code并拒绝动作。
 
+Control确认只产生`confirmed` action，不等价于事实已修改。`MemoryReviewRuntimeService`以worker事务领取一条confirmed action：accept重建持久化proposal/evidence/target快照并记录人工actor，reject执行proposal version CAS，forget使用独立注入的erasure HMAC key完成ledger和单向redaction；动作应用与`applied/rejected`终态在同一外层事务内提交。
+
 ### 25.6 Index
 
 至少需要：
