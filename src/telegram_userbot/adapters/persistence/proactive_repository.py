@@ -660,6 +660,21 @@ class ProactiveRepository:
             ):
                 raise ValueError("budget reservation key belongs to another scope")
             reservation = _reservation(existing)
+            if (
+                reservation.state is ReservationState.HELD
+                and reservation.expires_at <= current_time
+            ):
+                # An expired hold without a tracked side effect is no longer an
+                # authorization. Release it while the reservation row remains
+                # locked so a retry cannot observe or create a second hold.
+                if (
+                    existing.get("outbound_group_id") is None
+                    and existing.get("copilot_draft_id") is None
+                ):
+                    await self._expire_unbound_hold(existing, now=current_time)
+                # A hold linked to a delivery or draft belongs to crash
+                # reconciliation. Never replay it as a fresh send authorization.
+                return None
             return (
                 reservation
                 if reservation.state
@@ -827,6 +842,47 @@ class ProactiveRepository:
             ReservationState.HELD,
             expiry,
         )
+
+    async def _expire_unbound_hold(self, row: Any, *, now: datetime) -> None:
+        result = cast(
+            CursorResult[Any],
+            await self._session.execute(
+                update(proactive_budget_reservations)
+                .where(
+                    proactive_budget_reservations.c.id == row["id"],
+                    proactive_budget_reservations.c.state == "held",
+                    proactive_budget_reservations.c.expires_at <= now,
+                    proactive_budget_reservations.c.outbound_group_id.is_(None),
+                    proactive_budget_reservations.c.copilot_draft_id.is_(None),
+                )
+                .values(state=ReservationState.EXPIRED.value, terminal_at=now)
+            ),
+        )
+        if result.rowcount != 1:
+            return
+        bucket_ids = [row["account_bucket_id"], row["contact_bucket_id"]]
+        if row["bypass"]:
+            if row["bypass_bucket_id"] is None:
+                raise RuntimeError("bypass reservation has no bypass bucket")
+            bucket_ids.append(row["bypass_bucket_id"])
+        for bucket_id in bucket_ids:
+            bucket_update = cast(
+                CursorResult[Any],
+                await self._session.execute(
+                    update(proactive_budget_buckets)
+                    .where(
+                        proactive_budget_buckets.c.id == bucket_id,
+                        proactive_budget_buckets.c.account_id == row["account_id"],
+                        proactive_budget_buckets.c.held_count > 0,
+                    )
+                    .values(
+                        held_count=proactive_budget_buckets.c.held_count - 1,
+                        version=proactive_budget_buckets.c.version + 1,
+                    )
+                ),
+            )
+            if bucket_update.rowcount != 1:
+                raise RuntimeError("budget bucket expiry CAS failed")
 
     async def settle_budget(
         self,

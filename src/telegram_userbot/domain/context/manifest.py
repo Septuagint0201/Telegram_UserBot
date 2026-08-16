@@ -38,7 +38,7 @@ class ContextSource:
     image_detail: str | None = None
     image_tokens: int = 0
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: PLR0912 - source contract checks are explicit
         if self.canonical_role not in {"system", "developer", "user", "assistant"}:
             raise ValueError("canonical context role is invalid")
         if self.candidate.layer is ContextLayer.INSTRUCTION:
@@ -92,9 +92,12 @@ class ContextSource:
             raise ValueError("context source type does not match its layer")
         if self.image_detail not in {None, "auto"} or self.image_tokens < 0:
             raise ValueError("canonical image metadata is invalid")
-        is_image = self.image_detail == "auto" and self.image_tokens > 0
-        if (self.source_type == "media_object") != is_image:
-            raise ValueError("canonical media source must bind an image budget")
+        if self.source_type == "media_object":
+            if self.image_detail != "auto" or self.image_tokens <= 0:
+                raise ValueError("canonical media source must bind an image budget")
+        elif self.image_detail is not None or self.image_tokens != 0:
+            raise ValueError("non-media source cannot carry image metadata")
+        is_image = self.source_type == "media_object"
         if is_image and self.candidate.layer is not ContextLayer.CURRENT:
             raise ValueError("V1 images must belong to the current turn")
         if not self.content.reveal_for_use():

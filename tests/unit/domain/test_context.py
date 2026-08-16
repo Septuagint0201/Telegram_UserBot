@@ -366,6 +366,10 @@ def test_context_value_objects_reject_invalid_identity_trust_and_scores() -> Non
     for source_value in source_values:
         with pytest.raises(ValueError, match=r"canonical|promoted|source|metadata"):
             replace(source, **source_value)
+    with pytest.raises(ValueError, match="non-media source"):
+        replace(source, image_tokens=1)
+    with pytest.raises(ValueError, match="non-media source"):
+        replace(source, image_detail="auto", image_tokens=1)
 
     instruction = replace(
         source,

@@ -747,6 +747,79 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
 
 
 @pytest.mark.asyncio
+async def test_proactive_budget_expired_hold_is_not_replayed_as_authorization() -> None:
+    account_id, contact_id = uuid4(), uuid4()
+    candidate_id, decision_id, policy_id = uuid4(), uuid4(), uuid4()
+    conversation_id = uuid4()
+    key = b"e" * 32
+    binding = {
+        "candidate_row_id": candidate_id,
+        "account_id": account_id,
+        "contact_id": contact_id,
+        "conversation_id": conversation_id,
+        "generation": 1,
+        "candidate_policy_id": policy_id,
+        "candidate_timezone": "UTC",
+        "decision_row_id": decision_id,
+        "decision_candidate_id": candidate_id,
+        "decision_generation": 1,
+        "decision_contact_id": contact_id,
+        "decision_conversation_id": conversation_id,
+        "decision_policy_id": policy_id,
+        "decision_timezone": "UTC",
+    }
+    row = {
+        "id": uuid4(),
+        "reservation_key": key,
+        "account_id": account_id,
+        "contact_id": contact_id,
+        "conversation_id": conversation_id,
+        "candidate_id": candidate_id,
+        "decision_id": decision_id,
+        "policy_version_id": policy_id,
+        "authorization_generation": 1,
+        "account_bucket_id": uuid4(),
+        "contact_bucket_id": uuid4(),
+        "bypass_bucket_id": None,
+        "account_local_date": NOW.date(),
+        "contact_local_date": NOW.date(),
+        "local_date": NOW.date(),
+        "bypass": False,
+        "state": "held",
+        "expires_at": NOW - timedelta(seconds=1),
+        "outbound_group_id": None,
+        "copilot_draft_id": None,
+    }
+    session = AsyncMock()
+    repo = ProactiveRepository(cast(AsyncSession, session))
+    session.execute.side_effect = [
+        _Result(),
+        _Result(binding),
+        _Result(row),
+        _Result(rowcount=1),
+        _Result(rowcount=1),
+        _Result(rowcount=1),
+    ]
+    assert (
+        await repo.reserve_budget(
+            account_id=account_id,
+            contact_id=contact_id,
+            account_local_date=NOW.date(),
+            contact_local_date=NOW.date(),
+            account_timezone_name="UTC",
+            contact_timezone_name="UTC",
+            limits=BudgetLimits(1, 1),
+            now=NOW,
+            expires_at=row["expires_at"],
+            reservation_key=key,
+            candidate_id=candidate_id,
+            decision_id=decision_id,
+            policy_version_id=policy_id,
+            authorization_generation=1,
+        )
+        is None
+    )
+@pytest.mark.asyncio
 async def test_proactive_decision_replay_rejects_a_different_durable_identity() -> None:
     account_id, candidate_id = uuid4(), uuid4()
     membership_hash = membership_digest(())
