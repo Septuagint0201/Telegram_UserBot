@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from telegram_userbot.domain.conversation.mode import EffectiveMode
@@ -18,6 +18,7 @@ from telegram_userbot.domain.proactive.models import (
     RelationshipLevel,
 )
 from telegram_userbot.domain.proactive.time import load_timezone, quiet_decision
+from telegram_userbot.domain.shared.time import require_aware
 
 
 class ProactiveTarget(StrEnum):
@@ -71,7 +72,12 @@ def map_mode(mode: EffectiveMode) -> ProactiveTarget:
 
 def preliminary_gate(value: AuthorizationInput) -> GateResult:  # noqa: PLR0911, PLR0912 - ordered fail-closed gates
     candidate, decision = value.candidate, value.decision
-    now = value.now.astimezone(UTC)
+    now = require_aware(value.now, "now")
+    meaningful_activity_at = (
+        require_aware(value.meaningful_activity_at, "meaningful_activity_at")
+        if value.meaningful_activity_at is not None
+        else None
+    )
     if decision.candidate_id != candidate.id:
         return GateResult(False, "CANDIDATE_MISMATCH")
     if decision.action is ProactiveAction.NONE:
@@ -92,9 +98,9 @@ def preliminary_gate(value: AuthorizationInput) -> GateResult:  # noqa: PLR0911,
         return GateResult(False, "MODE_SUPPRESSED")
     if not value.evidence_current:
         return GateResult(False, "EVIDENCE_INVALID")
-    if value.meaningful_activity_at is not None and now - value.meaningful_activity_at.astimezone(
-        UTC
-    ) < timedelta(seconds=value.policy.activity_suppression_seconds):
+    if meaningful_activity_at is not None and now - meaningful_activity_at < timedelta(
+        seconds=value.policy.activity_suppression_seconds
+    ):
         return GateResult(False, "CONVERSATION_ACTIVE")
     if value.conflicting_work:
         return GateResult(False, "CONFLICTING_WORK")
@@ -170,6 +176,7 @@ def build_text_only_context(
     relationship: RelationshipLevel,
     freshness: str = "fresh",
 ) -> ProactiveContext:
+    current_time = require_aware(now, "now")
     if decision.candidate_id != candidate.id or decision.topic is None:
         raise ValueError("decision does not bind candidate topic")
     selected = set(decision.selected_occurrence_ids)
@@ -185,7 +192,7 @@ def build_text_only_context(
         topic=decision.topic,
         reasons=reasons,
         timezone_name=candidate.timezone_name,
-        local_time=now.astimezone(load_timezone(candidate.timezone_name)).isoformat(),
+        local_time=current_time.astimezone(load_timezone(candidate.timezone_name)).isoformat(),
         relationship=relationship,
         freshness=freshness,
     )

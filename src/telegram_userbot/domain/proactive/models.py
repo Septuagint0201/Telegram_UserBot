@@ -16,6 +16,8 @@ from math import isfinite
 from typing import Final
 from uuid import UUID
 
+from telegram_userbot.domain.shared.time import require_aware
+
 
 class ReasonCode(StrEnum):
     PROMISE_DUE = "promise_due"
@@ -97,11 +99,6 @@ DECISION_CODES: Final[frozenset[str]] = frozenset(
 def _check_uuid(value: UUID, name: str) -> None:
     if not isinstance(value, UUID):
         raise TypeError(f"{name} must be a UUID")
-
-
-def _check_aware(value: datetime, name: str) -> None:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{name} must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,9 +268,21 @@ class RuleOccurrence:
             _check_uuid(value, name)
         if len(self.occurrence_key) != 32 or self.generation < 1:
             raise ValueError("occurrence identity is invalid")
-        _check_aware(self.window_start_at, "window_start_at")
-        _check_aware(self.window_end_at, "window_end_at")
-        _check_aware(self.hard_deadline_at, "hard_deadline_at")
+        object.__setattr__(
+            self,
+            "window_start_at",
+            require_aware(self.window_start_at, "window_start_at"),
+        )
+        object.__setattr__(
+            self,
+            "window_end_at",
+            require_aware(self.window_end_at, "window_end_at"),
+        )
+        object.__setattr__(
+            self,
+            "hard_deadline_at",
+            require_aware(self.hard_deadline_at, "hard_deadline_at"),
+        )
         if (
             not self.window_start_at < self.window_end_at
             or self.hard_deadline_at > self.window_end_at
@@ -327,8 +336,16 @@ class Candidate:
             item.contact_id != self.contact_id for item in self.occurrences
         ):
             raise ValueError("candidate must contain same-contact occurrences")
-        _check_aware(self.window_start_at, "window_start_at")
-        _check_aware(self.window_end_at, "window_end_at")
+        object.__setattr__(
+            self,
+            "window_start_at",
+            require_aware(self.window_start_at, "window_start_at"),
+        )
+        object.__setattr__(
+            self,
+            "window_end_at",
+            require_aware(self.window_end_at, "window_end_at"),
+        )
         if self.window_start_at >= self.window_end_at:
             raise ValueError("candidate window is invalid")
         if self.mode_version < 1 or self.content_revision < 0 or self.activity_revision < 0:
@@ -358,6 +375,12 @@ class AgentDecision:
             raise ValueError("topic must be a short single-line brief")
         if self.defer_count not in {0, 1}:
             raise ValueError("defer count must be zero or one")
+        if self.defer_until is not None:
+            object.__setattr__(
+                self,
+                "defer_until",
+                require_aware(self.defer_until, "defer_until"),
+            )
         if self.action is ProactiveAction.NONE:
             if (
                 self.selected_occurrence_ids
@@ -401,12 +424,9 @@ class BudgetReservation:
         _check_uuid(self.id, "id")
         _check_uuid(self.account_id, "account_id")
         _check_uuid(self.contact_id, "contact_id")
-        if (
-            len(self.reservation_key) != 32
-            or self.expires_at.tzinfo is None
-            or self.expires_at.utcoffset() is None
-        ):
+        if len(self.reservation_key) != 32:
             raise ValueError("reservation identity or expiry is invalid")
+        object.__setattr__(self, "expires_at", require_aware(self.expires_at, "expires_at"))
 
 
 @dataclass(frozen=True, slots=True)

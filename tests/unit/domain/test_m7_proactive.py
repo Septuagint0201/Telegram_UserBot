@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from hashlib import sha256
 from threading import Thread
 from typing import Any, cast
@@ -731,6 +731,165 @@ def test_m7_model_value_objects_fail_closed_on_invalid_configuration() -> None:
         BudgetLimits(-1, 1)
     with pytest.raises(ValueError, match="idempotency secret is required"):
         derive_key(b"")
+
+
+@pytest.mark.unit
+def test_m7_time_boundaries_reject_naive_values_and_normalize_offsets() -> None:  # noqa: PLR0915
+    p = policy()
+    fact = intention(expected_at=NOW + timedelta(minutes=5))
+    occurrence = materialize_intention(fact, now=NOW, policy=p)[0]
+    candidate = aggregate_candidates((occurrence,), now=NOW, policy=p)[0]
+    decision = AgentDecision(
+        candidate.id,
+        ProactiveAction.SEND_NOW,
+        "timely_support",
+        (occurrence.id,),
+        "check in",
+        0.5,
+    )
+    naive = NOW.replace(tzinfo=None)
+
+    life = LifeEventFact(
+        uuid4(),
+        fact.account_id,
+        fact.contact_id,
+        fact.conversation_id,
+        1,
+        None,
+        None,
+        NOW.date(),
+        "UTC",
+        0.9,
+        (evidence("life_event"),),
+    )
+    explicit = ExplicitFollowupFact(
+        uuid4(),
+        fact.account_id,
+        fact.contact_id,
+        fact.conversation_id,
+        1,
+        NOW + timedelta(hours=1),
+        "UTC",
+        0.9,
+        (evidence(),),
+    )
+    relationship = RelationshipFact(
+        uuid4(),
+        fact.account_id,
+        fact.contact_id,
+        fact.conversation_id,
+        1,
+        RelationshipLevel.FRIEND,
+        NOW - timedelta(days=60),
+        "UTC",
+        (evidence("relationship"),),
+    )
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        materialize_life_event(life, now=naive, policy=p)
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        materialize_intention(fact, now=naive, policy=p)
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        materialize_explicit_followup(explicit, now=naive, policy=p)
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        materialize_reconnect(relationship, now=naive, policy=p)
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        aggregate_candidates((occurrence,), now=naive, policy=p)
+
+    settings = ContactSettings(contact_id=fact.contact_id, minimum_interval=timedelta(hours=1))
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        filter_occurrences(
+            (occurrence,),
+            now=naive,
+            policy=p,
+            settings=settings,
+            account_enabled=True,
+            mode_permits=True,
+        )
+    with pytest.raises(ValueError, match="meaningful_activity_at must be timezone-aware"):
+        filter_occurrences(
+            (occurrence,),
+            now=NOW,
+            policy=p,
+            settings=settings,
+            account_enabled=True,
+            mode_permits=True,
+            meaningful_activity_at=naive,
+        )
+    with pytest.raises(ValueError, match="last_proactive_at must be timezone-aware"):
+        filter_occurrences(
+            (occurrence,),
+            now=NOW,
+            policy=p,
+            settings=settings,
+            account_enabled=True,
+            mode_permits=True,
+            last_proactive_at=naive,
+        )
+
+    authorization = AuthorizationInput(candidate, decision, naive, p, EffectiveMode.AUTO)
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        preliminary_gate(authorization)
+    with pytest.raises(ValueError, match="meaningful_activity_at must be timezone-aware"):
+        preliminary_gate(replace(authorization, now=NOW, meaningful_activity_at=naive))
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        build_text_only_context(
+            candidate, decision, now=naive, relationship=RelationshipLevel.FRIEND
+        )
+    payload = {
+        "schema_version": 1,
+        "action": "send_now",
+        "decision_code": "timely_support",
+        "selected_occurrence_ids": [str(occurrence.id)],
+        "topic": "check in",
+        "priority": 0.5,
+        "defer_until": None,
+    }
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        parse_agent_decision(payload, candidate=candidate, now=naive, policy=p)
+
+    offset = timezone(timedelta(hours=8))
+    normalized_occurrence = replace(
+        occurrence,
+        window_start_at=occurrence.window_start_at.astimezone(offset),
+        window_end_at=occurrence.window_end_at.astimezone(offset),
+        hard_deadline_at=occurrence.hard_deadline_at.astimezone(offset),
+    )
+    assert normalized_occurrence.window_start_at.tzinfo is UTC
+    normalized_candidate = replace(
+        candidate,
+        window_start_at=candidate.window_start_at.astimezone(offset),
+        window_end_at=candidate.window_end_at.astimezone(offset),
+    )
+    assert normalized_candidate.window_end_at.tzinfo is UTC
+    with pytest.raises(ValueError, match="window_start_at must be timezone-aware"):
+        replace(candidate, window_start_at=naive)
+    deferred = AgentDecision(
+        candidate.id,
+        ProactiveAction.DEFER_ONCE,
+        "better_later_in_window",
+        (occurrence.id,),
+        "check in",
+        0.5,
+        (NOW + timedelta(minutes=1)).astimezone(offset),
+        1,
+    )
+    assert deferred.defer_until is not None
+    assert deferred.defer_until.tzinfo is UTC
+    with pytest.raises(ValueError, match="defer_until must be timezone-aware"):
+        replace(deferred, defer_until=naive)
+    reservation = BudgetReservation(
+        uuid4(),
+        sha256(b"reservation").digest(),
+        candidate.account_id,
+        candidate.contact_id,
+        NOW.date(),
+        False,
+        ReservationState.HELD,
+        NOW.astimezone(offset),
+    )
+    assert reservation.expires_at.tzinfo is UTC
+    with pytest.raises(ValueError, match="expires_at must be timezone-aware"):
+        replace(reservation, expires_at=naive)
 
 
 @pytest.mark.unit

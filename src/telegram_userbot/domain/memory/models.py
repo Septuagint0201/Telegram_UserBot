@@ -316,6 +316,13 @@ class MemoryVersion:
     redacted_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "created_at", require_aware(self.created_at, "created_at"))
+        if self.redacted_at is not None:
+            object.__setattr__(
+                self,
+                "redacted_at",
+                require_aware(self.redacted_at, "redacted_at"),
+            )
         if self.version_no <= 0:
             raise ValueError("memory version must be positive")
         if len(self.semantic_key_hash) != 32:
@@ -390,6 +397,7 @@ class SummaryVersion:
     created_at: datetime = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "created_at", require_aware(self.created_at, "created_at"))
         if self.version_no <= 0 or self.range_end_event_id < self.range_start_event_id:
             raise ValueError("summary version range is invalid")
         if not self.content_text.strip():

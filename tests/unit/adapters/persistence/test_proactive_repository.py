@@ -287,6 +287,7 @@ async def test_proactive_persistence_success_paths_are_transaction_shaped() -> N
             }
         ),
         _Result(),
+        _Result(),
         _Result(rowcount=1),
         _Result(rowcount=1),
         _Result(rowcount=1),
@@ -454,13 +455,36 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
         "content_revision": candidate.content_revision,
         "activity_revision": candidate.activity_revision,
     }
+    evidence = occurrence.evidence[0]
+    evidence_row = {
+        "occurrence_id": occurrence.id,
+        "account_id": occurrence.account_id,
+        "ordinal": 1,
+        "source_type": evidence.source_type,
+        "source_id": evidence.source_id,
+        "source_version": evidence.source_version,
+        "source_hash": evidence.source_hash,
+        "summary": evidence.summary,
+        "current": evidence.current,
+        "explicit": evidence.explicit,
+    }
+    membership_row = {
+        "candidate_id": candidate.id,
+        "account_id": candidate.account_id,
+        "ordinal": 1,
+        "occurrence_id": occurrence.id,
+        "occurrence_generation": occurrence.generation,
+        "occurrence_key": occurrence.occurrence_key,
+    }
     session.execute.side_effect = [
         _Result(),
         _Result(occurrence_row),
         _Result(),
+        _Result(rows=[evidence_row]),
         _Result(),
         _Result(candidate_row),
         _Result(),
+        _Result(rows=[membership_row]),
     ]
     repo = ProactiveRepository(cast(AsyncSession, session))
     repo.enqueue_job = AsyncMock(return_value=uuid4())  # type: ignore[method-assign]
@@ -472,6 +496,28 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
         _Result(occurrence_row | {"account_id": uuid4()}),
     ]
     with pytest.raises(ValueError, match="occurrence replay"):
+        await repo.enqueue_candidate(candidate, now=NOW)
+
+    session.execute.side_effect = [
+        _Result(),
+        _Result(occurrence_row),
+        _Result(),
+        _Result(rows=[evidence_row | {"summary": "different"}]),
+    ]
+    with pytest.raises(ValueError, match="evidence replay"):
+        await repo.enqueue_candidate(candidate, now=NOW)
+
+    session.execute.side_effect = [
+        _Result(),
+        _Result(occurrence_row),
+        _Result(),
+        _Result(rows=[evidence_row]),
+        _Result(),
+        _Result(candidate_row),
+        _Result(),
+        _Result(rows=[membership_row | {"occurrence_generation": 2}]),
+    ]
+    with pytest.raises(ValueError, match="membership replay"):
         await repo.enqueue_candidate(candidate, now=NOW)
 
     bad_scope = cast(Candidate, SimpleNamespace(**{**candidate.__dict__, "contact_id": uuid4()}))
@@ -643,6 +689,47 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
     repo = ProactiveRepository(cast(AsyncSession, session))
 
     with pytest.raises(ValueError, match="decision replay"):
+        await repo.record_decision(
+            candidate=candidate,
+            decision=decision,
+            output_hash=output_hash,
+            now=NOW,
+        )
+
+    matching_decision_row = {
+        "id": decision_id,
+        "account_id": account_id,
+        "candidate_id": candidate_id,
+        "generation": 1,
+        "action": decision.action.value,
+        "decision_code": decision.decision_code,
+        "topic": decision.topic,
+        "priority": decision.priority,
+        "defer_until": decision.defer_until,
+        "output_hash": output_hash,
+    }
+    session.execute.side_effect = [
+        _Result(
+            {
+                "id": candidate_id,
+                "generation": 1,
+                "membership_hash": membership_hash,
+                "state": "open",
+            }
+        ),
+        _Result(matching_decision_row),
+        _Result(
+            rows=[
+                {
+                    "decision_id": decision_id,
+                    "account_id": account_id,
+                    "ordinal": 1,
+                    "occurrence_id": uuid4(),
+                }
+            ]
+        ),
+    ]
+    with pytest.raises(ValueError, match="decision membership replay"):
         await repo.record_decision(
             candidate=candidate,
             decision=decision,

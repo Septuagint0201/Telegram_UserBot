@@ -27,6 +27,7 @@ from telegram_userbot.adapters.persistence.schema import (
 )
 from telegram_userbot.domain.context import ContextManifest
 from telegram_userbot.domain.shared.redaction import SensitiveValue
+from telegram_userbot.domain.shared.time import require_aware
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +97,9 @@ class ContextRepository:
         manifest: ContextManifest,
         created_at: datetime,
     ) -> None:
+        created_time = require_aware(created_at, "created_at")
+        if (turn_id is None) == (background_job_id is None):
+            raise ValueError("context_manifest_owner_required")
         if bytes.fromhex(manifest.prompt_bundle_sha256) != prompt_bundle_sha256:
             raise ValueError("context_prompt_snapshot_mismatch")
         if bytes.fromhex(manifest.capability_snapshot_sha256) != capability_snapshot_sha256:
@@ -153,7 +157,7 @@ class ContextRepository:
                 omission_count=len(manifest.omissions),
                 source_revision_vector_sha256=bytes.fromhex(manifest.source_revision_vector_sha256),
                 manifest_sha256=bytes.fromhex(manifest.manifest_sha256),
-                created_at=created_at,
+                created_at=created_time,
             )
         )
         for item in manifest.items:
@@ -297,6 +301,7 @@ class ContextRepository:
         now: datetime,
         ttl: timedelta = timedelta(minutes=5),
     ) -> PreviewChallenge:
+        current_time = require_aware(now, "now")
         manifest = (
             (
                 await self._session.execute(
@@ -318,7 +323,7 @@ class ContextRepository:
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode()).digest()
         request_id = uuid7()
-        expires_at = now + ttl
+        expires_at = current_time + ttl
         await self._session.execute(
             insert(context_preview_requests).values(
                 id=request_id,
@@ -332,7 +337,7 @@ class ContextRepository:
                 source_revision_vector_sha256=manifest["source_revision_vector_sha256"],
                 state="pending_confirmation",
                 token_expires_at=expires_at,
-                created_at=now,
+                created_at=current_time,
             )
         )
         await self._session.execute(
@@ -344,7 +349,7 @@ class ContextRepository:
                 purpose="context_preview_confirm",
                 token_hash=token_hash,
                 expires_at=expires_at,
-                created_at=now,
+                created_at=current_time,
             )
         )
         return PreviewChallenge(
@@ -363,6 +368,7 @@ class ContextRepository:
         bot_identity: str,
         now: datetime,
     ) -> PreviewRequestRecord | None:
+        current_time = require_aware(now, "now")
         token_hash = hashlib.sha256(token.reveal_for_use().encode()).digest()
         row = (
             (
@@ -376,7 +382,7 @@ class ContextRepository:
                         context_preview_tokens.c.admin_user_id == admin_user_id,
                         context_preview_tokens.c.bot_chat_id == bot_chat_id,
                         context_preview_tokens.c.used_at.is_(None),
-                        context_preview_tokens.c.expires_at > now,
+                        context_preview_tokens.c.expires_at > current_time,
                         context_preview_requests.c.bot_identity == bot_identity,
                         context_preview_requests.c.state == "pending_confirmation",
                     )
@@ -403,7 +409,7 @@ class ContextRepository:
             .where(
                 context_preview_tokens.c.id == token_id, context_preview_tokens.c.used_at.is_(None)
             )
-            .values(used_at=now)
+            .values(used_at=current_time)
             .returning(context_preview_tokens.c.id)
         )
         if consumed_token is None:
@@ -414,7 +420,7 @@ class ContextRepository:
                 context_preview_requests.c.id == request_id,
                 context_preview_requests.c.state == "pending_confirmation",
             )
-            .values(state="confirmed", confirmed_at=now)
+            .values(state="confirmed", confirmed_at=current_time)
             .returning(context_preview_requests.c.id)
         )
         if confirmed_request is None:
@@ -457,6 +463,8 @@ class ContextRepository:
         now: datetime,
         delete_after: datetime,
     ) -> None:
+        current_time = require_aware(now, "now")
+        deletion_time = require_aware(delete_after, "delete_after")
         for ordinal, (state, message_id) in enumerate(states, 1):
             await self._session.execute(
                 insert(context_preview_deliveries).values(
@@ -466,8 +474,8 @@ class ContextRepository:
                     ordinal=ordinal,
                     state=state,
                     bot_message_id=message_id,
-                    sent_at=now if state == "sent" else None,
-                    delete_after=delete_after if message_id is not None else None,
+                    sent_at=current_time if state == "sent" else None,
+                    delete_after=deletion_time if message_id is not None else None,
                     last_error_code="send_unknown" if state == "send_unknown" else None,
                 )
             )
@@ -492,8 +500,8 @@ class ContextRepository:
                 state=final_state,
                 chunk_count=len(states),
                 delivered_chunk_count=delivered,
-                delivered_at=now,
-                delete_after=delete_after,
+                delivered_at=current_time,
+                delete_after=deletion_time,
                 last_error_code="send_unknown" if final_state == "send_unknown" else None,
             )
             .returning(context_preview_requests.c.id)
@@ -504,6 +512,7 @@ class ContextRepository:
     async def due_preview_deletions(
         self, *, bot_identity: str, now: datetime, limit: int = 50
     ) -> tuple[PreviewDeletionRecord, ...]:
+        current_time = require_aware(now, "now")
         rows = (
             (
                 await self._session.execute(
@@ -512,7 +521,7 @@ class ContextRepository:
                         context_preview_deliveries.c.bot_identity == bot_identity,
                         context_preview_deliveries.c.state.in_(("sent", "delete_failed")),
                         context_preview_deliveries.c.bot_message_id.is_not(None),
-                        context_preview_deliveries.c.delete_after <= now,
+                        context_preview_deliveries.c.delete_after <= current_time,
                     )
                     .order_by(
                         context_preview_deliveries.c.delete_after,
@@ -551,6 +560,7 @@ class ContextRepository:
         now: datetime,
         error_code: str | None = None,
     ) -> None:
+        current_time = require_aware(now, "now")
         completed_delivery = await self._session.scalar(
             update(context_preview_deliveries)
             .where(
@@ -563,7 +573,7 @@ class ContextRepository:
             )
             .values(
                 state="deleted" if deleted else "delete_failed",
-                deleted_at=now if deleted else None,
+                deleted_at=current_time if deleted else None,
                 last_error_code=None if deleted else error_code or "delete_failed",
             )
             .returning(context_preview_deliveries.c.id)

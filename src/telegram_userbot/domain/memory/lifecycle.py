@@ -16,6 +16,7 @@ from telegram_userbot.domain.memory.models import (
     ProposalState,
 )
 from telegram_userbot.domain.memory.validation import ValidatedProposal
+from telegram_userbot.domain.shared.time import require_aware
 
 
 class MemoryConflictError(RuntimeError):
@@ -75,6 +76,7 @@ class MemoryStore:
         now: datetime | None = None,
         allow_candidate: bool = False,
     ) -> AcceptanceResult:
+        current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         prior = self._proposal_results.get(validated.proposal.id)
         if prior is not None:
             return AcceptanceResult(
@@ -93,7 +95,6 @@ class MemoryStore:
             return result
         if acceptance_kind not in {"automatic", "manual", "reconciliation", "migration"}:
             raise ValueError("unknown acceptance kind")
-        current_time = now or datetime.now(UTC)
         expected_versions = expected_versions or {}
         targets = [self.get(memory_id) for memory_id in proposal.target_memory_ids]
         for target in targets:

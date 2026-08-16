@@ -43,11 +43,19 @@ class SummaryWatermark:
 class SummaryStore:
     versions: dict[UUID, SummaryVersion] = field(default_factory=dict)
     current: dict[UUID, UUID] = field(default_factory=dict)
+    conversations: dict[UUID, UUID] = field(default_factory=dict)
     watermarks: dict[tuple[UUID, SummaryKind], SummaryWatermark] = field(default_factory=dict)
 
     def publish(
-        self, summary: SummaryVersion, *, expected_version: int | None = None
+        self,
+        summary: SummaryVersion,
+        *,
+        conversation_id: UUID,
+        expected_version: int | None = None,
     ) -> SummaryWatermark:
+        bound_conversation_id = self.conversations.get(summary.summary_id)
+        if bound_conversation_id is not None and bound_conversation_id != conversation_id:
+            raise SummaryCoverageError("summary belongs to another conversation")
         current_id = self.current.get(summary.summary_id)
         if current_id is not None:
             current = self.versions[current_id]
@@ -57,14 +65,15 @@ class SummaryStore:
                 raise SummaryCoverageError("summary versions must be contiguous")
         elif summary.version_no != 1:
             raise SummaryCoverageError("first summary version must be one")
-        key = (summary.summary_id, summary.kind)
+        key = (conversation_id, summary.kind)
         watermark = self.watermarks.get(
             key,
-            SummaryWatermark(summary.summary_id, summary.kind),
+            SummaryWatermark(conversation_id, summary.kind),
         )
         advanced = watermark.advance(summary)
         self.versions[summary.id] = summary
         self.current[summary.summary_id] = summary.id
+        self.conversations[summary.summary_id] = conversation_id
         self.watermarks[key] = advanced
         return advanced
 

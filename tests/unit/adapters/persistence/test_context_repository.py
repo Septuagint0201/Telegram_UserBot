@@ -157,3 +157,71 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
             deleted=True,
             now=NOW,
         )
+
+
+@pytest.mark.unit
+async def test_context_repository_rejects_invalid_owner_and_naive_times_before_sql() -> None:
+    fake = FakeSession()
+    repository = ContextRepository(cast(AsyncSession, fake))
+    account_id, conversation_id, owner_id = UUID(int=1), UUID(int=2), UUID(int=3)
+    naive = NOW.replace(tzinfo=None)
+
+    manifest_kwargs = {
+        "account_id": account_id,
+        "conversation_id": conversation_id,
+        "turn_id": owner_id,
+        "background_job_id": None,
+        "context_policy_version_id": UUID(int=4),
+        "retrieval_policy_version_id": UUID(int=5),
+        "prompt_bundle_sha256": b"p" * 32,
+        "capability_snapshot_sha256": b"c" * 32,
+        "manifest": cast(Any, None),
+    }
+    with pytest.raises(ValueError, match="created_at must be timezone-aware"):
+        await repository.save_manifest(**manifest_kwargs, created_at=naive)
+    for owner_fields in (
+        {"turn_id": None, "background_job_id": None},
+        {"turn_id": owner_id, "background_job_id": UUID(int=6)},
+    ):
+        with pytest.raises(ValueError, match="context_manifest_owner_required"):
+            await repository.save_manifest(
+                **(manifest_kwargs | owner_fields),
+                created_at=NOW,
+            )
+
+    request = PreviewRequestRecord(
+        UUID(int=7), UUID(int=8), b"m" * 32, b"s" * 32, "confirmed", 42, 42, "bot"
+    )
+    deletion = PreviewDeletionRecord(1, request.request_id, "bot", 42, 9)
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        await repository.issue_preview(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            manifest_id=request.manifest_id,
+            admin_user_id=42,
+            bot_chat_id=42,
+            bot_identity="bot",
+            now=naive,
+        )
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        await repository.consume_preview(
+            token=SensitiveValue("token"),
+            admin_user_id=42,
+            bot_chat_id=42,
+            bot_identity="bot",
+            now=naive,
+        )
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        await repository.record_preview_delivery(
+            request=request, states=(("sent", 9),), now=naive, delete_after=NOW
+        )
+    with pytest.raises(ValueError, match="delete_after must be timezone-aware"):
+        await repository.record_preview_delivery(
+            request=request, states=(("sent", 9),), now=NOW, delete_after=naive
+        )
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        await repository.due_preview_deletions(bot_identity="bot", now=naive)
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        await repository.finish_preview_deletion(deletion=deletion, deleted=True, now=naive)
+
+    assert fake.statements == []

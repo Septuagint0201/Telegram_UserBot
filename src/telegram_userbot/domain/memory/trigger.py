@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 
+from telegram_userbot.domain.shared.time import require_aware
+
 
 class TriggerReason(StrEnum):
     QUIET_WINDOW = "quiet_window"
@@ -47,8 +49,11 @@ class TriggerInput:
     auto_mode: bool = True
 
     def __post_init__(self) -> None:
-        if self.now.tzinfo is None or self.now.utcoffset() is None:
-            raise ValueError("trigger timestamps must be timezone-aware")
+        object.__setattr__(self, "now", require_aware(self.now, "now"))
+        for name in ("last_eligible_at", "oldest_uncovered_at", "last_compensation_scan_at"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, require_aware(value, name))
         if self.eligible_revision_count < 0 or self.estimated_input_tokens < 0:
             raise ValueError("trigger counters cannot be negative")
 

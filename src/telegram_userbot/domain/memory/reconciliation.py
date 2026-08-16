@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID
 
+from telegram_userbot.domain.shared.time import require_aware
+
 
 class DerivedKind(StrEnum):
     MEMORY = "memory"
@@ -31,12 +33,8 @@ class ErasureEntry:
     content_hash: bytes | None = None
 
     def __post_init__(self) -> None:
-        if (
-            not self.reason
-            or self.erased_at.tzinfo is None
-            or self.erased_at.utcoffset() is None
-            or (self.content_hash is not None and len(self.content_hash) != 32)
-        ):
+        object.__setattr__(self, "erased_at", require_aware(self.erased_at, "erased_at"))
+        if not self.reason or (self.content_hash is not None and len(self.content_hash) != 32):
             raise ValueError("erasure entry is invalid")
         if len(self.derived) != len(set(self.derived)):
             raise ValueError("erasure entry contains duplicate derived references")
@@ -58,12 +56,13 @@ class ReconciliationLedger:
         content_hash: bytes | None = None,
         now: datetime | None = None,
     ) -> ErasureEntry:
+        current_time = datetime.now(UTC) if now is None else require_aware(now, "now")
         if source_id in self.entries:
             return self.entries[source_id]
         entry = ErasureEntry(
             source_id=source_id,
             reason=reason,
-            erased_at=now or datetime.now(UTC),
+            erased_at=current_time,
             derived=tuple(
                 sorted(
                     (
@@ -106,6 +105,13 @@ class FreshnessInput:
     oldest_uncovered_at: datetime | None
     rebuilding: bool = False
     blocked: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "now", require_aware(self.now, "now"))
+        for name in ("last_success_at", "oldest_uncovered_at"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, require_aware(value, name))
 
 
 def calculate_freshness(value: FreshnessInput) -> str:

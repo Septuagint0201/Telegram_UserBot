@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid4
@@ -245,6 +245,7 @@ def test_memory_store_acceptance_is_idempotent_and_forget_redacts_every_version(
 
 def test_summary_membership_period_and_late_source_invalidation() -> None:
     source_id = uuid4()
+    conversation_id = uuid4()
     digest = sha256(b"source").digest()
     summary = SummaryVersion(
         id=uuid4(),
@@ -259,7 +260,7 @@ def test_summary_membership_period_and_late_source_invalidation() -> None:
         status=SummaryStatus.ACTIVE,
     )
     store = SummaryStore()
-    store.publish(summary)
+    store.publish(summary, conversation_id=conversation_id)
     assert store.invalidate_for_sources({source_id}) == 1
     assert store.invalidate_for_sources({source_id}) == 0
     rebuilt = replace(
@@ -270,7 +271,7 @@ def test_summary_membership_period_and_late_source_invalidation() -> None:
         range_end_event_id=3,
         status=SummaryStatus.ACTIVE,
     )
-    store.publish(rebuilt, expected_version=1)
+    store.publish(rebuilt, conversation_id=conversation_id, expected_version=1)
     key, start, end = summary_period(SummaryKind.DAILY, NOW, timezone_name="Asia/Shanghai")
     assert key == "2026-08-15"
     assert start < end
@@ -655,6 +656,20 @@ def test_trigger_generation_guards_and_fencing_fail_closed() -> None:
         TriggerPolicy(revision_threshold=0)
     with pytest.raises(ValueError, match="timezone-aware"):
         TriggerInput(NOW.replace(tzinfo=None), None, None, 0, 0)
+    trigger_values: dict[str, object] = {
+        "now": NOW,
+        "last_eligible_at": None,
+        "oldest_uncovered_at": None,
+        "eligible_revision_count": 0,
+        "estimated_input_tokens": 0,
+        "last_compensation_scan_at": None,
+    }
+    for field in ("last_eligible_at", "oldest_uncovered_at", "last_compensation_scan_at"):
+        with pytest.raises(ValueError, match=f"{field} must be timezone-aware"):
+            _construct(
+                TriggerInput,
+                trigger_values | {field: NOW.replace(tzinfo=None)},
+            )
     with pytest.raises(ValueError, match="negative"):
         TriggerInput(NOW, None, None, -1, 0)
     with pytest.raises(ValueError, match="event range"):
@@ -684,6 +699,7 @@ def test_trigger_generation_guards_and_fencing_fail_closed() -> None:
 def test_summary_version_watermark_and_period_guards() -> None:
     source = SummarySource(uuid4(), "message_revision", sha256(b"source").digest(), 1)
     summary_id = uuid4()
+    conversation_id = uuid4()
 
     def version(number: int, start: int, end: int) -> SummaryVersion:
         return SummaryVersion(
@@ -706,15 +722,18 @@ def test_summary_version_watermark_and_period_guards() -> None:
 
     store = SummaryStore()
     with pytest.raises(SummaryCoverageError, match="first"):
-        store.publish(version(2, 1, 1))
+        store.publish(version(2, 1, 1), conversation_id=conversation_id)
     first = version(1, 1, 1)
-    store.publish(first)
+    first_watermark = store.publish(first, conversation_id=conversation_id)
+    assert first_watermark.conversation_id == conversation_id
+    with pytest.raises(SummaryCoverageError, match="another conversation"):
+        store.publish(version(2, 2, 2), conversation_id=uuid4(), expected_version=1)
     with pytest.raises(SummaryCoverageError, match="pointer"):
-        store.publish(version(2, 2, 2), expected_version=0)
+        store.publish(version(2, 2, 2), conversation_id=conversation_id, expected_version=0)
     with pytest.raises(SummaryCoverageError, match="contiguous"):
-        store.publish(version(3, 2, 2), expected_version=1)
+        store.publish(version(3, 2, 2), conversation_id=conversation_id, expected_version=1)
     second = version(2, 2, 2)
-    store.publish(second, expected_version=1)
+    store.publish(second, conversation_id=conversation_id, expected_version=1)
     assert store.invalidate_for_sources({uuid4()}) == 0
 
     assert not rolling_summary_due(eligible_revision_count=0, estimated_tokens=0)
@@ -896,6 +915,80 @@ def test_evidence_graph_erasure_and_freshness_failure_edges() -> None:
     assert calculate_freshness(FreshnessInput(NOW, NOW, NOW - timedelta(minutes=5))) == "degraded"
 
 
+def test_m6_domain_times_reject_naive_values_and_normalize_offsets() -> None:
+    offset = timezone(timedelta(hours=8))
+    offset_now = NOW.astimezone(offset)
+    digest = sha256(b"time-contract").digest()
+    evidence_item = Evidence(uuid4(), "revision-1", digest)
+    memory_values = {
+        "id": uuid4(),
+        "memory_id": uuid4(),
+        "version_no": 1,
+        "operation": MemoryOperation.CREATE,
+        "memory_type": MemoryType.FACT,
+        "semantic_key_hash": digest,
+        "payload": {"value": "fact"},
+        "rendered_text": "fact",
+        "confidence": 0.9,
+        "importance": 0.5,
+        "acceptance_kind": "automatic",
+        "evidence": (evidence_item,),
+    }
+    version = _construct(
+        MemoryVersion,
+        memory_values | {"created_at": offset_now, "redacted_at": offset_now},
+    )
+    assert version.created_at == version.redacted_at == NOW
+    assert version.created_at.tzinfo is UTC
+    for field in ("created_at", "redacted_at"):
+        with pytest.raises(ValueError, match=f"{field} must be timezone-aware"):
+            _construct(
+                MemoryVersion,
+                memory_values | {field: NOW.replace(tzinfo=None)},
+            )
+
+    summary_values = {
+        "id": uuid4(),
+        "summary_id": uuid4(),
+        "version_no": 1,
+        "kind": SummaryKind.ROLLING,
+        "range_start_event_id": 1,
+        "range_end_event_id": 1,
+        "content_text": "summary",
+        "sources": (SummarySource(uuid4(), "message_revision", digest, 1),),
+        "manifest_sha256": digest,
+    }
+    summary = _construct(SummaryVersion, summary_values | {"created_at": offset_now})
+    assert summary.created_at == NOW
+    assert summary.created_at.tzinfo is UTC
+    with pytest.raises(ValueError, match="created_at must be timezone-aware"):
+        _construct(
+            SummaryVersion,
+            summary_values | {"created_at": NOW.replace(tzinfo=None)},
+        )
+
+    entry = ErasureEntry(uuid4(), "forget", offset_now, ())
+    assert entry.erased_at == NOW
+    assert entry.erased_at.tzinfo is UTC
+    with pytest.raises(ValueError, match="erased_at must be timezone-aware"):
+        ErasureEntry(uuid4(), "forget", NOW.replace(tzinfo=None), ())
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        ReconciliationLedger().forget(
+            uuid4(), reason="forget", derived_ids={}, now=NOW.replace(tzinfo=None)
+        )
+
+    freshness = FreshnessInput(offset_now, offset_now, offset_now)
+    assert freshness.now == freshness.last_success_at == freshness.oldest_uncovered_at == NOW
+    for field in ("now", "last_success_at", "oldest_uncovered_at"):
+        values = {"now": NOW, "last_success_at": NOW, "oldest_uncovered_at": NOW}
+        values[field] = NOW.replace(tzinfo=None)
+        with pytest.raises(ValueError, match=f"{field} must be timezone-aware"):
+            _construct(FreshnessInput, values)
+
+    trigger = TriggerInput(offset_now, offset_now, offset_now, 0, 0, offset_now)
+    assert trigger.now == trigger.last_compensation_scan_at == NOW
+
+
 def test_memory_store_rejects_invalid_acceptance_and_inactive_targets() -> None:
     _manifest_value, source_id = _manifest()
     base = parse_agent_response(
@@ -909,6 +1002,8 @@ def test_memory_store_rejects_invalid_acceptance_and_inactive_targets() -> None:
     accepted = ValidatedProposal(replace(base, id=uuid4()), ProposalState.ACCEPTED)
     with pytest.raises(ValueError, match="acceptance kind"):
         store.accept(accepted, acceptance_kind="unknown")
+    with pytest.raises(ValueError, match="now must be timezone-aware"):
+        store.accept(accepted, now=NOW.replace(tzinfo=None))
     created = store.accept(accepted)
     assert created.memory_id is not None
     duplicate = ValidatedProposal(replace(base, id=uuid4()), ProposalState.ACCEPTED)

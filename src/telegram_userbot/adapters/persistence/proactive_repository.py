@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
@@ -117,6 +118,23 @@ class ProactiveRepository:
                     )
                     .on_conflict_do_nothing(constraint="pk_proactive_occurrence_evidence")
                 )
+            persisted_evidence = (
+                (
+                    await self._session.execute(
+                        select(proactive_occurrence_evidence)
+                        .where(
+                            proactive_occurrence_evidence.c.occurrence_id == occurrence.id,
+                            proactive_occurrence_evidence.c.account_id == occurrence.account_id,
+                        )
+                        .order_by(proactive_occurrence_evidence.c.ordinal)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            if not _occurrence_evidence_matches(persisted_evidence, occurrence):
+                raise ValueError("occurrence evidence replay does not match durable identity")
         await self._session.execute(
             postgresql_insert(proactive_candidates)
             .values(
@@ -166,6 +184,23 @@ class ProactiveRepository:
                 )
                 .on_conflict_do_nothing(constraint="pk_proactive_candidate_memberships")
             )
+        persisted_memberships = (
+            (
+                await self._session.execute(
+                    select(proactive_candidate_memberships)
+                    .where(
+                        proactive_candidate_memberships.c.candidate_id == persisted_candidate_id,
+                        proactive_candidate_memberships.c.account_id == candidate.account_id,
+                    )
+                    .order_by(proactive_candidate_memberships.c.ordinal)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if not _candidate_memberships_match(persisted_memberships, candidate):
+            raise ValueError("candidate membership replay does not match durable identity")
         await self.enqueue_job(
             account_id=candidate.account_id,
             idempotency_key=candidate.candidate_key,
@@ -781,6 +816,28 @@ class ProactiveRepository:
         if existing is not None:
             if not _decision_matches(existing, candidate, decision, output_hash):
                 raise ValueError("decision replay does not match durable identity")
+            persisted_memberships = (
+                (
+                    await self._session.execute(
+                        select(proactive_decision_memberships)
+                        .where(
+                            proactive_decision_memberships.c.decision_id == existing["id"],
+                            proactive_decision_memberships.c.account_id == candidate.account_id,
+                        )
+                        .order_by(proactive_decision_memberships.c.ordinal)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            if not _decision_memberships_match(
+                persisted_memberships,
+                decision,
+                decision_id=cast(UUID, existing["id"]),
+                account_id=candidate.account_id,
+            ):
+                raise ValueError("decision membership replay does not match durable identity")
             return cast(UUID, existing["id"])
         if current_candidate["state"] not in {"open", "evaluating"}:
             raise ValueError("candidate is already terminal")
@@ -813,6 +870,28 @@ class ProactiveRepository:
                 )
                 .on_conflict_do_nothing(constraint="pk_proactive_decision_memberships")
             )
+        persisted_memberships = (
+            (
+                await self._session.execute(
+                    select(proactive_decision_memberships)
+                    .where(
+                        proactive_decision_memberships.c.decision_id == decision_id,
+                        proactive_decision_memberships.c.account_id == candidate.account_id,
+                    )
+                    .order_by(proactive_decision_memberships.c.ordinal)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if not _decision_memberships_match(
+            persisted_memberships,
+            decision,
+            decision_id=decision_id,
+            account_id=candidate.account_id,
+        ):
+            raise ValueError("decision membership replay does not match durable identity")
         target_state = {
             ProactiveAction.SEND_NOW: "send_selected",
             ProactiveAction.DEFER_ONCE: "deferred_once",
@@ -914,6 +993,70 @@ def _candidate_matches(row: Any, candidate: Candidate) -> bool:
             "content_revision": candidate.content_revision,
             "activity_revision": candidate.activity_revision,
         }.items()
+    )
+
+
+def _occurrence_evidence_matches(rows: Sequence[Any], occurrence: Any) -> bool:
+    if len(rows) != len(occurrence.evidence):
+        return False
+    return all(
+        all(
+            row[column] == value
+            for column, value in {
+                "occurrence_id": occurrence.id,
+                "account_id": occurrence.account_id,
+                "ordinal": ordinal,
+                "source_type": evidence.source_type,
+                "source_id": evidence.source_id,
+                "source_version": evidence.source_version,
+                "source_hash": evidence.source_hash,
+                "summary": evidence.summary,
+                "current": evidence.current,
+                "explicit": evidence.explicit,
+            }.items()
+        )
+        for ordinal, (row, evidence) in enumerate(zip(rows, occurrence.evidence, strict=True), 1)
+    )
+
+
+def _candidate_memberships_match(rows: Sequence[Any], candidate: Candidate) -> bool:
+    if len(rows) != len(candidate.occurrences):
+        return False
+    return all(
+        all(
+            row[column] == value
+            for column, value in {
+                "candidate_id": candidate.id,
+                "account_id": candidate.account_id,
+                "ordinal": ordinal,
+                "occurrence_id": occurrence.id,
+                "occurrence_generation": occurrence.generation,
+                "occurrence_key": occurrence.occurrence_key,
+            }.items()
+        )
+        for ordinal, (row, occurrence) in enumerate(
+            zip(rows, candidate.occurrences, strict=True), 1
+        )
+    )
+
+
+def _decision_memberships_match(
+    rows: Sequence[Any],
+    decision: AgentDecision,
+    *,
+    decision_id: UUID,
+    account_id: UUID,
+) -> bool:
+    if len(rows) != len(decision.selected_occurrence_ids):
+        return False
+    return all(
+        row["decision_id"] == decision_id
+        and row["account_id"] == account_id
+        and row["ordinal"] == ordinal
+        and row["occurrence_id"] == occurrence_id
+        for ordinal, (row, occurrence_id) in enumerate(
+            zip(rows, decision.selected_occurrence_ids, strict=True), 1
+        )
     )
 
 

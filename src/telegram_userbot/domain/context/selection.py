@@ -5,6 +5,8 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
+from telegram_userbot.domain.shared.time import require_aware
+
 
 class ContextLayer(StrEnum):
     INSTRUCTION = "instruction"
@@ -62,6 +64,12 @@ class Candidate:
             raise ValueError("context score features must be normalized")
         if self.exact_distance is not None and self.exact_distance < 0:
             raise ValueError("exact distance cannot be negative")
+        if self.occurred_at is not None:
+            object.__setattr__(
+                self,
+                "occurred_at",
+                require_aware(self.occurred_at, "occurred_at"),
+            )
 
 
 def select_structured(

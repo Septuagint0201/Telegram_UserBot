@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid7
 
 import pytest
@@ -68,6 +68,18 @@ def test_structured_and_semantic_selection_are_stable_exact_and_single_space() -
             (candidate(ContextLayer.SEMANTIC_MEMORY, "memory:5", space=uuid7(), distance=0.1),),
             active_space_id=space,
         )
+
+
+@pytest.mark.unit
+def test_context_candidate_requires_aware_time_and_normalizes_to_utc() -> None:
+    offset_time = datetime(2030, 1, 1, 8, tzinfo=timezone(timedelta(hours=8)))
+    normalized = replace(candidate(ContextLayer.RECENT, "message:offset"), occurred_at=offset_time)
+    assert normalized.occurred_at == NOW
+    assert normalized.occurred_at is not None
+    assert normalized.occurred_at.tzinfo is UTC
+
+    with pytest.raises(ValueError, match="occurred_at must be timezone-aware"):
+        replace(normalized, occurred_at=offset_time.replace(tzinfo=None))
 
 
 @pytest.mark.unit

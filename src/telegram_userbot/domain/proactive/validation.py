@@ -17,6 +17,7 @@ from telegram_userbot.domain.proactive.models import (
     ProactivePolicy,
 )
 from telegram_userbot.domain.proactive.time import quiet_decision
+from telegram_userbot.domain.shared.time import require_aware
 
 
 class ProactiveValidationError(ValueError):
@@ -81,6 +82,7 @@ def parse_agent_decision(  # noqa: PLR0912 - strict schema branches fail closed
     now: datetime,
     policy: ProactivePolicy,
 ) -> AgentDecision:
+    current_time = require_aware(now, "now")
     raw = _object(payload, "$")
     _strict_fields(raw)
     if raw["schema_version"] != 1:
@@ -155,7 +157,7 @@ def parse_agent_decision(  # noqa: PLR0912 - strict schema branches fail closed
     if action is ProactiveAction.SEND_NOW and defer_until is not None:
         raise ProactiveValidationError("defer_field_forbidden", "send_now cannot set defer_until")
     if action is ProactiveAction.DEFER_ONCE:
-        if defer_until is None or not now.astimezone(UTC) < defer_until < candidate.window_end_at:
+        if defer_until is None or not current_time < defer_until < candidate.window_end_at:
             raise ProactiveValidationError(
                 "defer_out_of_window", "defer must remain in candidate window"
             )

@@ -27,6 +27,7 @@ from telegram_userbot.domain.proactive.time import (
     local_interval_to_utc,
     quiet_decision,
 )
+from telegram_userbot.domain.shared.time import require_aware
 
 OCCURRENCE_NAMESPACE = UUID("b62f7b0f-8e7e-4e6b-8f55-49f4cc3298e6")
 
@@ -164,6 +165,7 @@ def materialize_life_event(
     policy: ProactivePolicy,
     secret: bytes = b"synthetic-proactive-key",
 ) -> tuple[RuleOccurrence, ...]:
+    now_utc = require_aware(now, "now")
     if fact.status != "active" or fact.importance < 0 or fact.importance > 1:
         return ()
     results: list[RuleOccurrence] = []
@@ -171,7 +173,7 @@ def materialize_life_event(
         window_start, window_end = local_interval_to_utc(
             fact.local_date, wall_time(9), wall_time(12), fact.timezone_name
         )
-        if window_end > now.astimezone(UTC):
+        if window_end > now_utc:
             results.append(
                 _occurrence(
                     account_id=fact.account_id,
@@ -193,7 +195,7 @@ def materialize_life_event(
         if fact.followup_allowed:
             follow_start = window_end
             follow_end = window_end + timedelta(hours=24)
-            if follow_end > now.astimezone(UTC):
+            if follow_end > now_utc:
                 results.append(
                     _occurrence(
                         account_id=fact.account_id,
@@ -219,7 +221,7 @@ def materialize_life_event(
             )
         else:
             window_start, window_end = start - timedelta(hours=24), start - timedelta(hours=2)
-        if window_end > now.astimezone(UTC):
+        if window_end > now_utc:
             results.append(
                 _occurrence(
                     account_id=fact.account_id,
@@ -249,7 +251,7 @@ def materialize_life_event(
                 if fact.end_at
                 else start + timedelta(hours=24)
             )
-            if follow_end > now.astimezone(UTC):
+            if follow_end > now_utc:
                 results.append(
                     _occurrence(
                         account_id=fact.account_id,
@@ -277,6 +279,7 @@ def materialize_intention(
     policy: ProactivePolicy,
     secret: bytes = b"synthetic-proactive-key",
 ) -> tuple[RuleOccurrence, ...]:
+    now_utc = require_aware(now, "now")
     if (
         fact.status != "active"
         or fact.owner != "self"
@@ -286,7 +289,7 @@ def materialize_intention(
         return ()
     expected = _aware(fact.expected_at)
     end = expected + timedelta(hours=2)
-    if end <= now.astimezone(UTC):
+    if end <= now_utc:
         return ()
     return (
         _occurrence(
@@ -315,11 +318,12 @@ def materialize_explicit_followup(
     policy: ProactivePolicy,
     secret: bytes = b"synthetic-proactive-key",
 ) -> tuple[RuleOccurrence, ...]:
+    now_utc = require_aware(now, "now")
     if fact.status != "active" or fact.expected_at is None:
         return ()
     start = _aware(fact.expected_at)
     end = start + timedelta(hours=6)
-    if end <= now.astimezone(UTC):
+    if end <= now_utc:
         return ()
     return (
         _occurrence(
@@ -347,6 +351,7 @@ def materialize_reconnect(
     policy: ProactivePolicy,
     secret: bytes = b"synthetic-proactive-key",
 ) -> tuple[RuleOccurrence, ...]:
+    now_utc = require_aware(now, "now")
     if (
         fact.relationship not in {RelationshipLevel.CLOSE, RelationshipLevel.FRIEND}
         or fact.last_meaningful_at is None
@@ -358,11 +363,11 @@ def materialize_reconnect(
         else policy.friend_reconnect_after
     )
     last = _aware(fact.last_meaningful_at)
-    if now.astimezone(UTC) - last < threshold:
+    if now_utc - last < threshold:
         return ()
-    local_date = now.astimezone(load_timezone(fact.timezone_name)).date()
+    local_date = now_utc.astimezone(load_timezone(fact.timezone_name)).date()
     start, end = local_interval_to_utc(local_date, wall_time(8), wall_time(22), fact.timezone_name)
-    if end <= now.astimezone(UTC):
+    if end <= now_utc:
         return ()
     return (
         _occurrence(
@@ -372,7 +377,7 @@ def materialize_reconnect(
             source_id=fact.id,
             source_version=fact.version,
             reason=ReasonCode.RELATIONSHIP_RECONNECT,
-            start=max(start, now.astimezone(UTC)),
+            start=max(start, now_utc),
             end=end,
             timezone_name=fact.timezone_name,
             importance=0.50,
@@ -397,7 +402,17 @@ def filter_occurrences(  # noqa: PLR0912, PLR0913 - each suppression gate is exp
 ) -> FilterResult:
     eligible: list[RuleOccurrence] = []
     suppressed: list[tuple[RuleOccurrence, SuppressionReason]] = []
-    now_utc = now.astimezone(UTC)
+    now_utc = require_aware(now, "now")
+    activity_time = (
+        require_aware(meaningful_activity_at, "meaningful_activity_at")
+        if meaningful_activity_at is not None
+        else None
+    )
+    last_proactive_time = (
+        require_aware(last_proactive_at, "last_proactive_at")
+        if last_proactive_at is not None
+        else None
+    )
     for occurrence in occurrences:
         reason: SuppressionReason | None = None
         if not account_enabled or not settings.enabled:
@@ -412,21 +427,24 @@ def filter_occurrences(  # noqa: PLR0912, PLR0913 - each suppression gate is exp
             reason = SuppressionReason.WINDOW_EXPIRED
         elif not mode_permits:
             reason = SuppressionReason.MODE_SUPPRESSED
-        elif meaningful_activity_at is not None and now_utc - meaningful_activity_at.astimezone(
-            UTC
-        ) < timedelta(seconds=policy.activity_suppression_seconds):
+        elif activity_time is not None and now_utc - activity_time < timedelta(
+            seconds=policy.activity_suppression_seconds
+        ):
             reason = SuppressionReason.CONVERSATION_ACTIVE
         elif conflicting_work:
             reason = SuppressionReason.CONFLICTING_WORK
         elif (
             settings.minimum_interval is not None
-            and last_proactive_at is not None
-            and now_utc - last_proactive_at.astimezone(UTC) < settings.minimum_interval
+            and last_proactive_time is not None
+            and now_utc - last_proactive_time < settings.minimum_interval
         ):
             reason = SuppressionReason.MINIMUM_INTERVAL
         if reason is None:
             quiet = quiet_decision(
-                now, timezone_name=occurrence.timezone_name, policy=policy, occurrence=occurrence
+                now_utc,
+                timezone_name=occurrence.timezone_name,
+                policy=policy,
+                occurrence=occurrence,
             )
             if quiet.blocked:
                 reason = SuppressionReason.QUIET_HOURS
@@ -449,6 +467,7 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
 ) -> tuple[Candidate, ...]:
     """Aggregate only overlapping windows; never merge unrelated time windows."""
 
+    now_utc = require_aware(now, "now")
     grouped: dict[UUID, list[RuleOccurrence]] = {}
     for occurrence in occurrences:
         grouped.setdefault(occurrence.contact_id, []).append(occurrence)
@@ -506,7 +525,7 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
                     generation=1,
                     membership_hash=member_hash,
                     occurrences=tuple(cluster),
-                    window_start_at=max(start, now.astimezone(UTC)),
+                    window_start_at=max(start, now_utc),
                     window_end_at=end,
                     policy_version_id=policy.version_id,
                     timezone_name=cluster[0].timezone_name,
