@@ -940,19 +940,23 @@ async def test_m5_media_cleanup_reclaims_lease_fences_stale_worker_and_retries(
         assert replacement[0].fencing_token > first[0].fencing_token
 
         async with factory() as stale_worker, stale_worker.begin():
-            assert not await MediaRepository(stale_worker).finish_deletion(
-                deletion=first[0],
-                deleted=True,
-                now=NOW + timedelta(minutes=1),
-            )
+            assert not (
+                await MediaRepository(stale_worker).finish_deletion(
+                    deletion=first[0],
+                    deleted=True,
+                    now=NOW + timedelta(minutes=1),
+                )
+            ).completed
 
         async with factory() as failed_worker, failed_worker.begin():
-            assert await MediaRepository(failed_worker).finish_deletion(
-                deletion=replacement[0],
-                deleted=False,
-                now=NOW + timedelta(minutes=1),
-                error_code="synthetic_delete_failure",
-            )
+            assert (
+                await MediaRepository(failed_worker).finish_deletion(
+                    deletion=replacement[0],
+                    deleted=False,
+                    now=NOW + timedelta(minutes=1),
+                    error_code="synthetic_delete_failure",
+                )
+            ).completed
 
         async with factory() as backoff_worker, backoff_worker.begin():
             assert not await MediaRepository(backoff_worker).claim_expired(
@@ -967,11 +971,13 @@ async def test_m5_media_cleanup_reclaims_lease_fences_stale_worker_and_retries(
         assert retry[0].attempt_count == 3
 
         async with factory() as final_worker, final_worker.begin():
-            assert await MediaRepository(final_worker).finish_deletion(
-                deletion=retry[0],
-                deleted=True,
-                now=NOW + timedelta(minutes=3),
-            )
+            assert (
+                await MediaRepository(final_worker).finish_deletion(
+                    deletion=retry[0],
+                    deleted=True,
+                    now=NOW + timedelta(minutes=3),
+                )
+            ).completed
 
         async with factory() as reader:
             row = (

@@ -16,6 +16,7 @@ from telegram_userbot.domain.shared.time import require_aware
 DEFAULT_MEDIA_DELETE_LEASE = timedelta(minutes=5)
 MEDIA_DELETE_RETRY_BASE = timedelta(minutes=1)
 MEDIA_DELETE_RETRY_CAP = timedelta(hours=1)
+MEDIA_DELETE_CRITICAL_AFTER = timedelta(hours=24)
 
 
 def _media_delete_backoff(attempt_count: int) -> timedelta:
@@ -33,6 +34,14 @@ class MediaDeletionLease:
     sha256: bytes
     fencing_token: int
     attempt_count: int
+    first_failed_at: datetime | None = None
+    critical_alerted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class MediaDeletionOutcome:
+    completed: bool
+    critical_alert: bool = False
 
 
 class MediaRepository:
@@ -241,6 +250,8 @@ class MediaRepository:
                     sha256=cast(bytes, row["sha256"]),
                     fencing_token=cast(int, fencing_token),
                     attempt_count=cast(int, row["delete_attempt_count"]) + 1,
+                    first_failed_at=cast(datetime | None, row["delete_first_failed_at"]),
+                    critical_alerted=row["delete_critical_alerted_at"] is not None,
                 )
             )
         return tuple(leases)
@@ -252,8 +263,15 @@ class MediaRepository:
         deleted: bool,
         now: datetime,
         error_code: str | None = None,
-    ) -> bool:
+    ) -> MediaDeletionOutcome:
         current_time = require_aware(now, "now")
+        first_failed_at = deletion.first_failed_at or current_time
+        critical_alert = (
+            not deleted
+            and deletion.first_failed_at is not None
+            and not deletion.critical_alerted
+            and current_time >= deletion.first_failed_at + MEDIA_DELETE_CRITICAL_AFTER
+        )
         values: dict[str, object] = {
             "status": "deleted" if deleted else "failed",
             "delete_claimed_at": None,
@@ -264,6 +282,10 @@ class MediaRepository:
             "delete_error_code": None if deleted else error_code or "media_delete_failed",
             "deleted_at": current_time if deleted else None,
         }
+        if not deleted:
+            values["delete_first_failed_at"] = first_failed_at
+            if critical_alert:
+                values["delete_critical_alerted_at"] = current_time
         if deleted:
             values.update(storage_key=None, sha256=None)
         result = cast(
@@ -281,4 +303,5 @@ class MediaRepository:
                 .values(**values)
             ),
         )
-        return result.rowcount == 1
+        completed = result.rowcount == 1
+        return MediaDeletionOutcome(completed, completed and critical_alert)

@@ -17,6 +17,7 @@ def test_m7_status_documents_are_consistent() -> None:
     assert "M7-001" in todo
     assert "0018_m5_retry_budget_proof" in compatibility
     assert "0019_m5_m6_recovery_execution" in compatibility
+    assert "0020_m5_m7_review_hardening" in compatibility
     assert "M7" in plan
     assert "M7" in readme
     assert "M7" in design

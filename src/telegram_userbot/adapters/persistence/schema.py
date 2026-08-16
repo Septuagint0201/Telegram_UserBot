@@ -398,6 +398,8 @@ media_objects = Table(
     Column("delete_fencing_token", BigInteger, nullable=False, server_default=text("0")),
     Column("delete_attempt_count", Integer, nullable=False, server_default=text("0")),
     Column("delete_next_attempt_at", UTC_TIMESTAMP),
+    Column("delete_first_failed_at", UTC_TIMESTAMP),
+    Column("delete_critical_alerted_at", UTC_TIMESTAMP),
     Column("delete_error_code", Text),
     Column("deleted_at", UTC_TIMESTAMP),
     Column("retention_class", Text, nullable=False),
@@ -428,11 +430,15 @@ media_objects = Table(
     ),
     CheckConstraint(
         "(status = 'failed' AND delete_requested_at IS NOT NULL AND "
-        "delete_next_attempt_at IS NOT NULL) OR "
+        "delete_next_attempt_at IS NOT NULL AND delete_first_failed_at IS NOT NULL) OR "
         "(status = 'failed' AND delete_requested_at IS NULL AND "
-        "delete_next_attempt_at IS NULL) OR "
+        "delete_next_attempt_at IS NULL AND delete_first_failed_at IS NULL) OR "
         "(status <> 'failed' AND delete_next_attempt_at IS NULL)",
         name="delete_retry_state_match",
+    ),
+    CheckConstraint(
+        "delete_critical_alerted_at IS NULL OR delete_first_failed_at IS NOT NULL",
+        name="delete_critical_requires_failure",
     ),
     CheckConstraint(
         "storage_key IS NULL OR (storage_key !~ '(^/|(^|/)\\.\\.(/|$)|\\\\)')",
@@ -2965,6 +2971,11 @@ memory_input_manifest_items = Table(
         name="inclusion_role_values",
     ),
     CheckConstraint(
+        "trust_class IN ('user_statement','observed','trusted_derived',"
+        "'model_inference','external')",
+        name="trust_class_values",
+    ),
+    CheckConstraint(
         "((source_type = 'message_revision' AND message_revision_id IS NOT NULL AND "
         "media_object_id IS NULL AND memory_version_id IS NULL AND summary_version_id IS NULL) OR "
         "(source_type = 'media_object' AND media_object_id IS NOT NULL AND "
@@ -3331,6 +3342,15 @@ memory_proposal_evidence = Table(
     CheckConstraint(
         "quoted_span_end IS NULL OR quoted_span_end > quoted_span_start", name="span_end_valid"
     ),
+    CheckConstraint(
+        "evidence_role IN ('primary','supporting','contradicting')",
+        name="evidence_role_values",
+    ),
+    CheckConstraint(
+        "trust_class IN ('user_statement','observed','trusted_derived',"
+        "'model_inference','external')",
+        name="trust_class_values",
+    ),
     CheckConstraint("octet_length(source_content_sha256) = 32", name="source_hash_32_bytes"),
 )
 Index("ix_memory_proposal_evidence_revision", memory_proposal_evidence.c.message_revision_id)
@@ -3382,6 +3402,15 @@ memory_evidence = Table(
     ),
     CheckConstraint(
         "media_object_id IS NULL OR message_revision_id IS NOT NULL", name="media_requires_message"
+    ),
+    CheckConstraint(
+        "evidence_role IN ('primary','supporting','contradicting')",
+        name="evidence_role_values",
+    ),
+    CheckConstraint(
+        "trust_class IN ('user_statement','observed','trusted_derived',"
+        "'model_inference','external')",
+        name="trust_class_values",
     ),
     CheckConstraint("octet_length(source_content_sha256) = 32", name="source_hash_32_bytes"),
 )

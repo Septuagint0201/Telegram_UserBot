@@ -94,6 +94,8 @@ async def test_media_cleanup_claim_rechecks_references_after_lock_wait() -> None
                 "sha256": b"a" * 32,
                 "delete_fencing_token": 0,
                 "delete_attempt_count": 0,
+                "delete_first_failed_at": None,
+                "delete_critical_alerted_at": None,
             },
             {
                 "id": second,
@@ -103,6 +105,8 @@ async def test_media_cleanup_claim_rechecks_references_after_lock_wait() -> None
                 "sha256": b"b" * 32,
                 "delete_fencing_token": 3,
                 "delete_attempt_count": 2,
+                "delete_first_failed_at": datetime(2029, 12, 31, tzinfo=UTC),
+                "delete_critical_alerted_at": None,
             },
         ]
     )
@@ -110,7 +114,15 @@ async def test_media_cleanup_claim_rechecks_references_after_lock_wait() -> None
     repository = MediaRepository(cast(AsyncSession, session))
 
     assert await repository.claim_expired(now=datetime(2030, 1, 1, tzinfo=UTC)) == (
-        MediaDeletionLease(second, account_id, "second.png", b"b" * 32, 4, 3),
+        MediaDeletionLease(
+            second,
+            account_id,
+            "second.png",
+            b"b" * 32,
+            4,
+            3,
+            datetime(2029, 12, 31, tzinfo=UTC),
+        ),
     )
     pg_dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
     select_sql = str(session.execute.await_args.args[0].compile(dialect=pg_dialect))
@@ -132,20 +144,40 @@ async def test_media_cleanup_finish_uses_fencing_and_exponential_backoff() -> No
     lease = MediaDeletionLease(uuid7(), uuid7(), "object.png", b"h" * 32, 7, 3)
     now = datetime(2030, 1, 1, tzinfo=UTC)
 
-    assert await repository.finish_deletion(
+    outcome = await repository.finish_deletion(
         deletion=lease,
         deleted=False,
         now=now,
         error_code="synthetic_failure",
     )
+    assert outcome.completed
+    assert not outcome.critical_alert
     statement = session.execute.await_args.args[0]
     params = statement.compile().params
     assert lease.fencing_token in params.values()
     assert now + timedelta(minutes=4) in params.values()
     assert "synthetic_failure" in params.values()
+    assert now in params.values()
 
     session.execute.return_value = _Result(rowcount=0)
-    assert not await repository.finish_deletion(deletion=lease, deleted=True, now=now)
+    assert not (await repository.finish_deletion(deletion=lease, deleted=True, now=now)).completed
+
+    session.execute.return_value = _Result(rowcount=1)
+    critical = await repository.finish_deletion(
+        deletion=MediaDeletionLease(
+            lease.object_id,
+            lease.account_id,
+            lease.storage_key,
+            lease.sha256,
+            lease.fencing_token,
+            4,
+            now - timedelta(hours=24),
+        ),
+        deleted=False,
+        now=now,
+    )
+    assert critical == type(critical)(completed=True, critical_alert=True)
+    assert "delete_critical_alerted_at" in str(session.execute.await_args.args[0])
 
 
 @pytest.mark.unit

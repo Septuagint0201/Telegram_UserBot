@@ -23,7 +23,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 async def test_empty_base_round_trip_reaches_exact_head_and_vector(
     postgres_engine: AsyncEngine,
 ) -> None:
-    assert await schema_is_ready(postgres_engine, "0019_m5_m6_recovery_execution")
+    assert await schema_is_ready(postgres_engine, "0020_m5_m7_review_hardening")
     async with postgres_engine.connect() as connection:
         tables = await connection.run_sync(lambda sync: set(inspect(sync).get_table_names()))
         version = await connection.scalar(text("SHOW server_version"))

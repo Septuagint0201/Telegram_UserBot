@@ -423,6 +423,29 @@ async def test_m6_embedding_indexes_and_dimension_binding_match_architecture(
 
 
 @pytest.mark.integration
+async def test_m6_evidence_enums_are_database_constrained(db_session: AsyncSession) -> None:
+    names = set(
+        await db_session.scalars(
+            text(
+                "SELECT conname FROM pg_constraint WHERE conname IN ("
+                "'ck_memory_input_manifest_items_trust_class_values',"
+                "'ck_memory_proposal_evidence_trust_class_values',"
+                "'ck_memory_proposal_evidence_evidence_role_values',"
+                "'ck_memory_evidence_trust_class_values',"
+                "'ck_memory_evidence_evidence_role_values')"
+            )
+        )
+    )
+    assert names == {
+        "ck_memory_input_manifest_items_trust_class_values",
+        "ck_memory_proposal_evidence_trust_class_values",
+        "ck_memory_proposal_evidence_evidence_role_values",
+        "ck_memory_evidence_trust_class_values",
+        "ck_memory_evidence_evidence_role_values",
+    }
+
+
+@pytest.mark.integration
 async def test_m6_roles_keep_control_out_of_derived_truth_and_allow_review_commands(
     db_session: AsyncSession,
 ) -> None:
@@ -561,7 +584,7 @@ async def test_m6_confirmed_review_actions_execute_accept_reject_and_forget(
                         evidence_role="primary",
                         source_content_sha256=content_hash,
                         source_normalization_version="unicode-codepoint-v1",
-                        trust_class="untrusted_user",
+                        trust_class="user_statement",
                     )
                 )
                 return proposal_id

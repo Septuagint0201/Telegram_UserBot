@@ -68,6 +68,7 @@ from telegram_userbot.domain.proactive.validation import (
 )
 
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
+PROACTIVE_TEST_SECRET = b"p" * 32
 
 
 def evidence(
@@ -110,18 +111,35 @@ def candidate_for(*, now: datetime = NOW, timezone_name: str = "UTC") -> Candida
     fact = intention(expected_at=now + timedelta(minutes=5))
     fact = replace(fact, timezone_name=timezone_name)
     active_policy = policy()
-    occurrences = materialize_intention(fact, now=now, policy=active_policy)
-    return aggregate_candidates(occurrences, now=now, policy=active_policy)[0]
+    occurrences = materialize_intention(
+        fact, now=now, policy=active_policy, secret=PROACTIVE_TEST_SECRET
+    )
+    return aggregate_candidates(
+        occurrences, now=now, policy=active_policy, secret=PROACTIVE_TEST_SECRET
+    )[0]
 
 
 @pytest.mark.unit
 def test_m7_rules_materialize_allowlisted_facts_and_group_only_overlaps() -> None:
     p = policy()
     fact = intention()
-    occurrence = materialize_intention(fact, now=NOW, policy=p)[0]
+    occurrence = materialize_intention(fact, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)[0]
     assert occurrence.reason is ReasonCode.PROMISE_DUE
-    assert materialize_intention(replace(fact, owner="other"), now=NOW, policy=p) == ()
-    assert materialize_intention(replace(fact, importance=0.5), now=NOW, policy=p) == ()
+    assert (
+        materialize_intention(
+            replace(fact, owner="other"), now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET
+        )
+        == ()
+    )
+    assert (
+        materialize_intention(
+            replace(fact, importance=0.5),
+            now=NOW,
+            policy=p,
+            secret=PROACTIVE_TEST_SECRET,
+        )
+        == ()
+    )
     explicit = ExplicitFollowupFact(
         id=uuid4(),
         account_id=fact.account_id,
@@ -133,7 +151,7 @@ def test_m7_rules_materialize_allowlisted_facts_and_group_only_overlaps() -> Non
         importance=0.7,
         evidence=(evidence("rule"),),
     )
-    assert materialize_explicit_followup(explicit, now=NOW, policy=p)
+    assert materialize_explicit_followup(explicit, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)
     life = LifeEventFact(
         id=uuid4(),
         account_id=fact.account_id,
@@ -148,16 +166,20 @@ def test_m7_rules_materialize_allowlisted_facts_and_group_only_overlaps() -> Non
         evidence=(evidence("life_event"),),
         followup_allowed=True,
     )
-    events = materialize_life_event(life, now=NOW, policy=p)
+    events = materialize_life_event(life, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)
     assert {item.reason for item in events} == {
         ReasonCode.EVENT_UPCOMING,
         ReasonCode.EVENT_FOLLOWUP,
     }
-    candidates = aggregate_candidates((occurrence, *events), now=NOW, policy=p)
+    candidates = aggregate_candidates(
+        (occurrence, *events), now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET
+    )
     assert candidates
     assert all(item.occurrences for item in candidates)
     assert membership_digest(candidates[0].occurrences) == candidates[0].membership_hash
-    assert derive_key(b"secret", "a", "bc") != derive_key(b"secret", "ab", "c")
+    assert derive_key(PROACTIVE_TEST_SECRET, "a", "bc") != derive_key(
+        PROACTIVE_TEST_SECRET, "ab", "c"
+    )
 
 
 @pytest.mark.unit
@@ -170,11 +192,11 @@ def test_m7_candidate_grouping_keeps_account_and_conversation_scopes_separate() 
         conversation_id=uuid4(),
     )
     occurrences = (
-        materialize_intention(first, now=NOW, policy=p)[0],
-        materialize_intention(second, now=NOW, policy=p)[0],
+        materialize_intention(first, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)[0],
+        materialize_intention(second, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)[0],
     )
 
-    candidates = aggregate_candidates(occurrences, now=NOW, policy=p)
+    candidates = aggregate_candidates(occurrences, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)
 
     assert len(candidates) == 2
     assert {(candidate.account_id, candidate.conversation_id) for candidate in candidates} == {
@@ -201,7 +223,9 @@ def test_m7_rules_cover_event_start_end_reconnect_and_filter_suppressions() -> N
         evidence=(evidence("life_event"),),
         followup_allowed=True,
     )
-    event_occurrences = materialize_life_event(event, now=NOW, policy=p)
+    event_occurrences = materialize_life_event(
+        event, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET
+    )
     assert len(event_occurrences) == 2
     relationship = RelationshipFact(
         id=uuid4(),
@@ -214,12 +238,13 @@ def test_m7_rules_cover_event_start_end_reconnect_and_filter_suppressions() -> N
         timezone_name="UTC",
         evidence=(evidence("relationship"),),
     )
-    assert materialize_reconnect(relationship, now=NOW, policy=p)
+    assert materialize_reconnect(relationship, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)
     assert (
         materialize_reconnect(
             replace(relationship, relationship=RelationshipLevel.UNKNOWN),
             now=NOW,
             policy=p,
+            secret=PROACTIVE_TEST_SECRET,
         )
         == ()
     )
@@ -616,7 +641,7 @@ def test_m7_final_gate_binds_activity_snapshot_to_candidate() -> None:
         0.5,
     )
     authorization = AuthorizationInput(candidate, decision, NOW, policy(), EffectiveMode.AUTO)
-    final = FinalGateInput(authorization, 1, 1, EffectiveMode.AUTO, 1, 1, 0, 0, 1, 1)
+    final = FinalGateInput(authorization, 1, 1, EffectiveMode.AUTO, 1, 1, 0, 0, 1, 1, NOW)
     assert final_gate(final).reason == "ACTIVITY_REVISION_SNAPSHOT_INVALID"
 
 
@@ -687,8 +712,11 @@ def test_m7_final_gate_maps_modes_and_rechecks_all_snapshots() -> None:
     assert map_mode(EffectiveMode.COPILOT).value == "copilot_draft"
     assert map_mode(EffectiveMode.HUMAN).value == "skip"
     assert preliminary_gate(authorization).allowed
-    final = FinalGateInput(authorization, 1, 1, EffectiveMode.AUTO, 1, 1, 0, 0, 0, 0)
+    final = FinalGateInput(authorization, 1, 1, EffectiveMode.AUTO, 1, 1, 0, 0, 0, 0, NOW)
     assert final_gate(final).reason == "AUTHORIZED_FINAL"
+    assert final_gate(replace(final, current_now=candidate.window_end_at)).reason == "WINDOW_CLOSED"
+    with pytest.raises(ValueError, match="current_now must be timezone-aware"):
+        final_gate(replace(final, current_now=NOW.replace(tzinfo=None)))
     for field, expected in (
         ("account_control_version", "CONTROL_VERSION_STALE"),
         ("current_mode", "EFFECTIVE_MODE_STALE"),
@@ -773,16 +801,20 @@ def test_m7_model_value_objects_fail_closed_on_invalid_configuration() -> None:
         ContactSettings(contact_id=uuid4(), minimum_interval=timedelta(0))
     with pytest.raises(ValueError, match="budget limits cannot be negative"):
         BudgetLimits(-1, 1)
-    with pytest.raises(ValueError, match="idempotency secret is required"):
+    with pytest.raises(ValueError, match="at least 32 bytes"):
         derive_key(b"")
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        derive_key(b"short")
 
 
 @pytest.mark.unit
 def test_m7_time_boundaries_reject_naive_values_and_normalize_offsets() -> None:  # noqa: PLR0915
     p = policy()
     fact = intention(expected_at=NOW + timedelta(minutes=5))
-    occurrence = materialize_intention(fact, now=NOW, policy=p)[0]
-    candidate = aggregate_candidates((occurrence,), now=NOW, policy=p)[0]
+    occurrence = materialize_intention(fact, now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET)[0]
+    candidate = aggregate_candidates(
+        (occurrence,), now=NOW, policy=p, secret=PROACTIVE_TEST_SECRET
+    )[0]
     decision = AgentDecision(
         candidate.id,
         ProactiveAction.SEND_NOW,
@@ -829,15 +861,15 @@ def test_m7_time_boundaries_reject_naive_values_and_normalize_offsets() -> None:
         (evidence("relationship"),),
     )
     with pytest.raises(ValueError, match="now must be timezone-aware"):
-        materialize_life_event(life, now=naive, policy=p)
+        materialize_life_event(life, now=naive, policy=p, secret=PROACTIVE_TEST_SECRET)
     with pytest.raises(ValueError, match="now must be timezone-aware"):
-        materialize_intention(fact, now=naive, policy=p)
+        materialize_intention(fact, now=naive, policy=p, secret=PROACTIVE_TEST_SECRET)
     with pytest.raises(ValueError, match="now must be timezone-aware"):
-        materialize_explicit_followup(explicit, now=naive, policy=p)
+        materialize_explicit_followup(explicit, now=naive, policy=p, secret=PROACTIVE_TEST_SECRET)
     with pytest.raises(ValueError, match="now must be timezone-aware"):
-        materialize_reconnect(relationship, now=naive, policy=p)
+        materialize_reconnect(relationship, now=naive, policy=p, secret=PROACTIVE_TEST_SECRET)
     with pytest.raises(ValueError, match="now must be timezone-aware"):
-        aggregate_candidates((occurrence,), now=naive, policy=p)
+        aggregate_candidates((occurrence,), now=naive, policy=p, secret=PROACTIVE_TEST_SECRET)
 
     settings = ContactSettings(contact_id=fact.contact_id, minimum_interval=timedelta(hours=1))
     with pytest.raises(ValueError, match="now must be timezone-aware"):

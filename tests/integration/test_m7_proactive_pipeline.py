@@ -102,7 +102,7 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
     )
     assert set(rows) == set(M7_TABLES)
     assert await db_session.scalar(text("SELECT version_num FROM alembic_version")) == (
-        "0019_m5_m6_recovery_execution"
+        "0020_m5_m7_review_hardening"
     )
     indexes = set(
         await db_session.scalars(

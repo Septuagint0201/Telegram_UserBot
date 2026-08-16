@@ -466,8 +466,8 @@ class ProactiveContext:
 def derive_key(secret: bytes, *parts: str) -> bytes:
     """Length-delimited HMAC identity helper; callers never use message text as a key."""
 
-    if not secret:
-        raise ValueError("idempotency secret is required")
+    if len(secret) < 32:
+        raise ValueError("idempotency secret must contain at least 32 bytes")
     encoded = bytearray(b"proactive-v1\0")
     for part in parts:
         raw = part.encode("utf-8")

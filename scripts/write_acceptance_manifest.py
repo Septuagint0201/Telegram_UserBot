@@ -486,6 +486,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "alembic/versions/0018_m5_retry_budget_proof.py",
                     "alembic/versions/0019_m5_m6_recovery_execution.py",
+                    "alembic/versions/0020_m5_m7_review_hardening.py",
                     "tests/unit/adapters/test_context_control.py",
                     "tests/integration/test_m5_context_media.py",
                 ),
@@ -509,6 +510,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "src/telegram_userbot/adapters/media/cleanup.py",
                     "src/telegram_userbot/adapters/persistence/media_repository.py",
                     "alembic/versions/0019_m5_m6_recovery_execution.py",
+                    "alembic/versions/0020_m5_m7_review_hardening.py",
                     "deploy/postgres/m5_roles.sql",
                 ),
                 (
@@ -637,6 +639,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "src/telegram_userbot/adapters/persistence/memory_repository.py",
                     "src/telegram_userbot/processes/memory_runtime.py",
                     "alembic/versions/0019_m5_m6_recovery_execution.py",
+                    "alembic/versions/0020_m5_m7_review_hardening.py",
                 ),
                 (
                     "tests.unit.adapters.test_memory_control::"
@@ -685,6 +688,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "alembic/versions/0018_m5_retry_budget_proof.py",
                     "alembic/versions/0019_m5_m6_recovery_execution.py",
+                    "alembic/versions/0020_m5_m7_review_hardening.py",
                     "deploy/postgres/m6_roles.sql",
                     "docs/compatibility/m6.md",
                     "tests/integration/test_m6_account_scope_constraints.py",
@@ -840,6 +844,7 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
                     "alembic/versions/0017_m5_m7_recovery_binding.py",
                     "alembic/versions/0018_m5_retry_budget_proof.py",
                     "alembic/versions/0019_m5_m6_recovery_execution.py",
+                    "alembic/versions/0020_m5_m7_review_hardening.py",
                     "deploy/postgres/m7_roles.sql",
                     "docs/compatibility/m7.md",
                     "tests/integration/test_m6_account_scope_constraints.py",

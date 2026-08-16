@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 
@@ -57,6 +57,7 @@ class FinalGateInput:
     current_content_revision: int
     snapshot_activity_revision: int
     current_activity_revision: int
+    current_now: datetime
     delivery_already_created: bool = False
     reservation_held: bool = True
     main_output_valid: bool = True
@@ -137,7 +138,9 @@ def preliminary_gate(value: AuthorizationInput) -> GateResult:  # noqa: PLR0911,
 def final_gate(value: FinalGateInput) -> GateResult:  # noqa: PLR0911 - every snapshot is an independent gate
     """Re-run all preliminary checks and then compare every version snapshot."""
 
-    preliminary = preliminary_gate(value.authorization)
+    preliminary = preliminary_gate(
+        replace(value.authorization, now=require_aware(value.current_now, "current_now"))
+    )
     if not preliminary.allowed:
         return preliminary
     if value.account_control_version != value.current_account_control_version:

@@ -23,6 +23,7 @@ from telegram_userbot.adapters.media import (
 )
 from telegram_userbot.adapters.persistence.media_repository import (
     MediaDeletionLease,
+    MediaDeletionOutcome,
     MediaRepository,
 )
 from telegram_userbot.domain.shared.redaction import SensitiveValue
@@ -225,7 +226,7 @@ async def test_durable_media_cleanup_records_success_and_hash_failure(tmp_path: 
             1,
         ),
     )
-    repository.finish_deletion.return_value = True
+    repository.finish_deletion.return_value = MediaDeletionOutcome(True)
 
     report = await DurableMediaCleanup(
         repository=cast(MediaRepository, repository),
@@ -240,14 +241,39 @@ async def test_durable_media_cleanup_records_success_and_hash_failure(tmp_path: 
     repository.claim_expired.return_value = (
         MediaDeletionLease(uuid7(), uuid7(), damaged.storage_key, b"x" * 32, 2, 2),
     )
-    repository.finish_deletion.return_value = True
+    repository.finish_deletion.return_value = MediaDeletionOutcome(True, True)
+    alerts: list[str] = []
+    report = await DurableMediaCleanup(
+        repository=cast(MediaRepository, repository),
+        store=store,
+        on_failure=alerts.append,
+    ).run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
+    assert (report.deleted, report.already_missing, report.failed) == (0, 0, 1)
+    assert store.resolve_key(damaged.storage_key).exists()
+    assert cast(bool, repository.finish_deletion.await_args.kwargs["deleted"]) is False
+    assert alerts == ["media_delete_failed_critical"]
+
+    repository.reset_mock()
+    repository.claim_expired.return_value = (
+        MediaDeletionLease(uuid7(), uuid7(), "already-missing.png", b"m" * 32, 3, 1),
+    )
+    repository.finish_deletion.return_value = MediaDeletionOutcome(True)
     report = await DurableMediaCleanup(
         repository=cast(MediaRepository, repository),
         store=store,
     ).run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
-    assert (report.deleted, report.already_missing, report.failed) == (0, 0, 1)
-    assert store.resolve_key(damaged.storage_key).exists()
-    assert repository.finish_deletion.await_args.kwargs["deleted"] is False
+    assert (report.deleted, report.already_missing, report.failed) == (0, 1, 0)
+
+    repository.reset_mock()
+    repository.claim_expired.return_value = (
+        MediaDeletionLease(uuid7(), uuid7(), "still-missing.png", b"m" * 32, 4, 1),
+    )
+    repository.finish_deletion.return_value = MediaDeletionOutcome(False)
+    report = await DurableMediaCleanup(
+        repository=cast(MediaRepository, repository),
+        store=store,
+    ).run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
+    assert report == type(report)(0, 0, 0)
 
 
 @pytest.mark.unit

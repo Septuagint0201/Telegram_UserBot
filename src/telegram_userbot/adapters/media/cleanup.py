@@ -46,25 +46,29 @@ class DurableMediaCleanup:
                     expected_sha256=lease.sha256,
                 )
             except Exception:
-                completed = await self._repository.finish_deletion(
+                outcome = await self._repository.finish_deletion(
                     deletion=lease,
                     deleted=False,
                     now=now,
                     error_code="media_delete_failed",
                 )
                 await self._repository.commit_cleanup_boundary()
-                if completed:
+                if outcome.completed:
                     failed += 1
                     if self._on_failure is not None:
-                        self._on_failure("media_delete_failed")
+                        self._on_failure(
+                            "media_delete_failed_critical"
+                            if outcome.critical_alert
+                            else "media_delete_failed"
+                        )
             else:
-                completed = await self._repository.finish_deletion(
+                outcome = await self._repository.finish_deletion(
                     deletion=lease,
                     deleted=True,
                     now=now,
                 )
                 await self._repository.commit_cleanup_boundary()
-                if completed:
+                if outcome.completed:
                     if existed:
                         deleted += 1
                     else:

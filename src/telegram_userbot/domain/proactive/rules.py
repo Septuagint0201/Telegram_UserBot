@@ -163,7 +163,7 @@ def materialize_life_event(
     *,
     now: datetime,
     policy: ProactivePolicy,
-    secret: bytes = b"synthetic-proactive-key",
+    secret: bytes,
 ) -> tuple[RuleOccurrence, ...]:
     now_utc = require_aware(now, "now")
     if fact.status != "active" or fact.importance < 0 or fact.importance > 1:
@@ -277,7 +277,7 @@ def materialize_intention(
     *,
     now: datetime,
     policy: ProactivePolicy,
-    secret: bytes = b"synthetic-proactive-key",
+    secret: bytes,
 ) -> tuple[RuleOccurrence, ...]:
     now_utc = require_aware(now, "now")
     if (
@@ -316,7 +316,7 @@ def materialize_explicit_followup(
     *,
     now: datetime,
     policy: ProactivePolicy,
-    secret: bytes = b"synthetic-proactive-key",
+    secret: bytes,
 ) -> tuple[RuleOccurrence, ...]:
     now_utc = require_aware(now, "now")
     if fact.status != "active" or fact.expected_at is None:
@@ -349,7 +349,7 @@ def materialize_reconnect(
     *,
     now: datetime,
     policy: ProactivePolicy,
-    secret: bytes = b"synthetic-proactive-key",
+    secret: bytes,
 ) -> tuple[RuleOccurrence, ...]:
     now_utc = require_aware(now, "now")
     if (
@@ -460,7 +460,7 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
     *,
     now: datetime,
     policy: ProactivePolicy,
-    secret: bytes = b"synthetic-proactive-key",
+    secret: bytes,
     mode_versions: dict[UUID, int] | None = None,
     content_revisions: dict[UUID, int] | None = None,
     activity_revisions: dict[UUID, int] | None = None,

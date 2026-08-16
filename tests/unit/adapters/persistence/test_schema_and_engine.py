@@ -417,6 +417,27 @@ def test_media_cleanup_and_review_execution_migration_is_recoverable() -> None:
 
 
 @pytest.mark.unit
+def test_m5_m7_review_hardening_migration_is_recoverable() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0020_m5_m7_review_hardening.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'down_revision: str | Sequence[str] | None = "0019_m5_m6_recovery_execution"' in migration
+    )
+    assert "delete_first_failed_at timestamptz" in migration
+    assert "delete_critical_alerted_at timestamptz" in migration
+    assert '"memory_proposal_evidence"' in migration
+    assert '"memory_evidence"' in migration
+    assert "trust_class_values" in migration
+    assert "evidence_role_values" in migration
+    assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable

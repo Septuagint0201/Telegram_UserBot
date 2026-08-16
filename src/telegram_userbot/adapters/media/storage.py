@@ -216,6 +216,7 @@ class PrivateMediaStore:
             if actual_sha256 != expected_sha256:
                 raise ValueError("media_hash_mismatch")
             target.unlink()
+            _fsync_directory(target.parent)
             return True
 
     def cleanup(self, candidates: Iterable[CleanupCandidate], *, now: datetime) -> CleanupReport:
@@ -261,3 +262,15 @@ def _verify_persisted_file(target: Path, payload: bytes, digest: bytes) -> None:
     if len(persisted) != len(payload) or hashlib.sha256(persisted).digest() != digest:
         target.unlink(missing_ok=True)
         raise RuntimeError("media_write_verification_failed")
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Persist directory entry changes on the production POSIX filesystem."""
+
+    if os.name == "nt":
+        return
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
