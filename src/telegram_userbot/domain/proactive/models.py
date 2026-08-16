@@ -333,7 +333,12 @@ class Candidate:
         if len(self.candidate_key) != 32 or len(self.membership_hash) != 32 or self.generation < 1:
             raise ValueError("candidate identity is invalid")
         if not self.occurrences or any(
-            item.contact_id != self.contact_id for item in self.occurrences
+            item.account_id != self.account_id
+            or item.contact_id != self.contact_id
+            or item.conversation_id != self.conversation_id
+            or item.timezone_name != self.timezone_name
+            or item.policy_version_id != self.policy_version_id
+            for item in self.occurrences
         ):
             raise ValueError("candidate must contain same-contact occurrences")
         object.__setattr__(

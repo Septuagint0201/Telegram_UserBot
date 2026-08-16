@@ -161,6 +161,29 @@ def test_m7_rules_materialize_allowlisted_facts_and_group_only_overlaps() -> Non
 
 
 @pytest.mark.unit
+def test_m7_candidate_grouping_keeps_account_and_conversation_scopes_separate() -> None:
+    p = policy()
+    first = intention(expected_at=NOW + timedelta(hours=1))
+    second = replace(
+        first,
+        account_id=uuid4(),
+        conversation_id=uuid4(),
+    )
+    occurrences = (
+        materialize_intention(first, now=NOW, policy=p)[0],
+        materialize_intention(second, now=NOW, policy=p)[0],
+    )
+
+    candidates = aggregate_candidates(occurrences, now=NOW, policy=p)
+
+    assert len(candidates) == 2
+    assert {(candidate.account_id, candidate.conversation_id) for candidate in candidates} == {
+        (first.account_id, first.conversation_id),
+        (second.account_id, second.conversation_id),
+    }
+
+
+@pytest.mark.unit
 def test_m7_rules_cover_event_start_end_reconnect_and_filter_suppressions() -> None:
     p = policy()
     account_id, contact_id, conversation_id = uuid4(), uuid4(), uuid4()
@@ -331,10 +354,13 @@ def test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged() -> None:
         )
         == held
     )
-    assert ledger.commit(key, unknown=True).state is ReservationState.SEND_UNKNOWN
-    assert ledger.commit(key).state is ReservationState.SEND_UNKNOWN
+    assert (
+        ledger.commit(key, account_id=account_id, unknown=True).state
+        is ReservationState.SEND_UNKNOWN
+    )
+    assert ledger.commit(key, account_id=account_id).state is ReservationState.SEND_UNKNOWN
     with pytest.raises(ValueError, match="committed/unknown reservation cannot be released"):
-        ledger.release(key)
+        ledger.release(key, account_id=account_id)
     bypass_key = sha256(b"bypass").digest()
     bypass = ledger.reserve(
         account_id=account_id,
@@ -411,7 +437,7 @@ def test_m7_budget_is_atomic_idempotent_reaped_and_unknown_is_charged() -> None:
     assert shrinking.snapshot(account_id=account_id, contact_id=contact_id, local_date=NOW.date())[
         "account_daily"
     ] == (1, 1, 0)
-    shrinking.release(shrinking_key)
+    shrinking.release(shrinking_key, account_id=account_id)
     assert (
         shrinking.reserve(
             account_id=account_id,
@@ -1284,4 +1310,36 @@ def test_m7_validation_and_fake_store_edge_cases() -> None:
         is False
     )
     with pytest.raises(KeyError, match="unknown budget"):
-        BudgetLedger().commit(sha256(b"missing-budget").digest())
+        BudgetLedger().commit(sha256(b"missing-budget").digest(), account_id=uuid4())
+
+
+@pytest.mark.unit
+def test_m7_budget_reservation_identity_is_account_scoped() -> None:
+    ledger = BudgetLedger()
+    account_a, account_b, contact_id = uuid4(), uuid4(), uuid4()
+    key = sha256(b"shared-reservation-key").digest()
+    limits = BudgetLimits(account_daily=1, contact_daily=1)
+
+    first = ledger.reserve(
+        account_id=account_a,
+        contact_id=contact_id,
+        local_date=NOW.date(),
+        limits=limits,
+        expires_at=NOW + timedelta(minutes=1),
+        reservation_key=key,
+    )
+    second = ledger.reserve(
+        account_id=account_b,
+        contact_id=contact_id,
+        local_date=NOW.date(),
+        limits=limits,
+        expires_at=NOW + timedelta(minutes=1),
+        reservation_key=key,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.account_id == account_a
+    assert second.account_id == account_b
+    assert ledger.commit(key, account_id=account_a).account_id == account_a
+    assert ledger.commit(key, account_id=account_b).account_id == account_b

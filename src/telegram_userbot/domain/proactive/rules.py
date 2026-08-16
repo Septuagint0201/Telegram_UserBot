@@ -468,11 +468,19 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
     """Aggregate only overlapping windows; never merge unrelated time windows."""
 
     now_utc = require_aware(now, "now")
-    grouped: dict[UUID, list[RuleOccurrence]] = {}
+    grouped: dict[tuple[UUID, UUID, UUID, str, UUID | None], list[RuleOccurrence]] = {}
     for occurrence in occurrences:
-        grouped.setdefault(occurrence.contact_id, []).append(occurrence)
+        scope = (
+            occurrence.account_id,
+            occurrence.contact_id,
+            occurrence.conversation_id,
+            occurrence.timezone_name,
+            occurrence.policy_version_id,
+        )
+        grouped.setdefault(scope, []).append(occurrence)
     candidates: list[Candidate] = []
-    for contact_id, values in grouped.items():
+    for scope, values in grouped.items():
+        account_id, contact_id, conversation_id, timezone_name, policy_version_id = scope
         ordered = sorted(
             values,
             key=lambda item: (
@@ -509,6 +517,9 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
                 secret,
                 str(cluster[0].account_id),
                 str(contact_id),
+                str(conversation_id),
+                timezone_name,
+                str(policy_version_id),
                 member_hash.hex(),
                 str(policy.version_id),
                 start.isoformat(),
@@ -518,17 +529,17 @@ def aggregate_candidates(  # noqa: PLR0913 - candidate snapshots are sealed at m
             candidates.append(
                 Candidate(
                     id=candidate_id,
-                    account_id=cluster[0].account_id,
+                    account_id=account_id,
                     contact_id=contact_id,
-                    conversation_id=cluster[0].conversation_id,
+                    conversation_id=conversation_id,
                     candidate_key=key,
                     generation=1,
                     membership_hash=member_hash,
                     occurrences=tuple(cluster),
                     window_start_at=max(start, now_utc),
                     window_end_at=end,
-                    policy_version_id=policy.version_id,
-                    timezone_name=cluster[0].timezone_name,
+                    policy_version_id=policy_version_id,
+                    timezone_name=timezone_name,
                     mode_version=(mode_versions or {}).get(contact_id, 1),
                     content_revision=(content_revisions or {}).get(contact_id, 0),
                     activity_revision=(activity_revisions or {}).get(contact_id, 0),

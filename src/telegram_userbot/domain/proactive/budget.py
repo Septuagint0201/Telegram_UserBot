@@ -37,7 +37,7 @@ class BudgetLedger:
     def __init__(self) -> None:
         self._lock = Lock()
         self._buckets: dict[tuple[UUID, UUID | None, str, date], _Bucket] = {}
-        self._reservations: dict[bytes, BudgetReservation] = {}
+        self._reservations: dict[tuple[UUID, bytes], BudgetReservation] = {}
 
     def reserve(  # noqa: PLR0913 - reservation identity spans all budget scopes
         self,
@@ -56,7 +56,8 @@ class BudgetLedger:
         if limits.bypass_daily == 0 and bypass:
             return None
         with self._lock:
-            existing = self._reservations.get(reservation_key)
+            reservation_identity = (account_id, reservation_key)
+            existing = self._reservations.get(reservation_identity)
             if existing is not None:
                 return (
                     existing
@@ -101,12 +102,14 @@ class BudgetLedger:
                 state=ReservationState.HELD,
                 expires_at=expiry,
             )
-            self._reservations[reservation_key] = reservation
+            self._reservations[reservation_identity] = reservation
             return reservation
 
-    def commit(self, reservation_key: bytes, *, unknown: bool = False) -> BudgetReservation:
+    def commit(
+        self, reservation_key: bytes, *, account_id: UUID, unknown: bool = False
+    ) -> BudgetReservation:
         with self._lock:
-            reservation = self._require(reservation_key)
+            reservation = self._require(account_id, reservation_key)
             if (
                 reservation.state is ReservationState.COMMITTED
                 or reservation.state is ReservationState.SEND_UNKNOWN
@@ -117,12 +120,14 @@ class BudgetLedger:
             self._move_counts(reservation, held_delta=-1, committed_delta=1)
             target = ReservationState.SEND_UNKNOWN if unknown else ReservationState.COMMITTED
             updated = replace(reservation, state=target)
-            self._reservations[reservation_key] = updated
+            self._reservations[(account_id, reservation_key)] = updated
             return updated
 
-    def release(self, reservation_key: bytes, *, expired: bool = False) -> BudgetReservation:
+    def release(
+        self, reservation_key: bytes, *, account_id: UUID, expired: bool = False
+    ) -> BudgetReservation:
         with self._lock:
-            reservation = self._require(reservation_key)
+            reservation = self._require(account_id, reservation_key)
             if reservation.state in {ReservationState.RELEASED, ReservationState.EXPIRED}:
                 return reservation
             if reservation.state is not ReservationState.HELD:
@@ -130,21 +135,21 @@ class BudgetLedger:
             self._move_counts(reservation, held_delta=-1, committed_delta=0)
             target = ReservationState.EXPIRED if expired else ReservationState.RELEASED
             updated = replace(reservation, state=target)
-            self._reservations[reservation_key] = updated
+            self._reservations[(account_id, reservation_key)] = updated
             return updated
 
     def reap(self, *, now: datetime) -> tuple[BudgetReservation, ...]:
         current_time = require_aware(now, "now")
         with self._lock:
             expired: list[BudgetReservation] = []
-            for key, reservation in tuple(self._reservations.items()):
+            for identity, reservation in tuple(self._reservations.items()):
                 if (
                     reservation.state is ReservationState.HELD
                     and reservation.expires_at <= current_time
                 ):
                     self._move_counts(reservation, held_delta=-1, committed_delta=0)
                     updated = replace(reservation, state=ReservationState.EXPIRED)
-                    self._reservations[key] = updated
+                    self._reservations[identity] = updated
                     expired.append(updated)
             return tuple(expired)
 
@@ -206,8 +211,8 @@ class BudgetLedger:
             ):
                 raise RuntimeError("budget bucket invariant violated")
 
-    def _require(self, reservation_key: bytes) -> BudgetReservation:
+    def _require(self, account_id: UUID, reservation_key: bytes) -> BudgetReservation:
         try:
-            return self._reservations[reservation_key]
+            return self._reservations[(account_id, reservation_key)]
         except KeyError as exc:
             raise KeyError("unknown budget reservation") from exc
