@@ -209,6 +209,8 @@ class DurableContextControlBackend:
         chunks: tuple[SensitiveValue[str], ...],
         now: datetime,
     ) -> PreviewDeliveryResult:
+        if not await self._repository.begin_preview_delivery(request=request):
+            raise RuntimeError("context_preview_delivery_conflict")
         states: list[tuple[str, int | None]] = []
         for chunk in chunks:
             try:

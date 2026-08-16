@@ -1200,6 +1200,7 @@ CHECK ((model_run_id IS NULL AND model_role IS NULL) OR
 | `proposed_valid_to` | TIMESTAMPTZ | nullable |
 | `visual_only` | BOOLEAN | default false |
 | `state` | TEXT | `received/validating/accepted/rejected/candidate/error/invalidated/expired` |
+| `review_version` | INTEGER | 从1开始；state、证据或target可审查快照变化时递增 |
 | `validation_code` | TEXT | nullable |
 | `validator_policy_version` | TEXT | NOT NULL |
 | `accepted_memory_version_id` | UUIDv7 | nullable composite FK；accepted 时精确结果 |
@@ -1518,7 +1519,8 @@ account_id
 action accept|reject|forget
 proposal_id?
 memory_id?
-expected_proposal_state?
+conversation_id NOT NULL
+expected_proposal_version?
 expected_memory_version_no?
 action_token_hash BYTEA
 expires_at
@@ -1528,7 +1530,7 @@ reason_code?
 CHECK accept/reject targets proposal and forget targets memory
 ```
 
-token 绑定 allowlisted admin、Bot chat、action、target 和 expected version，只保存 hash、单次使用。command/action 不复制 memory/proposal/message 正文；UI 显示时从仍有效 source 临时渲染最小摘要。
+proposal和memory target都通过`(id, account_id, conversation_id)`复合外键绑定review action，禁止同账号跨conversation错配。token 绑定 allowlisted admin、Bot chat、action、target 和 expected version，只保存 hash、单次使用。Control确认和worker延迟消费都必须重新检查token/proposal expiry、proposal review version、current evidence revision、target memory version与conversation row lock；command/action 不复制 memory/proposal/message 正文，UI 显示时从仍有效 source 临时渲染最小摘要。
 
 ## 10. Proactive 与关系投影
 

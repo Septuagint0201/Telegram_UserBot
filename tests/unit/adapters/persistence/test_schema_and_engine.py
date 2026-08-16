@@ -17,8 +17,11 @@ from telegram_userbot.adapters.persistence.schema import (
     M5_TABLES,
     M6_TABLES,
     memories,
+    memory_proposals,
+    memory_review_actions,
     metadata,
     model_runs,
+    proactive_decisions,
     summaries,
 )
 
@@ -293,6 +296,41 @@ def test_worker_retry_migration_is_fenced_bounded_and_reversible() -> None:
     assert "ck_proactive_jobs_fencing_token_nonnegative" in downgrade
     assert 'op.drop_column("proactive_jobs", "fencing_token")' in downgrade
     assert 'op.drop_column("memory_jobs", "attempt_count")' in downgrade
+
+
+@pytest.mark.unit
+def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
+    assert not memory_review_actions.c.conversation_id.nullable
+    assert not memory_proposals.c.review_version.nullable
+    review_fks = {
+        item.name: tuple(item.column_keys)
+        for item in memory_review_actions.constraints
+        if isinstance(item, ForeignKeyConstraint)
+    }
+    assert review_fks["fk_memory_review_actions_proposal_scope"] == (
+        "proposal_id",
+        "account_id",
+        "conversation_id",
+    )
+    assert review_fks["fk_memory_review_actions_memory_scope"] == (
+        "memory_id",
+        "account_id",
+        "conversation_id",
+    )
+    decision_uniques = {
+        tuple(item.columns.keys())
+        for item in proactive_decisions.constraints
+        if isinstance(item, UniqueConstraint)
+    }
+    assert ("candidate_id",) in decision_uniques
+
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0013_m5_m7_consistency.py"
+    ).read_text(encoding="utf-8")
+    assert "review_version integer NOT NULL DEFAULT 1" in migration
+    assert "ALTER COLUMN conversation_id SET NOT NULL" in migration
+    assert "uq_proactive_decisions_candidate UNIQUE (candidate_id)" in migration
+    assert "expected_proposal_version IS NOT NULL" in migration
 
 
 @pytest.mark.unit

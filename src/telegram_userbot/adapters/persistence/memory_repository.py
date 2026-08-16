@@ -14,12 +14,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import case, func, insert, select, text, update
+from sqlalchemy import and_, case, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.engine import CursorResult
+from sqlalchemy.engine import CursorResult, RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.persistence.schema import (
+    conversations,
     data_erasure_requests,
     embedding_records,
     embedding_spaces,
@@ -84,6 +85,7 @@ class ReviewAction:
     action: str
     proposal_id: UUID | None
     memory_id: UUID | None
+    expected_proposal_version: int | None
     expected_memory_version: int | None
     expires_at: datetime
 
@@ -816,6 +818,7 @@ class MemoryRepository:
                 .where(memory_proposals.c.id == proposal_id)
                 .values(
                     state=validated.state.value,
+                    review_version=memory_proposals.c.review_version + 1,
                     decision_reason_code=validated.issues[0].code if validated.issues else None,
                     decided_at=current_time,
                 )
@@ -982,6 +985,7 @@ class MemoryRepository:
             .where(memory_proposals.c.id == proposal_id)
             .values(
                 state="accepted",
+                review_version=memory_proposals.c.review_version + 1,
                 accepted_memory_version_id=version_id,
                 decision_actor_type="service",
                 decision_actor_id="memory_worker",
@@ -1629,6 +1633,7 @@ class MemoryRepository:
         memory_id: UUID | None,
         token: bytes,
         expires_at: datetime,
+        expected_proposal_version: int | None = None,
         expected_memory_version: int | None = None,
     ) -> UUID:
         proposal_action = action in {"accept", "reject"}
@@ -1636,7 +1641,16 @@ class MemoryRepository:
         target_matches = (proposal_action and proposal_id is not None and memory_id is None) or (
             forget_action and memory_id is not None and proposal_id is None
         )
-        if not target_matches or len(token) < 16:
+        version_matches = (
+            proposal_action
+            and expected_proposal_version is not None
+            and expected_memory_version is None
+        ) or (
+            forget_action
+            and expected_proposal_version is None
+            and expected_memory_version is not None
+        )
+        if not target_matches or not version_matches or len(token) < 16:
             raise ValueError("review action is invalid")
         action_id = uuid4()
         await self._session.execute(
@@ -1647,6 +1661,7 @@ class MemoryRepository:
                 action=action,
                 proposal_id=proposal_id,
                 memory_id=memory_id,
+                expected_proposal_version=expected_proposal_version,
                 expected_memory_version=expected_memory_version,
                 admin_actor_id=admin_actor_id,
                 bot_chat_id=bot_chat_id,
@@ -1669,7 +1684,6 @@ class MemoryRepository:
                         memory_review_actions.c.admin_actor_id == admin_actor_id,
                         memory_review_actions.c.bot_chat_id == bot_chat_id,
                         memory_review_actions.c.state == "pending",
-                        memory_review_actions.c.expires_at > now,
                     )
                     .with_for_update()
                 )
@@ -1679,13 +1693,29 @@ class MemoryRepository:
         )
         if row is None:
             return None
-        await self._session.execute(
+        failure = await self._review_action_failure(row, now=now)
+        if failure is not None:
+            state, reason = failure
+            await self._terminalize_review_action(
+                action_id=cast(UUID, row["id"]),
+                expected_state="pending",
+                terminal_state=state,
+                reason_code=reason,
+                now=now,
+            )
+            return None
+        confirmed = await self._session.scalar(
             update(memory_review_actions)
             .where(
-                memory_review_actions.c.id == row["id"], memory_review_actions.c.state == "pending"
+                memory_review_actions.c.id == row["id"],
+                memory_review_actions.c.state == "pending",
+                memory_review_actions.c.expires_at > now,
             )
             .values(state="confirmed", used_at=now)
+            .returning(memory_review_actions.c.id)
         )
+        if confirmed != row["id"]:
+            return None
         return ReviewAction(
             id=cast(UUID, row["id"]),
             account_id=cast(UUID, row["account_id"]),
@@ -1693,11 +1723,14 @@ class MemoryRepository:
             action=cast(str, row["action"]),
             proposal_id=cast(UUID | None, row["proposal_id"]),
             memory_id=cast(UUID | None, row["memory_id"]),
+            expected_proposal_version=cast(int | None, row["expected_proposal_version"]),
             expected_memory_version=cast(int | None, row["expected_memory_version"]),
             expires_at=cast(datetime, row["expires_at"]),
         )
 
-    async def lock_confirmed_review_action(self, *, account_id: UUID) -> ReviewAction | None:
+    async def lock_confirmed_review_action(
+        self, *, account_id: UUID, now: datetime
+    ) -> ReviewAction | None:
         row = (
             (
                 await self._session.execute(
@@ -1716,6 +1749,17 @@ class MemoryRepository:
         )
         if row is None:
             return None
+        failure = await self._review_action_failure(row, now=now)
+        if failure is not None:
+            state, reason = failure
+            await self._terminalize_review_action(
+                action_id=cast(UUID, row["id"]),
+                expected_state="confirmed",
+                terminal_state=state,
+                reason_code=reason,
+                now=now,
+            )
+            return None
         return ReviewAction(
             id=cast(UUID, row["id"]),
             account_id=cast(UUID, row["account_id"]),
@@ -1723,6 +1767,7 @@ class MemoryRepository:
             action=cast(str, row["action"]),
             proposal_id=cast(UUID | None, row["proposal_id"]),
             memory_id=cast(UUID | None, row["memory_id"]),
+            expected_proposal_version=cast(int | None, row["expected_proposal_version"]),
             expected_memory_version=cast(int | None, row["expected_memory_version"]),
             expires_at=cast(datetime, row["expires_at"]),
         )
@@ -1751,6 +1796,162 @@ class MemoryRepository:
             ),
         )
         return result.rowcount == 1
+
+    async def _review_action_failure(  # noqa: PLR0911 - each stale reason is explicit
+        self, row: RowMapping, *, now: datetime
+    ) -> tuple[str, str] | None:
+        if cast(datetime, row["expires_at"]) <= now:
+            return "expired", "review_action_expired"
+        account_id = cast(UUID, row["account_id"])
+        conversation_id = cast(UUID, row["conversation_id"])
+        locked_conversation = await self._session.scalar(
+            select(conversations.c.id)
+            .where(
+                conversations.c.id == conversation_id,
+                conversations.c.account_id == account_id,
+            )
+            .with_for_update()
+        )
+        if locked_conversation is None:
+            return "rejected", "review_conversation_scope_changed"
+        proposal_id = cast(UUID | None, row["proposal_id"])
+        memory_id = cast(UUID | None, row["memory_id"])
+        if proposal_id is not None:
+            proposal = (
+                (
+                    await self._session.execute(
+                        select(
+                            memory_proposals.c.state,
+                            memory_proposals.c.review_version,
+                            memory_proposals.c.expires_at,
+                        )
+                        .where(
+                            memory_proposals.c.id == proposal_id,
+                            memory_proposals.c.account_id == account_id,
+                            memory_proposals.c.conversation_id == conversation_id,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if proposal is None:
+                return "rejected", "review_target_scope_changed"
+            proposal_expires_at = cast(datetime | None, proposal["expires_at"])
+            if proposal_expires_at is not None and proposal_expires_at <= now:
+                return "expired", "memory_proposal_expired"
+            if (
+                proposal["state"] != "candidate"
+                or proposal["review_version"] != row["expected_proposal_version"]
+            ):
+                return "rejected", "memory_proposal_changed"
+            invalid_evidence = cast(
+                int,
+                await self._session.scalar(
+                    select(func.count())
+                    .select_from(
+                        memory_proposal_evidence.join(
+                            message_revisions,
+                            and_(
+                                message_revisions.c.id
+                                == memory_proposal_evidence.c.message_revision_id,
+                                message_revisions.c.account_id
+                                == memory_proposal_evidence.c.account_id,
+                            ),
+                        ).join(
+                            messages,
+                            and_(
+                                messages.c.id == message_revisions.c.message_id,
+                                messages.c.account_id == message_revisions.c.account_id,
+                            ),
+                        )
+                    )
+                    .where(
+                        memory_proposal_evidence.c.proposal_id == proposal_id,
+                        memory_proposal_evidence.c.account_id == account_id,
+                        or_(
+                            messages.c.conversation_id != conversation_id,
+                            messages.c.deleted_at.is_not(None),
+                            messages.c.is_tombstone.is_(True),
+                            messages.c.current_revision_no != message_revisions.c.revision_no,
+                            message_revisions.c.redacted_at.is_not(None),
+                            message_revisions.c.content_sha256.is_(None),
+                            message_revisions.c.content_sha256
+                            != memory_proposal_evidence.c.source_content_sha256,
+                        ),
+                    )
+                ),
+            )
+            if invalid_evidence:
+                return "rejected", "memory_proposal_evidence_changed"
+            invalid_targets = cast(
+                int,
+                await self._session.scalar(
+                    select(func.count())
+                    .select_from(
+                        memory_proposal_targets.join(
+                            memories,
+                            and_(
+                                memories.c.id == memory_proposal_targets.c.target_memory_id,
+                                memories.c.account_id == memory_proposal_targets.c.account_id,
+                            ),
+                        )
+                    )
+                    .where(
+                        memory_proposal_targets.c.proposal_id == proposal_id,
+                        memory_proposal_targets.c.account_id == account_id,
+                        or_(
+                            memories.c.conversation_id != conversation_id,
+                            memories.c.status != "active",
+                            memories.c.current_version_no
+                            != memory_proposal_targets.c.target_version_no_snapshot,
+                        ),
+                    )
+                ),
+            )
+            if invalid_targets:
+                return "rejected", "memory_proposal_target_changed"
+            return None
+        if memory_id is None:
+            return "rejected", "review_target_missing"
+        memory = await self._session.scalar(
+            select(memories.c.id)
+            .where(
+                memories.c.id == memory_id,
+                memories.c.account_id == account_id,
+                memories.c.conversation_id == conversation_id,
+                memories.c.status == "active",
+                memories.c.current_version_no == row["expected_memory_version"],
+            )
+            .with_for_update()
+        )
+        if memory is None:
+            return "rejected", "memory_target_changed"
+        return None
+
+    async def _terminalize_review_action(
+        self,
+        *,
+        action_id: UUID,
+        expected_state: str,
+        terminal_state: str,
+        reason_code: str,
+        now: datetime,
+    ) -> None:
+        await self._session.execute(
+            update(memory_review_actions)
+            .where(
+                memory_review_actions.c.id == action_id,
+                memory_review_actions.c.state == expected_state,
+            )
+            .values(
+                state=terminal_state,
+                used_at=now,
+                decided_at=now,
+                reason_code=reason_code,
+            )
+        )
 
 
 def _target_role(operation: MemoryOperation, index: int) -> str:

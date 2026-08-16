@@ -249,6 +249,7 @@ class DurableMemoryControlBackend:
                 await self._session.execute(
                     select(
                         memory_proposals.c.id,
+                        memory_proposals.c.review_version,
                         memory_proposals.c.operation,
                         memory_proposals.c.memory_type,
                         memory_proposals.c.proposed_confidence,
@@ -280,7 +281,7 @@ class DurableMemoryControlBackend:
                     account_id=account,
                     conversation_id=conversation,
                     target_id=cast(UUID, row["id"]),
-                    version=0,
+                    version=cast(int, row["review_version"]),
                     admin_id=admin_id,
                     bot_chat_id=bot_chat_id,
                     expires_at=expires_at,
@@ -360,18 +361,33 @@ class DurableMemoryControlBackend:
         )
         proposal_id: UUID | None = None
         memory_id: UUID | None = None
+        expected_proposal_version: int | None = None
         expected_memory_version: int | None = None
         if action in {"accept", "reject"} and target.kind == "candidate":
-            proposal_id = await self._session.scalar(
-                select(memory_proposals.c.id).where(
-                    memory_proposals.c.id == target.target_id,
-                    memory_proposals.c.account_id == target.account_id,
-                    memory_proposals.c.conversation_id == target.conversation_id,
-                    memory_proposals.c.state == "candidate",
+            row = (
+                (
+                    await self._session.execute(
+                        select(
+                            memory_proposals.c.id,
+                            memory_proposals.c.review_version,
+                        ).where(
+                            memory_proposals.c.id == target.target_id,
+                            memory_proposals.c.account_id == target.account_id,
+                            memory_proposals.c.conversation_id == target.conversation_id,
+                            memory_proposals.c.state == "candidate",
+                            memory_proposals.c.review_version == target.version,
+                            (memory_proposals.c.expires_at.is_(None))
+                            | (memory_proposals.c.expires_at > now),
+                        )
+                    )
                 )
+                .mappings()
+                .one_or_none()
             )
-            if proposal_id is None:
+            if row is None:
                 raise ValueError("memory candidate is no longer reviewable")
+            proposal_id = cast(UUID, row["id"])
+            expected_proposal_version = cast(int, row["review_version"])
         elif action == "forget" and target.kind == "memory":
             row = (
                 (
@@ -410,6 +426,7 @@ class DurableMemoryControlBackend:
             memory_id=memory_id,
             token=callback_value.encode(),
             expires_at=expires_at,
+            expected_proposal_version=expected_proposal_version,
             expected_memory_version=expected_memory_version,
         )
         return MemoryReviewChallenge(action, SensitiveValue(callback_value), expires_at)

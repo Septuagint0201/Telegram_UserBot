@@ -112,7 +112,17 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
         42,
         "control-bot",
     )
-    delivery_fake = FakeSession()
+    claim_fake = FakeSession(scalars=(request_id,))
+    assert await ContextRepository(cast(AsyncSession, claim_fake)).begin_preview_delivery(
+        request=request
+    )
+    assert len(claim_fake.statements) == 1
+    claim_sql = str(claim_fake.statements[0])
+    assert "context_preview_requests.bot_identity" in claim_sql
+    assert "context_preview_requests.bot_chat_id" in claim_sql
+    assert "context_preview_requests.state" in claim_sql
+
+    delivery_fake = FakeSession(scalars=(request_id,))
     delivery_repository = ContextRepository(cast(AsyncSession, delivery_fake))
     await delivery_repository.record_preview_delivery(
         request=request,
@@ -122,9 +132,12 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
     )
     assert len(delivery_fake.statements) == 3
 
-    deletion = PreviewDeletionRecord(7, request_id, 42, 100)
+    deletion = PreviewDeletionRecord(7, request_id, "control-bot", 42, 100)
     for states in (("deleted",), ("delete_failed",), ("sent",)):
-        deletion_fake = FakeSession(scalar_sequences=(states,))
+        deletion_fake = FakeSession(
+            scalars=(7, request_id),
+            scalar_sequences=(states,),
+        )
         await ContextRepository(cast(AsyncSession, deletion_fake)).finish_preview_deletion(
             deletion=deletion,
             deleted=states == ("deleted",),
@@ -132,3 +145,15 @@ async def test_context_preview_consume_delivery_and_deletion_state_branches() ->
             error_code="synthetic" if states == ("delete_failed",) else None,
         )
         assert len(deletion_fake.statements) == 3
+        deletion_sql = str(deletion_fake.statements[0])
+        assert "context_preview_deliveries.request_id" in deletion_sql
+        assert "context_preview_deliveries.bot_identity" in deletion_sql
+        assert "context_preview_deliveries.bot_message_id" in deletion_sql
+
+    conflict = FakeSession(scalars=(None,))
+    with pytest.raises(RuntimeError, match="deletion_conflict"):
+        await ContextRepository(cast(AsyncSession, conflict)).finish_preview_deletion(
+            deletion=deletion,
+            deleted=True,
+            now=NOW,
+        )

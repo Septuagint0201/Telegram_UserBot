@@ -40,9 +40,13 @@ class RepositoryFake(ContextRepository):
     def __init__(self) -> None:
         self.deliveries: list[tuple[tuple[str, int | None], ...]] = []
         self.deletion_results: list[tuple[bool, str | None]] = []
+        self.claim_result = True
 
     async def consume_preview(self, **kwargs: object) -> PreviewRequestRecord | None:
         return REQUEST
+
+    async def begin_preview_delivery(self, *, request: PreviewRequestRecord) -> bool:
+        return self.claim_result and request == REQUEST
 
     async def record_preview_delivery(
         self,
@@ -57,7 +61,7 @@ class RepositoryFake(ContextRepository):
     async def due_preview_deletions(
         self, *, bot_identity: str, now: datetime, limit: int = 50
     ) -> tuple[PreviewDeletionRecord, ...]:
-        return (PreviewDeletionRecord(7, REQUEST.request_id, 42, 99),)
+        return (PreviewDeletionRecord(7, REQUEST.request_id, REQUEST.bot_identity, 42, 99),)
 
     async def finish_preview_deletion(
         self,
@@ -231,6 +235,22 @@ async def test_durable_preview_send_unknown_stops_without_retry() -> None:
     assert result.state == "send_unknown"
     assert gateway.sent == 1
     assert repository.deliveries == [(("send_unknown", None),)]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_durable_preview_claim_conflict_prevents_bot_side_effect() -> None:
+    repository = RepositoryFake()
+    repository.claim_result = False
+    gateway = GatewayFake()
+    with pytest.raises(RuntimeError, match="delivery_conflict"):
+        await backend(repository, RebuilderFake(), gateway).deliver_preview(
+            request=REQUEST,
+            chunks=(SensitiveValue("one"),),
+            now=NOW,
+        )
+    assert gateway.sent == 0
+    assert repository.deliveries == []
 
 
 @pytest.mark.unit

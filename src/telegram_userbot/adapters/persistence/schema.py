@@ -2963,6 +2963,9 @@ memories = Table(
     CheckConstraint("octet_length(semantic_key_hash) = 32", name="semantic_hash_32_bytes"),
     CheckConstraint("contact_id IS NOT NULL OR conversation_id IS NULL", name="scope_values"),
     UniqueConstraint("id", "account_id", name="uq_memories_id_account"),
+    UniqueConstraint(
+        "id", "account_id", "conversation_id", name="uq_memories_id_conversation_scope"
+    ),
 )
 Index(
     "ix_memories_active_semantic_key",
@@ -3081,6 +3084,7 @@ memory_proposals = Table(
     Column("proposed_valid_to", UTC_TIMESTAMP),
     Column("visual_only", Boolean, nullable=False, server_default=text("false")),
     Column("state", Text, nullable=False),
+    Column("review_version", Integer, nullable=False, server_default=text("1")),
     Column("validation_code", Text),
     Column("validator_policy_version", Text, nullable=False),
     Column("accepted_memory_version_id", UUID_TYPE),
@@ -3132,6 +3136,7 @@ memory_proposals = Table(
         "'invalidated','expired')",
         name="state_values",
     ),
+    CheckConstraint("review_version > 0", name="review_version_positive"),
     CheckConstraint(
         "operation IN ('create','update','merge','supersede','invalidate')", name="operation_values"
     ),
@@ -3143,6 +3148,12 @@ memory_proposals = Table(
     UniqueConstraint("account_id", "idempotency_key", name="uq_memory_proposals_idempotency"),
     UniqueConstraint("model_run_id", "proposal_ordinal", name="uq_memory_proposals_run_ordinal"),
     UniqueConstraint("id", "account_id", name="uq_memory_proposals_id_account"),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        name="uq_memory_proposals_id_conversation_scope",
+    ),
 )
 Index(
     "ix_memory_proposals_state_expires",
@@ -3627,7 +3638,7 @@ memory_review_actions = Table(
     metadata,
     Column("id", UUID_TYPE, primary_key=True),
     Column("account_id", UUID_TYPE, nullable=False),
-    Column("conversation_id", UUID_TYPE),
+    Column("conversation_id", UUID_TYPE, nullable=False),
     Column("action", Text, nullable=False),
     Column("proposal_id", UUID_TYPE),
     Column("memory_id", UUID_TYPE),
@@ -3644,13 +3655,17 @@ memory_review_actions = Table(
     Column("decided_at", UTC_TIMESTAMP),
     ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_memory_review_actions_account"),
     ForeignKeyConstraint(
-        ["proposal_id", "account_id"],
-        ["memory_proposals.id", "memory_proposals.account_id"],
+        ["proposal_id", "account_id", "conversation_id"],
+        [
+            "memory_proposals.id",
+            "memory_proposals.account_id",
+            "memory_proposals.conversation_id",
+        ],
         name="fk_memory_review_actions_proposal_scope",
     ),
     ForeignKeyConstraint(
-        ["memory_id", "account_id"],
-        ["memories.id", "memories.account_id"],
+        ["memory_id", "account_id", "conversation_id"],
+        ["memories.id", "memories.account_id", "memories.conversation_id"],
         name="fk_memory_review_actions_memory_scope",
     ),
     ForeignKeyConstraint(
@@ -3663,7 +3678,13 @@ memory_review_actions = Table(
         "state IN ('pending','confirmed','applied','rejected','expired')", name="state_values"
     ),
     CheckConstraint("octet_length(action_token_hash) = 32", name="action_token_hash_32_bytes"),
-    CheckConstraint("proposal_id IS NOT NULL OR memory_id IS NOT NULL", name="target_required"),
+    CheckConstraint(
+        "(action IN ('accept','reject') AND proposal_id IS NOT NULL AND memory_id IS NULL "
+        "AND expected_proposal_version IS NOT NULL AND expected_memory_version IS NULL) OR "
+        "(action = 'forget' AND proposal_id IS NULL AND memory_id IS NOT NULL "
+        "AND expected_proposal_version IS NULL AND expected_memory_version IS NOT NULL)",
+        name="target_matches_action",
+    ),
     UniqueConstraint("action_token_hash", name="uq_memory_review_actions_token"),
 )
 Index(
@@ -4117,6 +4138,7 @@ proactive_decisions = Table(
     CheckConstraint("priority >= 0 AND priority <= 1", name="priority_bounded"),
     CheckConstraint("octet_length(output_hash) = 32", name="output_hash_32_bytes"),
     CheckConstraint("state IN ('accepted','rejected','stale')", name="state_values"),
+    UniqueConstraint("candidate_id", name="uq_proactive_decisions_candidate"),
     UniqueConstraint("id", "account_id", name="uq_proactive_decisions_id_account"),
 )
 

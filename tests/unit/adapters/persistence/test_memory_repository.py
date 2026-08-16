@@ -1,6 +1,6 @@
 """Fake-first tests for memory persistence scope and replay guards."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any, cast
@@ -643,3 +643,104 @@ async def test_forget_and_erasure_are_account_scoped_and_idempotently_shaped() -
         )
     with pytest.raises(ValueError, match="source"):
         await repo.record_erasure(account_id=account_id, now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_review_action_requires_and_returns_the_expected_proposal_version() -> None:
+    repo, session = _repository()
+    account_id, conversation_id, proposal_id, action_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    with pytest.raises(ValueError, match="review action"):
+        await repo.issue_review_action(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            admin_actor_id=42,
+            bot_chat_id=42,
+            action="accept",
+            proposal_id=proposal_id,
+            memory_id=None,
+            token=b"t" * 32,
+            expires_at=NOW + timedelta(minutes=5),
+        )
+
+    action_row = {
+        "id": action_id,
+        "account_id": account_id,
+        "conversation_id": conversation_id,
+        "action": "accept",
+        "proposal_id": proposal_id,
+        "memory_id": None,
+        "expected_proposal_version": 3,
+        "expected_memory_version": None,
+        "expires_at": NOW + timedelta(minutes=5),
+    }
+    proposal_row = {
+        "state": "candidate",
+        "review_version": 3,
+        "expires_at": NOW + timedelta(hours=1),
+    }
+    session.execute.side_effect = [_Result(action_row), _Result(proposal_row)]
+    session.scalar.side_effect = [conversation_id, 0, 0, action_id]
+    action = await repo.consume_review_action(
+        token=b"t" * 32,
+        admin_actor_id=42,
+        bot_chat_id=42,
+        now=NOW,
+    )
+    assert action is not None
+    assert action.expected_proposal_version == 3
+
+
+@pytest.mark.asyncio
+async def test_review_action_rechecks_evidence_and_expiry_before_confirmation_or_work() -> None:
+    repo, session = _repository()
+    account_id, conversation_id, proposal_id, action_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    action_row = {
+        "id": action_id,
+        "account_id": account_id,
+        "conversation_id": conversation_id,
+        "action": "accept",
+        "proposal_id": proposal_id,
+        "memory_id": None,
+        "expected_proposal_version": 1,
+        "expected_memory_version": None,
+        "expires_at": NOW + timedelta(minutes=5),
+    }
+    proposal_row = {
+        "state": "candidate",
+        "review_version": 1,
+        "expires_at": NOW + timedelta(hours=1),
+    }
+    session.execute.side_effect = [
+        _Result(action_row),
+        _Result(proposal_row),
+        _Result(rowcount=1),
+    ]
+    session.scalar.side_effect = [conversation_id, 1]
+    assert (
+        await repo.consume_review_action(
+            token=b"t" * 32,
+            admin_actor_id=42,
+            bot_chat_id=42,
+            now=NOW,
+        )
+        is None
+    )
+    terminal_statement = session.execute.await_args_list[-1].args[0]
+    assert "memory_proposal_evidence_changed" in terminal_statement.compile().params.values()
+
+    expired_row = dict(action_row, state="confirmed", expires_at=NOW)
+    session.reset_mock()
+    session.execute.side_effect = [_Result(expired_row), _Result(rowcount=1)]
+    assert await repo.lock_confirmed_review_action(account_id=account_id, now=NOW) is None
+    expiry_statement = session.execute.await_args_list[-1].args[0]
+    assert "review_action_expired" in expiry_statement.compile().params.values()

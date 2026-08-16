@@ -497,14 +497,29 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         _Result(rowcount=1),
         _Result(rowcount=1),
     ]
-    expired = await repo.settle_budget(
+    committed_after_expiry = await repo.settle_budget(
         account_id=account_id,
         reservation_key=key,
         target=ReservationState.COMMITTED,
         now=NOW + timedelta(hours=2),
     )
-    assert expired is not None
-    assert expired.state is ReservationState.EXPIRED
+    assert committed_after_expiry is not None
+    assert committed_after_expiry.state is ReservationState.COMMITTED
+
+    session.execute.side_effect = [
+        _Result(row),
+        _Result(rowcount=1),
+        _Result(rowcount=1),
+        _Result(rowcount=1),
+    ]
+    released_after_expiry = await repo.settle_budget(
+        account_id=account_id,
+        reservation_key=key,
+        target=ReservationState.RELEASED,
+        now=NOW + timedelta(hours=2),
+    )
+    assert released_after_expiry is not None
+    assert released_after_expiry.state is ReservationState.EXPIRED
 
 
 @pytest.mark.asyncio
@@ -565,3 +580,72 @@ async def test_proactive_decision_replay_rejects_a_different_durable_identity() 
             output_hash=output_hash,
             now=NOW,
         )
+
+
+@pytest.mark.asyncio
+async def test_proactive_decision_rejects_a_second_decision_for_terminal_candidate() -> None:
+    account_id, candidate_id = uuid4(), uuid4()
+    membership_hash = membership_digest(())
+    candidate = cast(
+        Candidate,
+        SimpleNamespace(
+            id=candidate_id,
+            account_id=account_id,
+            generation=1,
+            membership_hash=membership_hash,
+            occurrences=(),
+        ),
+    )
+    decision = AgentDecision(
+        candidate_id,
+        ProactiveAction.NONE,
+        "not_natural_now",
+        (),
+        None,
+        0,
+    )
+    session = AsyncMock()
+    session.execute.side_effect = [
+        _Result(
+            {
+                "id": candidate_id,
+                "generation": 1,
+                "membership_hash": membership_hash,
+                "state": "evaluated_none",
+            }
+        ),
+        _Result(None),
+    ]
+    repo = ProactiveRepository(cast(AsyncSession, session))
+
+    with pytest.raises(ValueError, match="already terminal"):
+        await repo.record_decision(
+            candidate=candidate,
+            decision=decision,
+            output_hash=b"n" * 32,
+            now=NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_budget_reaper_only_selects_candidate_states_that_prove_no_side_effect() -> None:
+    account_id = uuid4()
+    reservation_key = b"z" * 32
+    session = AsyncMock()
+    session.execute.return_value = _Result(
+        rows=[{"account_id": account_id, "reservation_key": reservation_key}]
+    )
+    repo = ProactiveRepository(cast(AsyncSession, session))
+    repo.release_budget = AsyncMock(return_value=SimpleNamespace())  # type: ignore[method-assign]
+
+    assert await repo.reap_budget(now=NOW) == 1
+    statement = session.execute.await_args.args[0]
+    rendered = str(statement)
+    assert "JOIN proactive_candidates" in rendered
+    assert "proactive_candidates.state" in rendered
+    repo.release_budget.assert_awaited_once_with(
+        account_id=account_id,
+        reservation_key=reservation_key,
+        now=NOW,
+        expired=True,
+    )

@@ -69,6 +69,7 @@ class PreviewRequestRecord:
 class PreviewDeletionRecord:
     delivery_id: int
     request_id: UUID
+    bot_identity: str
     bot_chat_id: int
     bot_message_id: int
 
@@ -404,6 +405,25 @@ class ContextRepository:
             bot_identity,
         )
 
+    async def begin_preview_delivery(self, *, request: PreviewRequestRecord) -> bool:
+        claimed = await self._session.scalar(
+            update(context_preview_requests)
+            .where(
+                context_preview_requests.c.id == request.request_id,
+                context_preview_requests.c.context_manifest_id == request.manifest_id,
+                context_preview_requests.c.manifest_sha256 == request.manifest_sha256,
+                context_preview_requests.c.source_revision_vector_sha256
+                == request.source_revision_vector_sha256,
+                context_preview_requests.c.admin_user_id == request.admin_user_id,
+                context_preview_requests.c.bot_identity == request.bot_identity,
+                context_preview_requests.c.bot_chat_id == request.bot_chat_id,
+                context_preview_requests.c.state == "confirmed",
+            )
+            .values(state="delivering")
+            .returning(context_preview_requests.c.id)
+        )
+        return claimed == request.request_id
+
     async def record_preview_delivery(
         self,
         *,
@@ -430,9 +450,19 @@ class ContextRepository:
         final_state = (
             "send_unknown" if any(state == "send_unknown" for state, _ in states) else "delivered"
         )
-        await self._session.execute(
+        completed = await self._session.scalar(
             update(context_preview_requests)
-            .where(context_preview_requests.c.id == request.request_id)
+            .where(
+                context_preview_requests.c.id == request.request_id,
+                context_preview_requests.c.context_manifest_id == request.manifest_id,
+                context_preview_requests.c.manifest_sha256 == request.manifest_sha256,
+                context_preview_requests.c.source_revision_vector_sha256
+                == request.source_revision_vector_sha256,
+                context_preview_requests.c.admin_user_id == request.admin_user_id,
+                context_preview_requests.c.bot_identity == request.bot_identity,
+                context_preview_requests.c.bot_chat_id == request.bot_chat_id,
+                context_preview_requests.c.state == "delivering",
+            )
             .values(
                 state=final_state,
                 chunk_count=len(states),
@@ -441,7 +471,10 @@ class ContextRepository:
                 delete_after=delete_after,
                 last_error_code="send_unknown" if final_state == "send_unknown" else None,
             )
+            .returning(context_preview_requests.c.id)
         )
+        if completed != request.request_id:
+            raise RuntimeError("context_preview_delivery_conflict")
 
     async def due_preview_deletions(
         self, *, bot_identity: str, now: datetime, limit: int = 50
@@ -478,6 +511,7 @@ class ContextRepository:
                 PreviewDeletionRecord(
                     cast(int, row["id"]),
                     cast(UUID, row["request_id"]),
+                    cast(str, row["bot_identity"]),
                     cast(int, row["bot_chat_id"]),
                     cast(int, row["bot_message_id"]),
                 )
@@ -492,10 +526,14 @@ class ContextRepository:
         now: datetime,
         error_code: str | None = None,
     ) -> None:
-        await self._session.execute(
+        completed_delivery = await self._session.scalar(
             update(context_preview_deliveries)
             .where(
                 context_preview_deliveries.c.id == deletion.delivery_id,
+                context_preview_deliveries.c.request_id == deletion.request_id,
+                context_preview_deliveries.c.bot_identity == deletion.bot_identity,
+                context_preview_deliveries.c.bot_chat_id == deletion.bot_chat_id,
+                context_preview_deliveries.c.bot_message_id == deletion.bot_message_id,
                 context_preview_deliveries.c.state == "delete_pending",
             )
             .values(
@@ -503,11 +541,16 @@ class ContextRepository:
                 deleted_at=now if deleted else None,
                 last_error_code=None if deleted else error_code or "delete_failed",
             )
+            .returning(context_preview_deliveries.c.id)
         )
+        if completed_delivery != deletion.delivery_id:
+            raise RuntimeError("context_preview_deletion_conflict")
         states = tuple(
             await self._session.scalars(
                 select(context_preview_deliveries.c.state).where(
-                    context_preview_deliveries.c.request_id == deletion.request_id
+                    context_preview_deliveries.c.request_id == deletion.request_id,
+                    context_preview_deliveries.c.bot_identity == deletion.bot_identity,
+                    context_preview_deliveries.c.bot_chat_id == deletion.bot_chat_id,
                 )
             )
         )
@@ -517,9 +560,16 @@ class ContextRepository:
             request_state = "delete_partial"
         else:
             request_state = "delete_pending"
-        await self._session.execute(
+        completed_request = await self._session.scalar(
             update(context_preview_requests)
-            .where(context_preview_requests.c.id == deletion.request_id)
+            .where(
+                context_preview_requests.c.id == deletion.request_id,
+                context_preview_requests.c.bot_identity == deletion.bot_identity,
+                context_preview_requests.c.bot_chat_id == deletion.bot_chat_id,
+                context_preview_requests.c.state.in_(
+                    ("delivered", "delete_pending", "delete_partial")
+                ),
+            )
             .values(
                 state=request_state,
                 completed_at=now if request_state in {"deleted", "delete_partial"} else None,
@@ -527,4 +577,7 @@ class ContextRepository:
                     error_code or "delete_failed" if request_state == "delete_partial" else None
                 ),
             )
+            .returning(context_preview_requests.c.id)
         )
+        if completed_request != deletion.request_id:
+            raise RuntimeError("context_preview_deletion_request_conflict")

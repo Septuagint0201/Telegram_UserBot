@@ -1458,6 +1458,7 @@ UNIQUE (summary_version_id, ordinal)
 action accept|reject|forget
 proposal_id? / memory_id?
 expected proposal/memory version
+conversation scope
 admin actor
 action_token_hash
 expires_at / used_at
@@ -1467,6 +1468,8 @@ created_at / decided_at
 ```
 
 正文不复制到 command/audit；显示时按仍有效 source 临时读取。
+
+`memory_proposals.review_version`从1开始，任何使candidate审查快照变化的state/evidence/target变更都使旧expected version失效。Control确认与worker消费分别重检expiry和version；worker在conversation row lock内进一步重检current message revision/hash/redaction以及target memory version，失败时只写受控reason code并拒绝动作。
 
 ### 25.6 Index
 

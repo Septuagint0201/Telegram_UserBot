@@ -584,7 +584,10 @@ class ProactiveRepository:
             ReservationState.EXPIRED,
         }:
             return _reservation(row)
-        if cast(datetime, row["expires_at"]) <= now.astimezone(UTC):
+        if (
+            cast(datetime, row["expires_at"]) <= now.astimezone(UTC)
+            and target is ReservationState.RELEASED
+        ):
             target = ReservationState.EXPIRED
         delta_committed = target in {ReservationState.COMMITTED, ReservationState.SEND_UNKNOWN}
         await self._session.execute(
@@ -656,10 +659,23 @@ class ProactiveRepository:
                     select(
                         proactive_budget_reservations.c.account_id,
                         proactive_budget_reservations.c.reservation_key,
-                    ).where(
+                    )
+                    .join(
+                        proactive_candidates,
+                        (proactive_candidates.c.id == proactive_budget_reservations.c.candidate_id)
+                        & (
+                            proactive_candidates.c.account_id
+                            == proactive_budget_reservations.c.account_id
+                        ),
+                    )
+                    .where(
                         proactive_budget_reservations.c.state == "held",
                         proactive_budget_reservations.c.expires_at <= now.astimezone(UTC),
+                        proactive_candidates.c.state.in_(
+                            ("evaluated_none", "failed_model", "superseded", "expired")
+                        ),
                     )
+                    .with_for_update(skip_locked=True)
                 )
             )
             .mappings()
@@ -721,7 +737,7 @@ class ProactiveRepository:
                 await self._session.execute(
                     select(proactive_decisions)
                     .where(
-                        proactive_decisions.c.id == decision_id,
+                        proactive_decisions.c.candidate_id == candidate.id,
                         proactive_decisions.c.account_id == candidate.account_id,
                     )
                     .with_for_update()
@@ -733,7 +749,9 @@ class ProactiveRepository:
         if existing is not None:
             if not _decision_matches(existing, candidate, decision, output_hash):
                 raise ValueError("decision replay does not match durable identity")
-            return decision_id
+            return cast(UUID, existing["id"])
+        if current_candidate["state"] not in {"open", "evaluating"}:
+            raise ValueError("candidate is already terminal")
         await self._session.execute(
             postgresql_insert(proactive_decisions)
             .values(
@@ -750,7 +768,7 @@ class ProactiveRepository:
                 state="accepted",
                 created_at=now.astimezone(UTC),
             )
-            .on_conflict_do_nothing(constraint="uq_proactive_decisions_id_account")
+            .on_conflict_do_nothing(constraint="uq_proactive_decisions_candidate")
         )
         for ordinal, occurrence_id in enumerate(decision.selected_occurrence_ids, 1):
             await self._session.execute(
@@ -773,6 +791,7 @@ class ProactiveRepository:
             .where(
                 proactive_candidates.c.id == candidate.id,
                 proactive_candidates.c.account_id == candidate.account_id,
+                proactive_candidates.c.state.in_(("open", "evaluating")),
             )
             .values(state=target_state)
         )
