@@ -1035,9 +1035,9 @@ def test_memory_store_rejects_invalid_acceptance_and_inactive_targets() -> None:
 def test_memory_store_rejects_cross_scope_merge_targets() -> None:
     manifest, source_id = _manifest()
     first = validate_proposal(
-        parse_agent_response(
-            _payload(source_id), account_id=ACCOUNT, conversation_id=CONVERSATION
-        )[0],
+        parse_agent_response(_payload(source_id), account_id=ACCOUNT, conversation_id=CONVERSATION)[
+            0
+        ],
         manifest,
     )
     other_account, other_conversation = uuid4(), uuid4()

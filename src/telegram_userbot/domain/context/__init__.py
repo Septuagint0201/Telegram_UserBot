@@ -9,6 +9,7 @@ from telegram_userbot.domain.context.manifest import (
     build_context,
     rebuild_context,
     render_data_boundary,
+    validate_manifest_integrity,
 )
 from telegram_userbot.domain.context.policy import (
     BudgetSnapshot,
@@ -46,4 +47,5 @@ __all__ = [
     "render_data_boundary",
     "select_semantic",
     "select_structured",
+    "validate_manifest_integrity",
 ]

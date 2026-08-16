@@ -16,6 +16,8 @@ from telegram_userbot.domain.context.selection import Candidate, ContextLayer
 from telegram_userbot.domain.shared.hashing import JsonValue, stable_json_bytes
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 
+UTF8_ESTIMATOR_VERSION = "utf8_bytes_v1"
+
 
 class TrustLevel(StrEnum):
     SYSTEM = "system"
@@ -186,6 +188,77 @@ class BuiltContext:
     ordered_sources: tuple[ContextSource, ...] = field(repr=False)
 
 
+def validate_manifest_integrity(manifest: ContextManifest) -> None:
+    """Fail closed when a persisted or replayed manifest is internally inconsistent."""
+
+    if (
+        manifest.effective_input_budget <= 0
+        or min(
+            manifest.safety_reserve_tokens,
+            manifest.estimated_instruction_tokens,
+            manifest.estimated_text_tokens,
+            manifest.estimated_image_tokens,
+            manifest.estimated_structural_tokens,
+        )
+        < 0
+    ):
+        raise ValueError("context_manifest_budget_invalid")
+    if manifest.token_estimator_version != UTF8_ESTIMATOR_VERSION:
+        raise ValueError("context_manifest_token_estimator_invalid")
+    if manifest.estimated_structural_tokens != 0:
+        raise ValueError("context_manifest_estimate_mismatch")
+    expected_ordinals = tuple(range(1, len(manifest.items) + 1))
+    if tuple(item.ordinal for item in manifest.items) != expected_ordinals:
+        raise ValueError("context_manifest_item_order_invalid")
+    for item in manifest.items:
+        if item.token_estimate < 0 or item.estimated_image_tokens < 0:
+            raise ValueError("context_manifest_estimate_mismatch")
+        _require_sha256_hex(item.content_sha256)
+        _require_sha256_hex(item.rendered_part_sha256)
+    instruction_tokens = sum(
+        item.token_estimate
+        for item in manifest.items
+        if item.layer == ContextLayer.INSTRUCTION.value
+    )
+    text_tokens = sum(item.token_estimate for item in manifest.items) - instruction_tokens
+    image_tokens = sum(item.estimated_image_tokens for item in manifest.items)
+    if (
+        manifest.estimated_instruction_tokens != instruction_tokens
+        or manifest.estimated_text_tokens != text_tokens
+        or manifest.estimated_image_tokens != image_tokens
+    ):
+        raise ValueError("context_manifest_estimate_mismatch")
+    if manifest.input_token_estimate > manifest.effective_input_budget:
+        raise ValueError("context_manifest_budget_exceeded")
+    _require_sha256_hex(manifest.prompt_bundle_sha256)
+    _require_sha256_hex(manifest.capability_snapshot_sha256)
+    _require_sha256_hex(manifest.source_revision_vector_sha256)
+    _require_sha256_hex(manifest.manifest_sha256)
+    if manifest.source_revision_vector_sha256 != _source_vector_hash(manifest.items):
+        raise ValueError("context_manifest_source_vector_mismatch")
+    if manifest.manifest_sha256 != _manifest_hash(
+        purpose=manifest.purpose,
+        logical_role=manifest.logical_role,
+        builder_version=manifest.builder_version,
+        prompt_version=manifest.prompt_version,
+        prompt_bundle_sha256=manifest.prompt_bundle_sha256,
+        context_policy_version=manifest.context_policy_version,
+        retrieval_policy_version=manifest.retrieval_policy_version,
+        token_estimator_version=manifest.token_estimator_version,
+        capability_snapshot_sha256=manifest.capability_snapshot_sha256,
+        memory_freshness=manifest.memory_freshness,
+        effective_input_budget=manifest.effective_input_budget,
+        safety_reserve_tokens=manifest.safety_reserve_tokens,
+        estimated_instruction_tokens=manifest.estimated_instruction_tokens,
+        estimated_text_tokens=manifest.estimated_text_tokens,
+        estimated_image_tokens=manifest.estimated_image_tokens,
+        estimated_structural_tokens=manifest.estimated_structural_tokens,
+        items=manifest.items,
+        omissions=manifest.omissions,
+    ):
+        raise ValueError("context_manifest_hash_mismatch")
+
+
 def render_data_boundary(source: ContextSource) -> str:
     content = source.content.reveal_for_use()
     if source.candidate.layer is ContextLayer.INSTRUCTION:
@@ -305,45 +378,34 @@ def build_context(  # noqa: PLR0912,PLR0913,PLR0915 - deterministic policy branc
         _manifest_item(index, source, extra_reasons=reasons)
         for index, (source, reasons) in enumerate(selected_in_order, 1)
     )
-    source_vector = [
-        {
-            "source_type": item.source_type,
-            "source_id": item.source_id,
-            "revision": item.source_revision,
-        }
-        for item in items
-    ]
-    source_vector_hash = hashlib.sha256(
-        stable_json_bytes(cast(JsonValue, source_vector))
-    ).hexdigest()
-    if len(prompt_bundle_sha256) != 64 or len(capability_snapshot_sha256) != 64:
-        raise ValueError("context snapshot hashes must be sha256 hex")
-    try:
-        bytes.fromhex(prompt_bundle_sha256)
-        bytes.fromhex(capability_snapshot_sha256)
-    except ValueError as error:
-        raise ValueError("context snapshot hashes must be sha256 hex") from error
-    manifest_identity: dict[str, JsonValue] = {
-        "purpose": purpose,
-        "logical_role": logical_role,
-        "builder_version": builder_version,
-        "prompt_version": prompt_version,
-        "prompt_bundle_sha256": prompt_bundle_sha256,
-        "context_policy_version": context_policy_version,
-        "retrieval_policy_version": retrieval_policy_version,
-        "token_estimator_version": "utf8_bytes_v1",
-        "capability_snapshot_sha256": capability_snapshot_sha256,
-        "memory_freshness": memory_freshness,
-        "budget": budget.effective_input_budget,
-        "items": [item.payload() for item in items],
-        "omissions": omissions,
-    }
-    manifest_hash = hashlib.sha256(stable_json_bytes(manifest_identity)).hexdigest()
+    _require_sha256_hex(prompt_bundle_sha256)
+    _require_sha256_hex(capability_snapshot_sha256)
+    source_vector_hash = _source_vector_hash(items)
     instruction_tokens = sum(
         item.token_estimate for item in items if item.layer == ContextLayer.INSTRUCTION.value
     )
     image_tokens = budget.image_token_reserve
     text_tokens = sum(item.token_estimate for item in items) - instruction_tokens
+    manifest_hash = _manifest_hash(
+        purpose=purpose,
+        logical_role=logical_role,
+        builder_version=builder_version,
+        prompt_version=prompt_version,
+        prompt_bundle_sha256=prompt_bundle_sha256,
+        context_policy_version=context_policy_version,
+        retrieval_policy_version=retrieval_policy_version,
+        token_estimator_version=UTF8_ESTIMATOR_VERSION,
+        capability_snapshot_sha256=capability_snapshot_sha256,
+        memory_freshness=memory_freshness,
+        effective_input_budget=budget.effective_input_budget,
+        safety_reserve_tokens=budget.safety_reserve_tokens,
+        estimated_instruction_tokens=instruction_tokens,
+        estimated_text_tokens=text_tokens,
+        estimated_image_tokens=image_tokens,
+        estimated_structural_tokens=0,
+        items=items,
+        omissions=tuple(omissions),
+    )
     manifest = ContextManifest(
         manifest_id,
         purpose,
@@ -353,7 +415,7 @@ def build_context(  # noqa: PLR0912,PLR0913,PLR0915 - deterministic policy branc
         prompt_bundle_sha256,
         context_policy_version,
         retrieval_policy_version,
-        "utf8_bytes_v1",
+        UTF8_ESTIMATOR_VERSION,
         capability_snapshot_sha256,
         memory_freshness,
         budget.effective_input_budget,
@@ -367,10 +429,12 @@ def build_context(  # noqa: PLR0912,PLR0913,PLR0915 - deterministic policy branc
         source_vector_hash,
         manifest_hash,
     )
+    validate_manifest_integrity(manifest)
     return BuiltContext(manifest, tuple(source for source, _ in selected_in_order))
 
 
 def rebuild_context(expected: ContextManifest, sources: tuple[ContextSource, ...]) -> BuiltContext:
+    validate_manifest_integrity(expected)
     by_identity = {
         (item.source_type, str(item.candidate.source_id), item.candidate.source_revision): item
         for item in sources
@@ -388,6 +452,81 @@ def rebuild_context(expected: ContextManifest, sources: tuple[ContextSource, ...
             raise ValueError("context_source_revision_changed")
         ordered.append(source)
     return BuiltContext(expected, tuple(ordered))
+
+
+def _require_sha256_hex(value: str) -> None:
+    if len(value) != 64:
+        raise ValueError("context snapshot hashes must be sha256 hex")
+    try:
+        bytes.fromhex(value)
+    except ValueError as error:
+        raise ValueError("context snapshot hashes must be sha256 hex") from error
+
+
+def _source_vector_hash(items: tuple[ManifestItem, ...]) -> str:
+    source_vector = [
+        {
+            "source_type": item.source_type,
+            "source_id": item.source_id,
+            "revision": item.source_revision,
+        }
+        for item in items
+    ]
+    return hashlib.sha256(stable_json_bytes(cast(JsonValue, source_vector))).hexdigest()
+
+
+def _manifest_hash(  # noqa: PLR0913 - every identity field is intentionally explicit
+    *,
+    purpose: str,
+    logical_role: str,
+    builder_version: str,
+    prompt_version: str,
+    prompt_bundle_sha256: str,
+    context_policy_version: str,
+    retrieval_policy_version: str,
+    token_estimator_version: str,
+    capability_snapshot_sha256: str,
+    memory_freshness: str,
+    effective_input_budget: int,
+    safety_reserve_tokens: int,
+    estimated_instruction_tokens: int,
+    estimated_text_tokens: int,
+    estimated_image_tokens: int,
+    estimated_structural_tokens: int,
+    items: tuple[ManifestItem, ...],
+    omissions: tuple[str, ...],
+) -> str:
+    manifest_identity: dict[str, JsonValue] = {
+        "purpose": purpose,
+        "logical_role": logical_role,
+        "builder_version": builder_version,
+        "prompt_version": prompt_version,
+        "prompt_bundle_sha256": prompt_bundle_sha256,
+        "context_policy_version": context_policy_version,
+        "retrieval_policy_version": retrieval_policy_version,
+        "token_estimator_version": token_estimator_version,
+        "capability_snapshot_sha256": capability_snapshot_sha256,
+        "memory_freshness": memory_freshness,
+        "budget": {
+            "effective_input_budget": effective_input_budget,
+            "safety_reserve_tokens": safety_reserve_tokens,
+            "estimated_instruction_tokens": estimated_instruction_tokens,
+            "estimated_text_tokens": estimated_text_tokens,
+            "estimated_image_tokens": estimated_image_tokens,
+            "estimated_structural_tokens": estimated_structural_tokens,
+            "input_token_estimate": (
+                estimated_instruction_tokens
+                + estimated_text_tokens
+                + estimated_image_tokens
+                + estimated_structural_tokens
+            ),
+            "image_count": sum(item.image_detail is not None for item in items),
+            "omission_count": len(omissions),
+        },
+        "items": [item.payload() for item in items],
+        "omissions": list(omissions),
+    }
+    return hashlib.sha256(stable_json_bytes(manifest_identity)).hexdigest()
 
 
 def _source_tokens(source: ContextSource) -> int:

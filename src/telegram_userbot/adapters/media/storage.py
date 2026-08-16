@@ -117,9 +117,7 @@ class PrivateMediaStore:
         with self._quota_guard():
             target = self.resolve_key(key.as_posix(), must_exist=False)
             existing_size = (
-                target.stat().st_size
-                if target.is_file() and not target.is_symlink()
-                else 0
+                target.stat().st_size if target.is_file() and not target.is_symlink() else 0
             )
             required_delta = len(payload) - existing_size
             if required_delta > self._quota_bytes - self._used_bytes():
@@ -183,7 +181,13 @@ class PrivateMediaStore:
         key = PurePosixPath(storage_key)
         if key.is_absolute() or ".." in key.parts or "\\" in storage_key:
             raise ValueError("media_storage_key_invalid")
-        target = (self._root / Path(*key.parts)).resolve(strict=must_exist)
+        candidate = self._root / Path(*key.parts)
+        for part in (candidate, *candidate.parents):
+            if part == self._root:
+                break
+            if part.is_symlink():
+                raise ValueError("media_storage_key_symlink")
+        target = candidate.resolve(strict=must_exist)
         if self._root not in target.parents:
             raise ValueError("media_storage_key_outside_root")
         if must_exist and (not target.is_file() or target.is_symlink()):
@@ -203,19 +207,22 @@ class PrivateMediaStore:
         deleted: list[str] = []
         protected: list[str] = []
         missing: list[str] = []
-        for candidate in sorted(candidates, key=lambda item: (item.expires_at, item.storage_key)):
-            if candidate.expires_at > now:
-                continue
-            if candidate.reference_count > 0:
-                protected.append(candidate.storage_key)
-                continue
-            try:
-                target = self.resolve_key(candidate.storage_key)
-            except FileNotFoundError:
-                missing.append(candidate.storage_key)
-                continue
-            target.unlink()
-            deleted.append(candidate.storage_key)
+        with self._quota_guard():
+            for candidate in sorted(
+                candidates, key=lambda item: (item.expires_at, item.storage_key)
+            ):
+                if candidate.expires_at > now:
+                    continue
+                if candidate.reference_count > 0:
+                    protected.append(candidate.storage_key)
+                    continue
+                try:
+                    target = self.resolve_key(candidate.storage_key)
+                except FileNotFoundError:
+                    missing.append(candidate.storage_key)
+                    continue
+                target.unlink()
+                deleted.append(candidate.storage_key)
         return CleanupReport(tuple(deleted), tuple(protected), tuple(missing))
 
 

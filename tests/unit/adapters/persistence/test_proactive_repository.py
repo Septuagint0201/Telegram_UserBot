@@ -810,7 +810,7 @@ async def test_proactive_budget_expired_hold_is_not_replayed_as_authorization() 
             contact_timezone_name="UTC",
             limits=BudgetLimits(1, 1),
             now=NOW,
-            expires_at=row["expires_at"],
+            expires_at=cast(datetime, row["expires_at"]),
             reservation_key=key,
             candidate_id=candidate_id,
             decision_id=decision_id,
@@ -819,6 +819,8 @@ async def test_proactive_budget_expired_hold_is_not_replayed_as_authorization() 
         )
         is None
     )
+
+
 @pytest.mark.asyncio
 async def test_proactive_decision_replay_rejects_a_different_durable_identity() -> None:
     account_id, candidate_id = uuid4(), uuid4()

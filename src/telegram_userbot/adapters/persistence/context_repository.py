@@ -25,7 +25,7 @@ from telegram_userbot.adapters.persistence.schema import (
     retrieval_policies,
     retrieval_policy_versions,
 )
-from telegram_userbot.domain.context import ContextManifest
+from telegram_userbot.domain.context import ContextManifest, validate_manifest_integrity
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 from telegram_userbot.domain.shared.time import require_aware
 
@@ -100,6 +100,7 @@ class ContextRepository:
         created_time = require_aware(created_at, "created_at")
         if (turn_id is None) == (background_job_id is None):
             raise ValueError("context_manifest_owner_required")
+        validate_manifest_integrity(manifest)
         if bytes.fromhex(manifest.prompt_bundle_sha256) != prompt_bundle_sha256:
             raise ValueError("context_prompt_snapshot_mismatch")
         if bytes.fromhex(manifest.capability_snapshot_sha256) != capability_snapshot_sha256:

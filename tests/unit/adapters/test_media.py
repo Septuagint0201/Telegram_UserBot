@@ -159,8 +159,19 @@ def test_private_store_is_atomic_hash_verified_and_provider_copy_clears_exif(
     except OSError:
         pass
     else:
-        with pytest.raises(ValueError, match="outside_root"):
+        with pytest.raises(ValueError, match="storage_key_symlink"):
             store.resolve_key("escape.png")
+
+    inside_target = tmp_path / "media-data" / "inside-target.png"
+    inside_target.write_bytes(b"inside")
+    inside_alias = tmp_path / "media-data" / "inside-alias.png"
+    try:
+        inside_alias.symlink_to(inside_target)
+    except OSError:
+        pass
+    else:
+        with pytest.raises(ValueError, match="storage_key_symlink"):
+            store.resolve_key("inside-alias.png")
 
     directory = tmp_path / "media-data" / "not-a-file"
     directory.mkdir()
@@ -231,9 +242,7 @@ def test_media_quota_check_and_rename_are_one_critical_section(tmp_path: Path) -
     stores = [PrivateMediaStore(root, quota_bytes=len(payload)) for _ in range(2)]
 
     def write(index: int) -> StoredMedia:
-        return stores[index].store_original(
-            account_id=uuid7(), object_id=uuid7(), image=image
-        )
+        return stores[index].store_original(account_id=uuid7(), object_id=uuid7(), image=image)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = tuple(executor.submit(write, index) for index in range(2))

@@ -103,10 +103,21 @@ class MediaRepository:
         position: int,
         media_object_id: UUID,
     ) -> bool:
+        account_id = await self._session.scalar(
+            select(media_objects.c.account_id)
+            .where(
+                media_objects.c.id == media_object_id,
+                media_objects.c.status == "ready",
+            )
+            .with_for_update()
+        )
+        if account_id is None:
+            return False
         result = await self._session.execute(
             update(message_media)
             .where(
                 message_media.c.message_revision_id == message_revision_id,
+                message_media.c.account_id == account_id,
                 message_media.c.position == position,
                 message_media.c.media_object_id.is_(None),
             )
@@ -133,10 +144,24 @@ class MediaRepository:
                 .with_for_update(skip_locked=True)
             )
         )
-        if rows:
-            await self._session.execute(
+        if not rows:
+            return ()
+        claimed = set(
+            await self._session.scalars(
                 update(media_objects)
-                .where(media_objects.c.id.in_(rows), media_objects.c.status == "ready")
+                .where(
+                    media_objects.c.id.in_(rows),
+                    media_objects.c.status == "ready",
+                    ~media_objects.c.id.in_(
+                        select(message_media.c.media_object_id).where(
+                            message_media.c.media_object_id.is_not(None)
+                        )
+                    ),
+                )
                 .values(status="delete_pending", delete_requested_at=now)
+                .returning(media_objects.c.id)
             )
-        return cast(tuple[UUID, ...], rows)
+        )
+        return cast(
+            tuple[UUID, ...], tuple(object_id for object_id in rows if object_id in claimed)
+        )

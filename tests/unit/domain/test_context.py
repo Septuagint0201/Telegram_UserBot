@@ -144,6 +144,31 @@ def test_prompt_injection_stays_in_data_boundary_and_manifest_rebuilds() -> None
     assert rebuilt.manifest.manifest_sha256 == built.manifest.manifest_sha256
     assert rebuilt.ordered_sources == built.ordered_sources
 
+    for corrupted, message in (
+        (replace(built.manifest, manifest_sha256="0" * 64), "manifest_hash_mismatch"),
+        (
+            replace(built.manifest, source_revision_vector_sha256="0" * 64),
+            "source_vector_mismatch",
+        ),
+        (
+            replace(
+                built.manifest,
+                estimated_text_tokens=built.manifest.estimated_text_tokens + 1,
+            ),
+            "estimate_mismatch",
+        ),
+        (
+            replace(
+                built.manifest,
+                safety_reserve_tokens=built.manifest.safety_reserve_tokens + 1,
+            ),
+            "manifest_hash_mismatch",
+        ),
+        (replace(built.manifest, items=tuple(reversed(built.manifest.items))), "item_order"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            rebuild_context(corrupted, (instruction, injection))
+
     changed = ContextSource(
         Candidate(
             injection.candidate.source_id,
