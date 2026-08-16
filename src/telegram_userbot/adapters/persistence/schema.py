@@ -785,6 +785,7 @@ data_erasure_requests = Table(
         nullable=False,
     ),
     Column("scope_type", Text, nullable=False),
+    # Account-scoped target FKs are added by 0011 after M6 memories exist.
     Column("memory_id", UUID_TYPE),
     Column("contact_id", UUID_TYPE),
     Column("state", Text, nullable=False),
@@ -2263,6 +2264,7 @@ context_manifests = Table(
     Column("token_policy_version", Text, nullable=False),
     Column("token_estimator_version", Text, nullable=False),
     Column("capability_snapshot_sha256", LargeBinary, nullable=False),
+    # The account-scoped FK is added by 0011 after M6 embedding spaces exist.
     Column("embedding_space_id", UUID_TYPE),
     Column("memory_freshness", Text, nullable=False),
     Column("effective_input_budget", Integer, nullable=False),
@@ -3525,6 +3527,7 @@ embedding_spaces = Table(
     CheckConstraint("normalization IN ('none','l2')", name="normalization_values"),
     CheckConstraint("state IN ('building','active','retired','failed')", name="state_values"),
     UniqueConstraint("id", "dimensions", name="uq_embedding_spaces_id_dimensions"),
+    UniqueConstraint("id", "account_id", name="uq_embedding_spaces_id_account"),
     UniqueConstraint(
         "id",
         "account_id",

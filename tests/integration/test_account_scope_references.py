@@ -15,6 +15,8 @@ from telegram_userbot.adapters.persistence.schema import (
     context_preview_requests,
     control_commands,
     conversation_turns,
+    conversations,
+    data_erasure_requests,
     embedding_records,
     embedding_spaces,
     media_objects,
@@ -24,7 +26,7 @@ from telegram_userbot.adapters.persistence.schema import (
     turn_messages,
 )
 from tests.integration.test_m5_context_media import NOW, seed_policies, seed_scope
-from tests.integration.test_m6_account_scope_constraints import _seed_profile
+from tests.integration.test_m6_account_scope_constraints import _seed_memory, _seed_profile
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -259,6 +261,12 @@ async def test_remaining_account_owned_references_reject_cross_scope(
     )
     await _reject(
         db_session,
+        update(context_manifests)
+        .where(context_manifests.c.id == manifest_id)
+        .values(embedding_space_id=space_b),
+    )
+    await _reject(
+        db_session,
         insert(embedding_records).values(
             id=uuid7(),
             account_id=account_a,
@@ -270,5 +278,43 @@ async def test_remaining_account_owned_references_reject_cross_scope(
             vector_payload=[0.1, 0.2],
             dimensions=2,
             state="ready",
+        ),
+    )
+
+    memory_b, memory_version_b = uuid7(), uuid7()
+    await _seed_memory(
+        db_session,
+        account_id=account_b,
+        memory_id=memory_b,
+        version_id=memory_version_b,
+    )
+    contact_b = await db_session.scalar(
+        select(conversations.c.contact_id).where(conversations.c.id == conversation_b)
+    )
+    assert contact_b is not None
+    await _reject(
+        db_session,
+        insert(data_erasure_requests).values(
+            id=uuid7(),
+            account_id=account_a,
+            scope_type="memory",
+            memory_id=memory_b,
+            state="requested",
+            requested_by="scope-test",
+            request_idempotency_key=b"e" * 32,
+            policy_version=1,
+        ),
+    )
+    await _reject(
+        db_session,
+        insert(data_erasure_requests).values(
+            id=uuid7(),
+            account_id=account_a,
+            scope_type="contact",
+            contact_id=contact_b,
+            state="requested",
+            requested_by="scope-test",
+            request_idempotency_key=b"f" * 32,
+            policy_version=1,
         ),
     )

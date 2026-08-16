@@ -257,6 +257,25 @@ def test_remaining_scope_migration_is_postgres_safe_and_reversible() -> None:
 
 
 @pytest.mark.unit
+def test_context_erasure_scope_migration_is_safe_and_keeps_candidate_key() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0011_scope_context_erasure.py"
+    ).read_text(encoding="utf-8")
+    constraint_names = re.findall(r'"((?:fk|uq)_[^"]+)"', migration)
+    downgrade = migration[migration.index("def downgrade() -> None:") :]
+
+    assert constraint_names
+    assert all(len(name) <= 63 for name in constraint_names)
+    assert '"fk_context_manifests_embedding_scope"' in migration
+    assert '"fk_erasure_requests_memory_scope"' in migration
+    assert '"fk_erasure_requests_contact_scope"' in migration
+    assert '"uq_embedding_spaces_id_account"' not in downgrade
+
+
+@pytest.mark.unit
 def test_durable_settings_are_strict_and_safe() -> None:
     settings = DurableStateSettings.from_mapping(
         {
