@@ -1,10 +1,12 @@
 import asyncio
 import io
 import os
+import sys
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 from unittest.mock import AsyncMock
 from uuid import uuid7
@@ -126,6 +128,27 @@ def test_media_directory_fsync_skips_windows(
 ) -> None:
     monkeypatch.setattr(os, "name", "nt")
     media_storage._fsync_directory(tmp_path)
+
+
+@pytest.mark.unit
+def test_media_quota_guard_covers_windows_locking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_msvcrt = ModuleType("msvcrt")
+    fake_msvcrt.LK_LOCK = 1  # type: ignore[attr-defined]
+    fake_msvcrt.LK_UNLCK = 2  # type: ignore[attr-defined]
+
+    def locking(_descriptor: int, _mode: int, _size: int) -> None:
+        return
+
+    fake_msvcrt.locking = locking  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    store = PrivateMediaStore(tmp_path)
+    monkeypatch.setattr(os, "name", "nt")
+    with store._quota_guard():
+        pass
+    with store._quota_guard():
+        pass
 
 
 @pytest.mark.unit

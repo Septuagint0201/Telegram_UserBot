@@ -1229,6 +1229,19 @@ class MemoryRepository:
                 or collision != target_rows[0]["id"]
             ):
                 raise MemoryConflictError("semantic key already has an active memory")
+            contact_id = cast(UUID | None, proposal_row.get("contact_id"))
+            if contact_id is None:
+                contact_id = cast(
+                    UUID | None,
+                    await self._session.scalar(
+                        select(conversations.c.contact_id).where(
+                            conversations.c.id == proposal.conversation_id,
+                            conversations.c.account_id == proposal.account_id,
+                        )
+                    ),
+                )
+            if contact_id is None:
+                raise MemoryConflictError("proposal conversation has no contact scope")
             memory_id = uuid5(
                 proposal.account_id,
                 f"memory:{proposal.conversation_id}:{proposal.id}:{proposal.semantic_key_hash.hex()}",
@@ -1240,6 +1253,7 @@ class MemoryRepository:
                 .values(
                     id=memory_id,
                     account_id=proposal.account_id,
+                    contact_id=contact_id,
                     conversation_id=proposal.conversation_id,
                     memory_type=proposal.memory_type.value,
                     semantic_key_hash=proposal.semantic_key_hash,

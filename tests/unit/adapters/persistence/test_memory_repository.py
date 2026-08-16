@@ -477,6 +477,69 @@ async def test_proposal_lookup_normalizes_postgres_numeric_scores() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("contact_source", ["proposal", "conversation", "missing"])
+async def test_accept_create_requires_and_resolves_contact_scope(contact_source: str) -> None:
+    repo, session = _repository()
+    account_id, conversation_id = uuid4(), uuid4()
+    source = _source()
+    validated = _proposal(account_id, conversation_id, source)
+    evidence = validated.proposal.evidence[0]
+    recorded_id = uuid4()
+    contact_id = uuid4()
+    proposal_row = {
+        "id": recorded_id,
+        "state": "candidate",
+        "model_run_id": uuid4(),
+        "validator_policy_version": 1,
+        "contact_id": contact_id if contact_source == "proposal" else None,
+    }
+    repo._proposal_row = AsyncMock(return_value=proposal_row)  # type: ignore[method-assign]
+    session.execute.side_effect = [
+        _Result(rows=[]),
+        _Result(
+            rows=[
+                {
+                    "message_revision_id": source.source_id,
+                    "evidence_role": evidence.role.value,
+                    "quoted_span_start": evidence.span_start,
+                    "quoted_span_end": evidence.span_end,
+                    "source_content_sha256": evidence.source_content_sha256,
+                    "trust_class": evidence.trust.value,
+                }
+            ]
+        ),
+        *(_Result() for _ in range(5)),
+    ]
+    scalar_values: list[object] = [0, None]
+    if contact_source != "proposal":
+        scalar_values.append(contact_id if contact_source == "conversation" else None)
+    session.scalar.side_effect = scalar_values
+
+    if contact_source == "missing":
+        with pytest.raises(MemoryConflictError, match="no contact scope"):
+            await repo.accept_validated_proposal(
+                validated,
+                recorded_proposal_id=recorded_id,
+                allow_candidate=True,
+                now=NOW,
+            )
+        assert session.execute.await_count == 2
+        return
+
+    result = await repo.accept_validated_proposal(
+        validated,
+        recorded_proposal_id=recorded_id,
+        allow_candidate=True,
+        now=NOW,
+    )
+    assert result.state is ProposalState.ACCEPTED
+    assert result.memory_id is not None
+    assert result.memory_version_id is not None
+    if contact_source == "conversation":
+        assert session.scalar.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_accept_proposal_uses_recorded_target_snapshot() -> None:
     repo, session = _repository()
     account_id, conversation_id, target_id = uuid4(), uuid4(), uuid4()
