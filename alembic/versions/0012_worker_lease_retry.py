@@ -64,15 +64,12 @@ def downgrade() -> None:
         "lease_expires_at = NULL WHERE state IN ('leased','retry_wait')"
     )
     op.execute("UPDATE proactive_jobs SET state = 'expired' WHERE state = 'dead_letter'")
-    op.drop_constraint(
-        "ck_proactive_jobs_lease_fields_match",
-        "proactive_jobs",
-        type_="check",
+    op.execute(
+        "ALTER TABLE proactive_jobs DROP CONSTRAINT IF EXISTS ck_proactive_jobs_lease_fields_match"
     )
-    op.drop_constraint(
-        "ck_proactive_jobs_fencing_token_nonnegative",
-        "proactive_jobs",
-        type_="check",
+    op.execute(
+        "ALTER TABLE proactive_jobs DROP CONSTRAINT IF EXISTS "
+        "ck_proactive_jobs_fencing_token_nonnegative"
     )
     op.execute(
         "ALTER TABLE proactive_jobs DROP CONSTRAINT IF EXISTS ck_proactive_jobs_state_values"

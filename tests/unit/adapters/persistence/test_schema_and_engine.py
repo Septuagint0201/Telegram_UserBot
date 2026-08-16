@@ -288,6 +288,9 @@ def test_worker_retry_migration_is_fenced_bounded_and_reversible() -> None:
     assert "fencing_token bigint NOT NULL DEFAULT 0" in migration
     assert "attempt_count integer NOT NULL DEFAULT 0" in migration
     assert "dead_letter" in migration
+    assert "op.drop_constraint" not in downgrade
+    assert "ck_proactive_jobs_lease_fields_match" in downgrade
+    assert "ck_proactive_jobs_fencing_token_nonnegative" in downgrade
     assert 'op.drop_column("proactive_jobs", "fencing_token")' in downgrade
     assert 'op.drop_column("memory_jobs", "attempt_count")' in downgrade
 
