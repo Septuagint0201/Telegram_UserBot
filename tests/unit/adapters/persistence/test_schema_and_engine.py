@@ -211,6 +211,20 @@ def test_m5_m6_scope_downgrade_restores_m6_external_foreign_keys() -> None:
 
 
 @pytest.mark.unit
+def test_m5_m6_scope_downgrade_keeps_candidate_keys_for_partial_round_trips() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0009_m5_m6_account_scope_constraints.py"
+    ).read_text(encoding="utf-8")
+    downgrade = migration[migration.index("def downgrade() -> None:") :]
+
+    assert '("media_objects", "uq_media_objects_id_account")' not in downgrade
+    assert '("model_runs", "uq_model_runs_id_account_role")' not in downgrade
+
+
+@pytest.mark.unit
 def test_durable_settings_are_strict_and_safe() -> None:
     settings = DurableStateSettings.from_mapping(
         {

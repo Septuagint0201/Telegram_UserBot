@@ -980,14 +980,9 @@ def downgrade() -> None:
     for name, table, referred_table, local_columns, remote_columns in old_fks:
         _restore_fk(name, table, referred_table, local_columns, remote_columns)
 
-    for table, name in (
-        ("media_objects", "uq_media_objects_id_account"),
-        ("model_runs", "uq_model_runs_id_account_role"),
-        ("memory_jobs", "uq_memory_jobs_id_account"),
-        ("memory_input_manifests", "uq_memory_input_manifests_id_account"),
-        ("memory_proposals", "uq_memory_proposals_id_account"),
-    ):
-        _drop_constraints(table, (name,))
+    # Keep the redundant id-prefixed candidate keys across partial downgrades.
+    # Historical migrations build tables from current metadata, so removing the
+    # keys would make a later upgrade from M5/M6 fail before 0009 can recreate them.
     op.execute(
         """
         ALTER TABLE context_manifest_items DROP COLUMN IF EXISTS account_id;
