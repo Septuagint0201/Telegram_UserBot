@@ -16,6 +16,7 @@ from telegram_userbot.adapters.persistence.memory_repository import (
 )
 from telegram_userbot.domain.memory.models import (
     EmbeddingRecord,
+    EmbeddingRecordState,
     EmbeddingSpace,
     Evidence,
     InputManifest,
@@ -375,6 +376,7 @@ async def test_publish_summary_covers_initial_replay_and_watermark_cas() -> None
         _Result(),
         _Result(),
         _Result(),
+        _Result(),
     ]
     watermark = await repo.publish_summary(
         first, account_id=account_id, conversation_id=conversation_id, now=NOW
@@ -391,21 +393,48 @@ async def test_publish_summary_covers_initial_replay_and_watermark_cas() -> None
         "summary_kind": SummaryKind.ROLLING.value,
         "current_version_no": 1,
     }
+    durable_summary_version = {
+        "id": first.id,
+        "summary_id": first.summary_id,
+        "version_no": first.version_no,
+        "range_start_event_id": first.range_start_event_id,
+        "range_end_event_id": first.range_end_event_id,
+        "content_text": first.content_text,
+        "content_sha256": sha256(first.content_text.encode()).digest(),
+        "model_run_id": None,
+        "pipeline_version": "m6-v1",
+        "output_schema_version": 1,
+        "manifest_sha256": first.manifest_sha256,
+        "invalidation_state": first.status.value,
+    }
     session.execute.side_effect = [
+        _Result(),
         _Result(durable_watermark),
         _Result(durable_summary),
-        _Result(scalar=first.manifest_sha256),
+        _Result(durable_summary_version),
     ]
     replay = await repo.publish_summary(
         first, account_id=account_id, conversation_id=conversation_id, now=NOW
     )
     assert replay.last_summary_version_id == first.id
 
-    second = _summary(summary_id, version=2, start=2, end=3)
     session.execute.side_effect = [
+        _Result(),
         _Result(durable_watermark),
         _Result(durable_summary),
-        _Result(scalar=None),
+        _Result(durable_summary_version | {"content_text": "tampered"}),
+    ]
+    with pytest.raises(SummaryCoverageError, match="summary replay"):
+        await repo.publish_summary(
+            first, account_id=account_id, conversation_id=conversation_id, now=NOW
+        )
+
+    second = _summary(summary_id, version=2, start=2, end=3)
+    session.execute.side_effect = [
+        _Result(),
+        _Result(durable_watermark),
+        _Result(durable_summary),
+        _Result(),
         _Result(),
         _Result(),
         _Result(),
@@ -422,9 +451,10 @@ async def test_publish_summary_covers_initial_replay_and_watermark_cas() -> None
     assert advanced.version == 3
 
     session.execute.side_effect = [
+        _Result(),
         _Result(durable_watermark),
         _Result(durable_summary),
-        _Result(scalar=None),
+        _Result(),
         _Result(),
         _Result(),
         _Result(),
@@ -447,8 +477,8 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
     account_id, profile_id, config_id = uuid4(), uuid4(), uuid4()
     space = EmbeddingSpace(uuid4(), "fake-embedding", 2, "cosine", "l2", "v1", 1)
     records = tuple(
-        EmbeddingRecord(uuid4(), space.id, uuid4(), kind, index, b"e" * 32, (0.1, 0.2))
-        for index, kind in enumerate(("memory_version", "summary_version"))
+        EmbeddingRecord(uuid4(), space.id, uuid4(), kind, 0, b"e" * 32, (0.1, 0.2))
+        for kind in ("memory_version", "summary_version")
     )
     durable_space = {
         "account_id": account_id,
@@ -460,6 +490,7 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
         "normalization": space.normalization,
         "chunker_version": space.chunker_version,
         "generation": space.generation,
+        "state": "building",
     }
     repo._require_embedding_target_scope = AsyncMock()  # type: ignore[method-assign]
     session.execute.side_effect = [
@@ -469,8 +500,10 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
         _Result(),
         _Result(),
         _Result(),
+        _Result(),
+        _Result(),
     ]
-    session.scalar.side_effect = [None, uuid4()]
+    session.scalar.return_value = 0
     assert (
         await repo.write_embedding_records(
             space,
@@ -503,6 +536,73 @@ async def test_write_embeddings_checks_space_identity_upserts_targets_and_activa
             model_profile_id=profile_id,
             config_version_id=config_id,
         )
+
+
+@pytest.mark.asyncio
+async def test_write_embeddings_rejects_replay_mutation_and_non_ready_activation() -> None:
+    account_id, profile_id, config_id = uuid4(), uuid4(), uuid4()
+    space = EmbeddingSpace(uuid4(), "fake-embedding", 2, "cosine", "l2", "v1", 1)
+    record = EmbeddingRecord(uuid4(), space.id, uuid4(), "memory_version", 0, b"e" * 32, (0.1, 0.2))
+    durable_space = {
+        "account_id": account_id,
+        "model_profile_id": profile_id,
+        "config_version_id": config_id,
+        "model_name_snapshot": space.model_name,
+        "dimensions": space.dimensions,
+        "distance_metric": space.distance_metric,
+        "normalization": space.normalization,
+        "chunker_version": space.chunker_version,
+        "generation": space.generation,
+        "state": "building",
+    }
+    durable_record = {
+        "id": record.id,
+        "account_id": account_id,
+        "source_sha256": b"x" * 32,
+        "vector_payload": list(record.vector),
+        "dimensions": space.dimensions,
+        "chunker_version": space.chunker_version,
+        "state": record.state.value,
+    }
+    repo, session = _repository()
+    repo._require_embedding_target_scope = AsyncMock()  # type: ignore[method-assign]
+    session.execute.side_effect = [
+        _Result(),
+        _Result(durable_space),
+        _Result(durable_record),
+    ]
+    with pytest.raises(ValueError, match="record replay"):
+        await repo.write_embedding_records(
+            space,
+            (record,),
+            account_id=account_id,
+            model_profile_id=profile_id,
+            config_version_id=config_id,
+            now=NOW,
+        )
+
+    pending = EmbeddingRecord(
+        uuid4(),
+        space.id,
+        uuid4(),
+        "memory_version",
+        0,
+        b"p" * 32,
+        (0.1, 0.2),
+        EmbeddingRecordState.PENDING,
+    )
+    fresh_repo, fresh_session = _repository()
+    with pytest.raises(ValueError, match="ready records"):
+        await fresh_repo.write_embedding_records(
+            space,
+            (pending,),
+            account_id=account_id,
+            model_profile_id=profile_id,
+            config_version_id=config_id,
+            activate=True,
+            now=NOW,
+        )
+    fresh_session.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

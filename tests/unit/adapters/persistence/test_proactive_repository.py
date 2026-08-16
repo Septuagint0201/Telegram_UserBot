@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,8 +30,14 @@ NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
 
 
 class _Result:
-    def __init__(self, row: dict[str, Any] | None = None, rowcount: int = 0) -> None:
+    def __init__(
+        self,
+        row: dict[str, Any] | None = None,
+        rowcount: int = 0,
+        rows: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._row = row
+        self._rows = rows or []
         self.rowcount = rowcount
 
     def mappings(self) -> _Result:
@@ -43,6 +49,9 @@ class _Result:
     def one(self) -> dict[str, Any]:
         assert self._row is not None
         return self._row
+
+    def all(self) -> list[dict[str, Any]]:
+        return self._rows
 
 
 def repository() -> ProactiveRepository:
@@ -107,6 +116,7 @@ async def test_proactive_persistence_rejects_invalid_inputs_before_database_acce
         )
     with pytest.raises(ValueError, match="invalid budget settlement"):
         await repo.settle_budget(
+            account_id=account_id,
             reservation_key=b"k" * 32,
             target=cast(ReservationState, "invalid"),
             now=NOW,
@@ -162,7 +172,7 @@ async def test_proactive_persistence_rejects_unbound_decisions_without_database_
 @pytest.mark.asyncio
 async def test_proactive_persistence_success_paths_are_transaction_shaped() -> None:
     session = AsyncMock()
-    session.execute.return_value = SimpleNamespace(rowcount=1)
+    session.execute.return_value = _Result(rowcount=1)
     session.scalars.return_value = []
     repo = ProactiveRepository(cast(AsyncSession, session))
     account_id = uuid4()
@@ -182,18 +192,21 @@ async def test_proactive_persistence_success_paths_are_transaction_shaped() -> N
     assert await repo.recover_expired(now=NOW) == 1
     assert await repo.reap_budget(now=NOW) == 0
     repo.settle_budget = AsyncMock(return_value=None)  # type: ignore[method-assign]
-    assert await repo.commit_budget(reservation_key=key, now=NOW) is None
-    assert await repo.release_budget(reservation_key=key, now=NOW, expired=True) is None
+    assert await repo.commit_budget(account_id=account_id, reservation_key=key, now=NOW) is None
+    assert (
+        await repo.release_budget(account_id=account_id, reservation_key=key, now=NOW, expired=True)
+        is None
+    )
 
     candidate_id = uuid4()
-    session.scalar.return_value = candidate_id
+    empty_membership = membership_digest(())
     candidate = cast(
         Candidate,
         SimpleNamespace(
             id=candidate_id,
             account_id=account_id,
             generation=1,
-            membership_hash=b"m" * 32,
+            membership_hash=empty_membership,
             occurrences=(),
         ),
     )
@@ -205,15 +218,27 @@ async def test_proactive_persistence_success_paths_are_transaction_shaped() -> N
         None,
         0,
     )
-    assert (
-        await repo.record_decision(
-            candidate=candidate,
-            decision=decision,
-            output_hash=b"o" * 32,
-            now=NOW,
-        )
-        == candidate_id
-    )
+    session.execute.side_effect = [
+        _Result(
+            {
+                "id": candidate_id,
+                "generation": 1,
+                "membership_hash": empty_membership,
+                "state": "open",
+            }
+        ),
+        _Result(),
+        _Result(rowcount=1),
+        _Result(rowcount=1),
+        _Result(rowcount=1),
+    ]
+    output_hash = b"o" * 32
+    assert await repo.record_decision(
+        candidate=candidate,
+        decision=decision,
+        output_hash=output_hash,
+        now=NOW,
+    ) == uuid5(candidate_id, f"proactive-decision:{output_hash.hex()}")
 
 
 @pytest.mark.asyncio
@@ -240,6 +265,31 @@ async def test_proactive_persistence_claim_updates_a_pending_job_with_a_lease() 
     assert claimed.id == job_id
     assert claimed.lease_owner == owner
     assert claimed.attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_proactive_job_replay_rejects_a_different_durable_identity() -> None:
+    account_id = uuid4()
+    key = b"j" * 32
+    expected_id = uuid5(account_id, f"proactive-job:candidate_due:{key.hex()}")
+    session = AsyncMock()
+    session.execute.return_value = _Result(
+        {
+            "id": expected_id,
+            "account_id": uuid4(),
+            "candidate_id": None,
+            "job_kind": "candidate_due",
+            "available_at": NOW,
+        }
+    )
+    repo = ProactiveRepository(cast(AsyncSession, session))
+
+    with pytest.raises(ValueError, match="job replay"):
+        await repo.enqueue_job(
+            account_id=account_id,
+            idempotency_key=key,
+            available_at=NOW,
+        )
 
 
 @pytest.mark.asyncio
@@ -303,11 +353,60 @@ async def test_proactive_candidate_enqueue_validates_scope_membership_and_persis
         ),
     )
     session = AsyncMock()
-    session.scalar.return_value = candidate.id
+    occurrence_row = {
+        "id": occurrence.id,
+        "account_id": occurrence.account_id,
+        "contact_id": occurrence.contact_id,
+        "conversation_id": occurrence.conversation_id,
+        "occurrence_key": occurrence.occurrence_key,
+        "generation": occurrence.generation,
+        "reason": occurrence.reason.value,
+        "window_start_at": occurrence.window_start_at,
+        "window_end_at": occurrence.window_end_at,
+        "hard_deadline_at": occurrence.hard_deadline_at,
+        "timezone_name": occurrence.timezone_name,
+        "local_date": occurrence.local_date,
+        "importance": occurrence.importance,
+        "source_type": occurrence.source_type,
+        "source_id": occurrence.source_id,
+        "source_version": occurrence.source_version,
+        "policy_version_id": occurrence.policy_version_id,
+        "quiet_bypass_possible": occurrence.quiet_bypass_possible,
+    }
+    candidate_row = {
+        "id": candidate.id,
+        "account_id": candidate.account_id,
+        "contact_id": candidate.contact_id,
+        "conversation_id": candidate.conversation_id,
+        "candidate_key": candidate.candidate_key,
+        "generation": candidate.generation,
+        "membership_hash": candidate.membership_hash,
+        "window_start_at": candidate.window_start_at,
+        "window_end_at": candidate.window_end_at,
+        "policy_version_id": candidate.policy_version_id,
+        "mode_version": candidate.mode_version,
+        "content_revision": candidate.content_revision,
+        "activity_revision": candidate.activity_revision,
+    }
+    session.execute.side_effect = [
+        _Result(),
+        _Result(occurrence_row),
+        _Result(),
+        _Result(),
+        _Result(candidate_row),
+        _Result(),
+    ]
     repo = ProactiveRepository(cast(AsyncSession, session))
     repo.enqueue_job = AsyncMock(return_value=uuid4())  # type: ignore[method-assign]
     assert await repo.enqueue_candidate(candidate, now=NOW) == candidate.id
     assert repo.enqueue_job.await_count == 1
+
+    session.execute.side_effect = [
+        _Result(),
+        _Result(occurrence_row | {"account_id": uuid4()}),
+    ]
+    with pytest.raises(ValueError, match="occurrence replay"):
+        await repo.enqueue_candidate(candidate, now=NOW)
 
     bad_scope = cast(Candidate, SimpleNamespace(**{**candidate.__dict__, "contact_id": uuid4()}))
     with pytest.raises(ValueError, match="scope"):
@@ -336,6 +435,7 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         "contact_id": contact_id,
         "local_date": NOW.date(),
         "bypass": False,
+        "candidate_id": None,
         "state": "held",
         "expires_at": NOW + timedelta(hours=1),
     }
@@ -363,13 +463,21 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
     assert replay.state is ReservationState.HELD
     session.execute.return_value = _Result(None)
     assert (
-        await repo.settle_budget(reservation_key=key, target=ReservationState.COMMITTED, now=NOW)
+        await repo.settle_budget(
+            account_id=account_id,
+            reservation_key=key,
+            target=ReservationState.COMMITTED,
+            now=NOW,
+        )
         is None
     )
     terminal = dict(row, state="committed")
     session.execute.return_value = _Result(terminal)
     result = await repo.settle_budget(
-        reservation_key=key, target=ReservationState.RELEASED, now=NOW
+        account_id=account_id,
+        reservation_key=key,
+        target=ReservationState.RELEASED,
+        now=NOW,
     )
     assert result is not None
     assert result.state is ReservationState.COMMITTED
@@ -381,7 +489,70 @@ async def test_proactive_budget_replay_is_scope_bound_and_settlement_is_terminal
         _Result(rowcount=1),
     ]
     expired = await repo.settle_budget(
-        reservation_key=key, target=ReservationState.COMMITTED, now=NOW + timedelta(hours=2)
+        account_id=account_id,
+        reservation_key=key,
+        target=ReservationState.COMMITTED,
+        now=NOW + timedelta(hours=2),
     )
     assert expired is not None
     assert expired.state is ReservationState.EXPIRED
+
+
+@pytest.mark.asyncio
+async def test_proactive_decision_replay_rejects_a_different_durable_identity() -> None:
+    account_id, candidate_id = uuid4(), uuid4()
+    membership_hash = membership_digest(())
+    output_hash = b"d" * 32
+    candidate = cast(
+        Candidate,
+        SimpleNamespace(
+            id=candidate_id,
+            account_id=account_id,
+            generation=1,
+            membership_hash=membership_hash,
+            occurrences=(),
+        ),
+    )
+    decision = AgentDecision(
+        candidate_id,
+        ProactiveAction.NONE,
+        "not_natural_now",
+        (),
+        None,
+        0,
+    )
+    decision_id = uuid5(candidate_id, f"proactive-decision:{output_hash.hex()}")
+    session = AsyncMock()
+    session.execute.side_effect = [
+        _Result(
+            {
+                "id": candidate_id,
+                "generation": 1,
+                "membership_hash": membership_hash,
+                "state": "open",
+            }
+        ),
+        _Result(
+            {
+                "id": decision_id,
+                "account_id": account_id,
+                "candidate_id": candidate_id,
+                "generation": 1,
+                "action": ProactiveAction.SEND_NOW.value,
+                "decision_code": decision.decision_code,
+                "topic": decision.topic,
+                "priority": decision.priority,
+                "defer_until": decision.defer_until,
+                "output_hash": output_hash,
+            }
+        ),
+    ]
+    repo = ProactiveRepository(cast(AsyncSession, session))
+
+    with pytest.raises(ValueError, match="decision replay"):
+        await repo.record_decision(
+            candidate=candidate,
+            decision=decision,
+            output_hash=output_hash,
+            now=NOW,
+        )

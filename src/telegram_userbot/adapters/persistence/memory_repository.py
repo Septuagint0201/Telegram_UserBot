@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +49,7 @@ from telegram_userbot.domain.memory.lifecycle import (
 )
 from telegram_userbot.domain.memory.models import (
     EmbeddingRecord,
+    EmbeddingRecordState,
     EmbeddingSpace,
     InputManifest,
     MemoryOperation,
@@ -943,6 +944,10 @@ class MemoryRepository:
         now: datetime | None = None,
     ) -> SummaryWatermark:
         current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": (f"summary:{account_id}:{conversation_id}:{summary.kind.value}")},
+        )
         for source in summary.sources:
             if source.source_kind == "message_revision":
                 await self._require_message_revision_scope(
@@ -1025,16 +1030,26 @@ class MemoryRepository:
             if summary_row["summary_kind"] != summary.kind.value:
                 raise SummaryCoverageError("summary kind does not match its durable identity")
             existing_version = (
-                await self._session.execute(
-                    select(summary_versions.c.manifest_sha256).where(
-                        summary_versions.c.id == summary.id,
-                        summary_versions.c.account_id == account_id,
-                        summary_versions.c.summary_id == summary.summary_id,
+                (
+                    await self._session.execute(
+                        select(summary_versions).where(
+                            summary_versions.c.id == summary.id,
+                            summary_versions.c.account_id == account_id,
+                            summary_versions.c.summary_id == summary.summary_id,
+                        )
                     )
                 )
-            ).scalar_one_or_none()
+                .mappings()
+                .one_or_none()
+            )
             if existing_version is not None:
-                if existing_version != summary.manifest_sha256:
+                if not _summary_version_matches(
+                    existing_version,
+                    summary,
+                    model_run_id=model_run_id,
+                    pipeline_version=pipeline_version,
+                    output_schema_version=output_schema_version,
+                ):
                     raise SummaryCoverageError("summary replay does not match its manifest")
                 return SummaryWatermark(
                     conversation_id,
@@ -1054,7 +1069,11 @@ class MemoryRepository:
                 raise SummaryCoverageError("summary versions must be contiguous")
             await self._session.execute(
                 update(summaries)
-                .where(summaries.c.id == summary.summary_id)
+                .where(
+                    summaries.c.id == summary.summary_id,
+                    summaries.c.account_id == account_id,
+                    summaries.c.conversation_id == conversation_id,
+                )
                 .values(
                     current_version_no=summary.version_no,
                     status=summary.status.value,
@@ -1065,6 +1084,7 @@ class MemoryRepository:
                 update(summary_versions)
                 .where(
                     summary_versions.c.summary_id == summary.summary_id,
+                    summary_versions.c.account_id == account_id,
                     summary_versions.c.id != summary.id,
                     summary_versions.c.invalidation_state == "active",
                 )
@@ -1152,7 +1172,7 @@ class MemoryRepository:
             summary.id,
         )
 
-    async def write_embedding_records(  # noqa: PLR0913 - provider snapshot is explicit
+    async def write_embedding_records(  # noqa: PLR0912, PLR0913 - explicit transition inputs
         self,
         space: EmbeddingSpace,
         records: tuple[EmbeddingRecord, ...],
@@ -1169,6 +1189,19 @@ class MemoryRepository:
             for record in records
         ):
             raise ValueError("embedding record dimension or space mismatch")
+        if activate and not records:
+            raise ValueError("cannot activate an embedding space without records")
+        if activate and any(record.state is not EmbeddingRecordState.READY for record in records):
+            raise ValueError("embedding activation requires ready records")
+        target_indexes: dict[tuple[str, UUID], list[int]] = {}
+        for record in records:
+            target_indexes.setdefault((record.target_kind, record.target_id), []).append(
+                record.chunk_index
+            )
+        if any(
+            sorted(indexes) != list(range(max(indexes) + 1)) for indexes in target_indexes.values()
+        ):
+            raise ValueError("embedding record chunks are not contiguous")
         for record in records:
             await self._require_embedding_target_scope(record, account_id=account_id)
         await self._session.execute(
@@ -1213,6 +1246,8 @@ class MemoryRepository:
             or persisted_space["generation"] != space.generation
         ):
             raise ValueError("embedding space replay does not match durable identity")
+        if activate and persisted_space["state"] not in {"building", "active"}:
+            raise ValueError("only a building or active embedding space can be activated")
         for record in records:
             target_columns: dict[str, object] = {
                 "memory_version_id": record.target_id
@@ -1225,16 +1260,24 @@ class MemoryRepository:
                 if record.target_kind == "message_revision"
                 else None,
             }
-            existing = await self._session.scalar(
-                select(embedding_records.c.id).where(
-                    embedding_records.c.embedding_space_id == space.id,
-                    embedding_records.c.chunk_index == record.chunk_index,
-                    *[
-                        getattr(embedding_records.c, key) == value
-                        for key, value in target_columns.items()
-                        if value is not None
-                    ],
+            existing = (
+                (
+                    await self._session.execute(
+                        select(embedding_records)
+                        .where(
+                            embedding_records.c.embedding_space_id == space.id,
+                            embedding_records.c.chunk_index == record.chunk_index,
+                            *[
+                                getattr(embedding_records.c, key) == value
+                                for key, value in target_columns.items()
+                                if value is not None
+                            ],
+                        )
+                        .with_for_update()
+                    )
                 )
+                .mappings()
+                .one_or_none()
             )
             values = {
                 "id": record.id,
@@ -1251,19 +1294,27 @@ class MemoryRepository:
             }
             if existing is None:
                 await self._session.execute(insert(embedding_records).values(**values))
-            else:
-                await self._session.execute(
-                    update(embedding_records)
-                    .where(embedding_records.c.id == existing)
-                    .values(
-                        source_sha256=record.source_sha256,
-                        vector_payload=list(record.vector),
-                        dimensions=space.dimensions,
-                        state=record.state.value,
-                        invalidated_at=None,
-                    )
-                )
+            elif (
+                existing["id"] != record.id
+                or existing["account_id"] != account_id
+                or existing["source_sha256"] != record.source_sha256
+                or existing["vector_payload"] != list(record.vector)
+                or existing["dimensions"] != space.dimensions
+                or existing["chunker_version"] != space.chunker_version
+                or existing["state"] != record.state.value
+            ):
+                raise ValueError("embedding record replay does not match durable identity")
         if activate:
+            non_ready = await self._session.scalar(
+                select(func.count())
+                .select_from(embedding_records)
+                .where(
+                    embedding_records.c.embedding_space_id == space.id,
+                    embedding_records.c.state != EmbeddingRecordState.READY.value,
+                )
+            )
+            if non_ready:
+                raise ValueError("embedding space coverage is not fully ready")
             await self._session.execute(
                 update(embedding_spaces)
                 .where(
@@ -1276,7 +1327,13 @@ class MemoryRepository:
             )
             await self._session.execute(
                 update(embedding_spaces)
-                .where(embedding_spaces.c.id == space.id)
+                .where(
+                    embedding_spaces.c.id == space.id,
+                    embedding_spaces.c.account_id == account_id
+                    if account_id is not None
+                    else embedding_spaces.c.account_id.is_(None),
+                    embedding_spaces.c.model_profile_id == model_profile_id,
+                )
                 .values(state="active", activated_at=current_time)
             )
         return len(records)
@@ -1653,3 +1710,30 @@ def _proposal_storage_id(model_run_id: UUID, proposal_ordinal: int) -> UUID:
     if proposal_ordinal < 0:
         raise ValueError("proposal ordinal must be non-negative")
     return uuid5(model_run_id, f"memory-proposal:{proposal_ordinal}")
+
+
+def _summary_version_matches(
+    row: Any,
+    summary: SummaryVersion,
+    *,
+    model_run_id: UUID | None,
+    pipeline_version: str,
+    output_schema_version: int,
+) -> bool:
+    return all(
+        row[column] == value
+        for column, value in {
+            "id": summary.id,
+            "summary_id": summary.summary_id,
+            "version_no": summary.version_no,
+            "range_start_event_id": summary.range_start_event_id,
+            "range_end_event_id": summary.range_end_event_id,
+            "content_text": summary.content_text,
+            "content_sha256": hashlib.sha256(summary.content_text.encode()).digest(),
+            "model_run_id": model_run_id,
+            "pipeline_version": pipeline_version,
+            "output_schema_version": output_schema_version,
+            "manifest_sha256": summary.manifest_sha256,
+            "invalidation_state": summary.status.value,
+        }.items()
+    )

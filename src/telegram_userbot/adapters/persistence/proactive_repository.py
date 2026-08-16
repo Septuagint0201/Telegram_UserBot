@@ -43,6 +43,7 @@ class ProactiveRepository:
 
     async def enqueue_candidate(self, candidate: Candidate, *, now: datetime) -> UUID:
         current_time = now.astimezone(UTC)
+        occurrence_keys = [occurrence.occurrence_key for occurrence in candidate.occurrences]
         if (
             any(
                 occurrence.account_id != candidate.account_id
@@ -52,6 +53,7 @@ class ProactiveRepository:
             )
             or len({occurrence.id for occurrence in candidate.occurrences})
             != len(candidate.occurrences)
+            or len(set(occurrence_keys)) != len(occurrence_keys)
             or candidate.membership_hash != membership_digest(candidate.occurrences)
         ):
             raise ValueError("candidate occurrence scope or membership snapshot is invalid")
@@ -82,6 +84,21 @@ class ProactiveRepository:
                 )
                 .on_conflict_do_nothing(constraint="uq_proactive_occurrences_key")
             )
+            persisted_occurrence = (
+                (
+                    await self._session.execute(
+                        select(proactive_occurrences)
+                        .where(proactive_occurrences.c.occurrence_key == occurrence.occurrence_key)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if persisted_occurrence is None or not _occurrence_matches(
+                persisted_occurrence, occurrence
+            ):
+                raise ValueError("occurrence replay does not match durable identity")
             for ordinal, evidence in enumerate(occurrence.evidence, 1):
                 await self._session.execute(
                     postgresql_insert(proactive_occurrence_evidence)
@@ -121,14 +138,20 @@ class ProactiveRepository:
             )
             .on_conflict_do_nothing(constraint="uq_proactive_candidates_key")
         )
-        persisted_candidate_id = cast(
-            UUID,
-            await self._session.scalar(
-                select(proactive_candidates.c.id).where(
-                    proactive_candidates.c.candidate_key == candidate.candidate_key
+        persisted_candidate = (
+            (
+                await self._session.execute(
+                    select(proactive_candidates)
+                    .where(proactive_candidates.c.candidate_key == candidate.candidate_key)
+                    .with_for_update()
                 )
-            ),
+            )
+            .mappings()
+            .one_or_none()
         )
+        if persisted_candidate is None or not _candidate_matches(persisted_candidate, candidate):
+            raise ValueError("candidate replay does not match durable identity")
+        persisted_candidate_id = cast(UUID, persisted_candidate["id"])
         for ordinal, occurrence in enumerate(candidate.occurrences, 1):
             await self._session.execute(
                 postgresql_insert(proactive_candidate_memberships)
@@ -168,7 +191,38 @@ class ProactiveRepository:
             "budget_reaper",
         }:
             raise ValueError("proactive job identity is invalid")
+        available_time = available_at.astimezone(UTC)
         job_id = uuid5(account_id, f"proactive-job:{job_kind}:{idempotency_key.hex()}")
+        existing = (
+            (
+                await self._session.execute(
+                    select(proactive_jobs)
+                    .where(proactive_jobs.c.idempotency_key == idempotency_key)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if existing is not None:
+            if (
+                existing["id"] != job_id
+                or existing["account_id"] != account_id
+                or existing["candidate_id"] != candidate_id
+                or existing["job_kind"] != job_kind
+                or existing["available_at"] != available_time
+            ):
+                raise ValueError("proactive job replay does not match durable identity")
+            return job_id
+        if candidate_id is not None:
+            candidate_exists = await self._session.scalar(
+                select(proactive_candidates.c.id).where(
+                    proactive_candidates.c.id == candidate_id,
+                    proactive_candidates.c.account_id == account_id,
+                )
+            )
+            if candidate_exists is None:
+                raise ValueError("proactive job candidate is outside the requested scope")
         await self._session.execute(
             postgresql_insert(proactive_jobs)
             .values(
@@ -177,7 +231,7 @@ class ProactiveRepository:
                 candidate_id=candidate_id,
                 job_kind=job_kind,
                 idempotency_key=idempotency_key,
-                available_at=available_at.astimezone(UTC),
+                available_at=available_time,
                 state="pending",
                 attempt_count=0,
                 created_at=(now or datetime.now(UTC)).astimezone(UTC),
@@ -317,6 +371,8 @@ class ProactiveRepository:
                 or existing["contact_id"] != contact_id
                 or existing["local_date"] != local_date
                 or existing["bypass"] != bypass
+                or existing["candidate_id"] != candidate_id
+                or existing["expires_at"] != expires_at.astimezone(UTC)
             ):
                 raise ValueError("budget reservation key belongs to another scope")
             return _reservation(existing)
@@ -401,6 +457,7 @@ class ProactiveRepository:
     async def settle_budget(
         self,
         *,
+        account_id: UUID,
         reservation_key: bytes,
         target: ReservationState,
         now: datetime,
@@ -416,7 +473,10 @@ class ProactiveRepository:
             (
                 await self._session.execute(
                     select(proactive_budget_reservations)
-                    .where(proactive_budget_reservations.c.reservation_key == reservation_key)
+                    .where(
+                        proactive_budget_reservations.c.account_id == account_id,
+                        proactive_budget_reservations.c.reservation_key == reservation_key,
+                    )
                     .with_for_update()
                 )
             )
@@ -479,35 +539,52 @@ class ProactiveRepository:
         )
 
     async def commit_budget(
-        self, *, reservation_key: bytes, now: datetime, unknown: bool = False
+        self, *, account_id: UUID, reservation_key: bytes, now: datetime, unknown: bool = False
     ) -> BudgetReservation | None:
         return await self.settle_budget(
+            account_id=account_id,
             reservation_key=reservation_key,
             target=ReservationState.SEND_UNKNOWN if unknown else ReservationState.COMMITTED,
             now=now,
         )
 
     async def release_budget(
-        self, *, reservation_key: bytes, now: datetime, expired: bool = False
+        self, *, account_id: UUID, reservation_key: bytes, now: datetime, expired: bool = False
     ) -> BudgetReservation | None:
         return await self.settle_budget(
+            account_id=account_id,
             reservation_key=reservation_key,
             target=ReservationState.EXPIRED if expired else ReservationState.RELEASED,
             now=now,
         )
 
     async def reap_budget(self, *, now: datetime) -> int:
-        keys = tuple(
-            await self._session.scalars(
-                select(proactive_budget_reservations.c.reservation_key).where(
-                    proactive_budget_reservations.c.state == "held",
-                    proactive_budget_reservations.c.expires_at <= now.astimezone(UTC),
+        reservations = tuple(
+            (
+                await self._session.execute(
+                    select(
+                        proactive_budget_reservations.c.account_id,
+                        proactive_budget_reservations.c.reservation_key,
+                    ).where(
+                        proactive_budget_reservations.c.state == "held",
+                        proactive_budget_reservations.c.expires_at <= now.astimezone(UTC),
+                    )
                 )
             )
+            .mappings()
+            .all()
         )
         changed = 0
-        for key in keys:
-            if await self.release_budget(reservation_key=key, now=now, expired=True) is not None:
+        for reservation in reservations:
+            if (
+                await self.release_budget(
+                    account_id=reservation["account_id"],
+                    reservation_key=reservation["reservation_key"],
+                    now=now,
+                    expired=True,
+                )
+                is not None
+            ):
                 changed += 1
         return changed
 
@@ -524,15 +601,11 @@ class ProactiveRepository:
         candidate_occurrence_ids = {occurrence.id for occurrence in candidate.occurrences}
         if not set(decision.selected_occurrence_ids) <= candidate_occurrence_ids:
             raise ValueError("decision selects an occurrence outside the candidate")
+        if len(candidate.occurrences) != len(
+            {occurrence.id for occurrence in candidate.occurrences}
+        ) or (candidate.membership_hash != membership_digest(candidate.occurrences)):
+            raise ValueError("candidate membership snapshot is invalid")
         decision_id = uuid5(candidate.id, f"proactive-decision:{output_hash.hex()}")
-        existing = await self._session.scalar(
-            select(proactive_decisions.c.id).where(
-                proactive_decisions.c.id == decision_id,
-                proactive_decisions.c.account_id == candidate.account_id,
-            )
-        )
-        if existing is not None:
-            return cast(UUID, existing)
         current_candidate = (
             (
                 await self._session.execute(
@@ -552,6 +625,24 @@ class ProactiveRepository:
             or current_candidate["membership_hash"] != candidate.membership_hash
         ):
             raise ValueError("candidate snapshot is stale")
+        existing = (
+            (
+                await self._session.execute(
+                    select(proactive_decisions)
+                    .where(
+                        proactive_decisions.c.id == decision_id,
+                        proactive_decisions.c.account_id == candidate.account_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if existing is not None:
+            if not _decision_matches(existing, candidate, decision, output_hash):
+                raise ValueError("decision replay does not match durable identity")
+            return decision_id
         await self._session.execute(
             postgresql_insert(proactive_decisions)
             .values(
@@ -588,7 +679,10 @@ class ProactiveRepository:
         }[decision.action]
         await self._session.execute(
             update(proactive_candidates)
-            .where(proactive_candidates.c.id == candidate.id)
+            .where(
+                proactive_candidates.c.id == candidate.id,
+                proactive_candidates.c.account_id == candidate.account_id,
+            )
             .values(state=target_state)
         )
         await self._session.execute(
@@ -630,4 +724,71 @@ def _reservation(row: Any) -> BudgetReservation:
         cast(bool, row["bypass"]),
         ReservationState(row["state"]),
         cast(datetime, row["expires_at"]),
+    )
+
+
+def _occurrence_matches(row: Any, occurrence: Any) -> bool:
+    return all(
+        row[column] == value
+        for column, value in {
+            "id": occurrence.id,
+            "account_id": occurrence.account_id,
+            "contact_id": occurrence.contact_id,
+            "conversation_id": occurrence.conversation_id,
+            "occurrence_key": occurrence.occurrence_key,
+            "generation": occurrence.generation,
+            "reason": occurrence.reason.value,
+            "window_start_at": occurrence.window_start_at,
+            "window_end_at": occurrence.window_end_at,
+            "hard_deadline_at": occurrence.hard_deadline_at,
+            "timezone_name": occurrence.timezone_name,
+            "local_date": occurrence.local_date,
+            "importance": occurrence.importance,
+            "source_type": occurrence.source_type,
+            "source_id": occurrence.source_id,
+            "source_version": occurrence.source_version,
+            "policy_version_id": occurrence.policy_version_id,
+            "quiet_bypass_possible": occurrence.quiet_bypass_possible,
+        }.items()
+    )
+
+
+def _candidate_matches(row: Any, candidate: Candidate) -> bool:
+    return all(
+        row[column] == value
+        for column, value in {
+            "id": candidate.id,
+            "account_id": candidate.account_id,
+            "contact_id": candidate.contact_id,
+            "conversation_id": candidate.conversation_id,
+            "candidate_key": candidate.candidate_key,
+            "generation": candidate.generation,
+            "membership_hash": candidate.membership_hash,
+            "window_start_at": candidate.window_start_at,
+            "window_end_at": candidate.window_end_at,
+            "policy_version_id": candidate.policy_version_id,
+            "mode_version": candidate.mode_version,
+            "content_revision": candidate.content_revision,
+            "activity_revision": candidate.activity_revision,
+        }.items()
+    )
+
+
+def _decision_matches(
+    row: Any, candidate: Candidate, decision: AgentDecision, output_hash: bytes
+) -> bool:
+    return all(
+        row[column] == value
+        for column, value in {
+            "id": uuid5(candidate.id, f"proactive-decision:{output_hash.hex()}"),
+            "account_id": candidate.account_id,
+            "candidate_id": candidate.id,
+            "generation": candidate.generation,
+            "action": decision.action.value,
+            "decision_code": decision.decision_code,
+            "topic": decision.topic,
+            "priority": decision.priority,
+            "defer_until": decision.defer_until,
+            "output_hash": output_hash,
+        }.items()
     )
