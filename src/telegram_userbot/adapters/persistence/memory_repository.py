@@ -8,8 +8,9 @@ without duplicating a generation or a review action.
 from __future__ import annotations
 
 import hashlib
+import hmac
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
@@ -19,7 +20,12 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.persistence.schema import (
+    data_erasure_requests,
+    embedding_records,
+    embedding_spaces,
+    erasure_ledger,
     memories,
+    memory_evidence,
     memory_input_manifest_items,
     memory_input_manifests,
     memory_jobs,
@@ -27,8 +33,25 @@ from telegram_userbot.adapters.persistence.schema import (
     memory_proposal_targets,
     memory_proposals,
     memory_review_actions,
+    memory_versions,
+    summaries,
+    summary_version_sources,
+    summary_versions,
+    summary_watermarks,
 )
-from telegram_userbot.domain.memory.models import InputManifest, MemoryOperation
+from telegram_userbot.domain.memory.lifecycle import (
+    AcceptanceResult,
+    MemoryConflictError,
+)
+from telegram_userbot.domain.memory.models import (
+    EmbeddingRecord,
+    EmbeddingSpace,
+    InputManifest,
+    MemoryOperation,
+    ProposalState,
+    SummaryVersion,
+)
+from telegram_userbot.domain.memory.summary import SummaryCoverageError, SummaryWatermark
 from telegram_userbot.domain.memory.trigger import EventRange
 from telegram_userbot.domain.memory.validation import ValidatedProposal
 from telegram_userbot.domain.shared.hashing import stable_json_bytes
@@ -454,6 +477,684 @@ class MemoryRepository:
                 )
             )
         return True
+
+    async def accept_validated_proposal(  # noqa: PLR0912, PLR0915 - transaction transitions are explicit
+        self,
+        validated: ValidatedProposal,
+        *,
+        acceptance_kind: str = "automatic",
+        expected_versions: dict[UUID, int] | None = None,
+        now: datetime | None = None,
+        allow_candidate: bool = False,
+    ) -> AcceptanceResult:
+        """Apply one validated proposal using row locks and deterministic IDs.
+
+        The caller owns the transaction.  Replaying the same proposal returns the
+        prior result and never creates a second memory version.
+        """
+
+        proposal = validated.proposal
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        if acceptance_kind not in {"automatic", "manual", "reconciliation", "migration"}:
+            raise ValueError("unknown acceptance kind")
+        proposal_row = await self._proposal_row(proposal)
+        if proposal_row is None:
+            raise ValueError("proposal has not been recorded")
+        proposal_id = cast(UUID, proposal_row["id"])
+        if proposal_row["state"] == ProposalState.ACCEPTED.value:
+            prior_version_id = cast(UUID | None, proposal_row["accepted_memory_version_id"])
+            prior_memory_id = None
+            if prior_version_id is not None:
+                prior_memory_id = cast(
+                    UUID | None,
+                    await self._session.scalar(
+                        select(memory_versions.c.memory_id).where(
+                            memory_versions.c.id == prior_version_id
+                        )
+                    ),
+                )
+            return AcceptanceResult(
+                proposal.id,
+                ProposalState.ACCEPTED,
+                prior_memory_id,
+                prior_version_id,
+                True,
+            )
+        if validated.state is not ProposalState.ACCEPTED and not (
+            allow_candidate and validated.state is ProposalState.CANDIDATE
+        ):
+            await self._session.execute(
+                update(memory_proposals)
+                .where(memory_proposals.c.id == proposal_id)
+                .values(
+                    state=validated.state.value,
+                    decision_reason_code=validated.issues[0].code if validated.issues else None,
+                    decided_at=current_time,
+                )
+            )
+            return AcceptanceResult(proposal.id, validated.state, None, None)
+
+        expected_versions = expected_versions or {}
+        target_ids = proposal.target_memory_ids
+        target_rows = []
+        if target_ids:
+            target_rows = list(
+                (
+                    await self._session.execute(
+                        select(memories)
+                        .where(
+                            memories.c.id.in_(target_ids),
+                            memories.c.account_id == proposal.account_id,
+                            memories.c.conversation_id == proposal.conversation_id,
+                        )
+                        .order_by(memories.c.id)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        by_id = {cast(UUID, row["id"]): row for row in target_rows}
+        if len(by_id) != len(target_ids):
+            raise MemoryConflictError("proposal target is unavailable")
+        target_rows = [by_id[target_id] for target_id in target_ids]
+        for target_id in target_ids:
+            row = by_id[target_id]
+            expected = expected_versions.get(target_id, cast(int, row["current_version_no"]))
+            if row["current_version_no"] != expected or row["status"] != "active":
+                raise MemoryConflictError("target version changed before acceptance")
+            if proposal.operation in {MemoryOperation.UPDATE, MemoryOperation.INVALIDATE} and (
+                row["memory_type"] != proposal.memory_type.value
+                or row["semantic_key_hash"] != proposal.semantic_key_hash
+            ):
+                raise MemoryConflictError("target memory identity changed")
+
+        memory_id: UUID
+        version_no: int
+        version_id: UUID
+        status = "active"
+        if proposal.operation in {MemoryOperation.CREATE, MemoryOperation.SUPERSEDE}:
+            collision = await self._session.scalar(
+                select(memories.c.id)
+                .where(
+                    memories.c.account_id == proposal.account_id,
+                    memories.c.conversation_id == proposal.conversation_id,
+                    memories.c.semantic_key_hash == proposal.semantic_key_hash,
+                    memories.c.status == "active",
+                )
+                .limit(1)
+            )
+            if collision is not None and (
+                proposal.operation is MemoryOperation.CREATE
+                or not target_rows
+                or collision != target_rows[0]["id"]
+            ):
+                raise MemoryConflictError("semantic key already has an active memory")
+            memory_id = uuid5(
+                proposal.account_id,
+                f"memory:{proposal.conversation_id}:{proposal.id}:{proposal.semantic_key_hash.hex()}",
+            )
+            version_no = 1
+            version_id = uuid5(memory_id, "memory-version:1")
+            await self._session.execute(
+                postgresql_insert(memories)
+                .values(
+                    id=memory_id,
+                    account_id=proposal.account_id,
+                    conversation_id=proposal.conversation_id,
+                    memory_type=proposal.memory_type.value,
+                    semantic_key_hash=proposal.semantic_key_hash,
+                    status="active",
+                    current_version_no=1,
+                    superseded_by_memory_id=None,
+                    created_at=current_time,
+                    updated_at=current_time,
+                )
+                .on_conflict_do_nothing(constraint="memories_pkey")
+            )
+            if proposal.operation is MemoryOperation.SUPERSEDE and target_rows:
+                await self._session.execute(
+                    update(memories)
+                    .where(memories.c.id == target_rows[0]["id"])
+                    .values(
+                        status="superseded",
+                        superseded_by_memory_id=memory_id,
+                        updated_at=current_time,
+                    )
+                )
+        else:
+            if not target_rows:
+                raise MemoryConflictError("operation target is missing")
+            memory_id = cast(UUID, target_rows[0]["id"])
+            version_no = cast(int, target_rows[0]["current_version_no"]) + 1
+            version_id = uuid5(memory_id, f"memory-version:{version_no}")
+            status = "invalidated" if proposal.operation is MemoryOperation.INVALIDATE else "active"
+
+        await self._session.execute(
+            postgresql_insert(memory_versions)
+            .values(
+                id=version_id,
+                account_id=proposal.account_id,
+                memory_id=memory_id,
+                version_no=version_no,
+                operation=proposal.operation.value,
+                payload_schema_version=1,
+                payload=dict(proposal.payload),
+                rendered_text=proposal.rendered_text,
+                importance=proposal.importance,
+                confidence=proposal.confidence,
+                observed_at=current_time,
+                valid_from=proposal.valid_from,
+                valid_to=proposal.valid_to,
+                time_precision="unknown",
+                model_run_id=proposal_row["model_run_id"],
+                model_role="memory_agent",
+                prompt_version=None,
+                validator_policy_version=proposal_row["validator_policy_version"],
+                acceptance_kind=acceptance_kind,
+                created_at=current_time,
+            )
+            .on_conflict_do_nothing(constraint="memory_versions_pkey")
+        )
+        await self._session.execute(
+            update(memories)
+            .where(memories.c.id == memory_id)
+            .values(current_version_no=version_no, status=status, updated_at=current_time)
+        )
+        if proposal.operation is MemoryOperation.MERGE:
+            for source in target_rows[1:]:
+                await self._session.execute(
+                    update(memories)
+                    .where(memories.c.id == source["id"])
+                    .values(
+                        status="superseded",
+                        superseded_by_memory_id=memory_id,
+                        updated_at=current_time,
+                    )
+                )
+        for evidence in proposal.evidence:
+            await self._session.execute(
+                postgresql_insert(memory_evidence)
+                .values(
+                    memory_version_id=version_id,
+                    account_id=proposal.account_id,
+                    message_revision_id=evidence.source_id,
+                    summary_version_id=None,
+                    other_memory_version_id=None,
+                    media_object_id=None,
+                    evidence_role=evidence.role.value,
+                    trust_class=evidence.trust.value,
+                    source_content_sha256=evidence.source_content_sha256,
+                    created_at=current_time,
+                )
+                .on_conflict_do_nothing(constraint="pk_memory_evidence")
+            )
+        await self._session.execute(
+            update(memory_proposals)
+            .where(memory_proposals.c.id == proposal_id)
+            .values(
+                state="accepted",
+                accepted_memory_version_id=version_id,
+                decision_actor_type="service",
+                decision_actor_id="memory_worker",
+                decision_reason_code=None,
+                decided_at=current_time,
+            )
+        )
+        return AcceptanceResult(proposal.id, ProposalState.ACCEPTED, memory_id, version_id)
+
+    async def publish_summary(  # noqa: PLR0912, PLR0913 - summary transitions are explicit
+        self,
+        summary: SummaryVersion,
+        *,
+        account_id: UUID,
+        conversation_id: UUID,
+        expected_version: int | None = None,
+        period_key: str | None = None,
+        timezone_snapshot: str | None = None,
+        model_run_id: UUID | None = None,
+        pipeline_version: str = "m6-v1",
+        output_schema_version: int = 1,
+        now: datetime | None = None,
+    ) -> SummaryWatermark:
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        watermark_row = (
+            (
+                await self._session.execute(
+                    select(summary_watermarks)
+                    .where(
+                        summary_watermarks.c.account_id == account_id,
+                        summary_watermarks.c.conversation_id == conversation_id,
+                        summary_watermarks.c.summary_kind == summary.kind.value,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if watermark_row is None:
+            last_included, watermark_version = 0, 1
+        else:
+            last_included = cast(int, watermark_row["last_included_event_id"])
+            watermark_version = cast(int, watermark_row["version"])
+        if summary.range_start_event_id > last_included + 1:
+            raise SummaryCoverageError("summary watermark cannot skip an uncovered event")
+        if summary.range_end_event_id < last_included:
+            raise SummaryCoverageError("summary watermark cannot move backwards")
+        summary_row = (
+            (
+                await self._session.execute(
+                    select(summaries).where(summaries.c.id == summary.summary_id).with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if summary_row is None:
+            if summary.version_no != 1:
+                raise SummaryCoverageError("first summary version must be one")
+            await self._session.execute(
+                insert(summaries).values(
+                    id=summary.summary_id,
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    summary_kind=summary.kind.value,
+                    period_key=period_key or f"{summary.kind.value}:{summary.range_start_event_id}",
+                    timezone_snapshot=timezone_snapshot,
+                    period_start_at=None,
+                    period_end_at=None,
+                    status=summary.status.value,
+                    current_version_no=summary.version_no,
+                    created_at=current_time,
+                    updated_at=current_time,
+                )
+            )
+        else:
+            existing_version = (
+                await self._session.execute(
+                    select(summary_versions.c.manifest_sha256).where(
+                        summary_versions.c.id == summary.id
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_version is not None:
+                if existing_version != summary.manifest_sha256:
+                    raise SummaryCoverageError("summary replay does not match its manifest")
+                return SummaryWatermark(
+                    conversation_id,
+                    summary.kind,
+                    last_included,
+                    watermark_version,
+                    cast(UUID | None, watermark_row["last_summary_version_id"])
+                    if watermark_row is not None
+                    else None,
+                )
+            if (
+                expected_version is not None
+                and summary_row["current_version_no"] != expected_version
+            ):
+                raise SummaryCoverageError("summary current pointer changed")
+            if summary.version_no != summary_row["current_version_no"] + 1:
+                raise SummaryCoverageError("summary versions must be contiguous")
+            await self._session.execute(
+                update(summaries)
+                .where(summaries.c.id == summary.summary_id)
+                .values(
+                    current_version_no=summary.version_no,
+                    status=summary.status.value,
+                    updated_at=current_time,
+                )
+            )
+            await self._session.execute(
+                update(summary_versions)
+                .where(
+                    summary_versions.c.summary_id == summary.summary_id,
+                    summary_versions.c.id != summary.id,
+                    summary_versions.c.invalidation_state == "active",
+                )
+                .values(invalidation_state="invalidated")
+            )
+        await self._session.execute(
+            postgresql_insert(summary_versions)
+            .values(
+                id=summary.id,
+                account_id=account_id,
+                summary_id=summary.summary_id,
+                version_no=summary.version_no,
+                range_start_event_id=summary.range_start_event_id,
+                range_end_event_id=summary.range_end_event_id,
+                content_text=summary.content_text,
+                content_sha256=hashlib.sha256(summary.content_text.encode()).digest(),
+                model_run_id=model_run_id,
+                model_role="memory_agent" if model_run_id is not None else None,
+                prompt_version=None,
+                pipeline_version=pipeline_version,
+                output_schema_version=output_schema_version,
+                manifest_sha256=summary.manifest_sha256,
+                invalidation_state=summary.status.value,
+                created_at=current_time,
+            )
+            .on_conflict_do_nothing(constraint="summary_versions_pkey")
+        )
+        for source in summary.sources:
+            await self._session.execute(
+                postgresql_insert(summary_version_sources)
+                .values(
+                    summary_version_id=summary.id,
+                    account_id=account_id,
+                    ordinal=source.ordinal,
+                    message_revision_id=source.source_id
+                    if source.source_kind == "message_revision"
+                    else None,
+                    prior_summary_version_id=source.source_id
+                    if source.source_kind == "prior_summary_version"
+                    else None,
+                    inclusion_role="episode",
+                    source_content_sha256=source.content_sha256,
+                    created_at=current_time,
+                )
+                .on_conflict_do_nothing(constraint="pk_summary_version_sources")
+            )
+        if watermark_row is None:
+            await self._session.execute(
+                insert(summary_watermarks).values(
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    summary_kind=summary.kind.value,
+                    last_included_event_id=summary.range_end_event_id,
+                    last_summary_version_id=summary.id,
+                    version=2,
+                    updated_at=current_time,
+                )
+            )
+        else:
+            await self._session.execute(
+                update(summary_watermarks)
+                .where(
+                    summary_watermarks.c.account_id == account_id,
+                    summary_watermarks.c.conversation_id == conversation_id,
+                    summary_watermarks.c.summary_kind == summary.kind.value,
+                    summary_watermarks.c.version == watermark_version,
+                )
+                .values(
+                    last_included_event_id=summary.range_end_event_id,
+                    last_summary_version_id=summary.id,
+                    version=watermark_version + 1,
+                    updated_at=current_time,
+                )
+            )
+        return SummaryWatermark(
+            conversation_id,
+            summary.kind,
+            summary.range_end_event_id,
+            watermark_version + 1 if watermark_row is not None else 2,
+            summary.id,
+        )
+
+    async def write_embedding_records(  # noqa: PLR0913 - provider snapshot is explicit
+        self,
+        space: EmbeddingSpace,
+        records: tuple[EmbeddingRecord, ...],
+        *,
+        account_id: UUID | None,
+        model_profile_id: UUID,
+        config_version_id: UUID,
+        activate: bool = False,
+        now: datetime | None = None,
+    ) -> int:
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        if any(
+            record.space_id != space.id or len(record.vector) != space.dimensions
+            for record in records
+        ):
+            raise ValueError("embedding record dimension or space mismatch")
+        await self._session.execute(
+            postgresql_insert(embedding_spaces)
+            .values(
+                id=space.id,
+                account_id=account_id,
+                model_profile_id=model_profile_id,
+                profile_kind="embedding",
+                config_version_id=config_version_id,
+                model_name_snapshot=space.model_name,
+                dimensions=space.dimensions,
+                distance_metric=space.distance_metric,
+                normalization=space.normalization,
+                chunker_version=space.chunker_version,
+                state=space.state.value,
+                generation=space.generation,
+                created_at=current_time,
+            )
+            .on_conflict_do_nothing(constraint="embedding_spaces_pkey")
+        )
+        for record in records:
+            target_columns: dict[str, object] = {
+                "memory_version_id": record.target_id
+                if record.target_kind == "memory_version"
+                else None,
+                "summary_version_id": record.target_id
+                if record.target_kind == "summary_version"
+                else None,
+                "message_revision_id": record.target_id
+                if record.target_kind == "message_revision"
+                else None,
+            }
+            existing = await self._session.scalar(
+                select(embedding_records.c.id).where(
+                    embedding_records.c.embedding_space_id == space.id,
+                    embedding_records.c.chunk_index == record.chunk_index,
+                    *[
+                        getattr(embedding_records.c, key) == value
+                        for key, value in target_columns.items()
+                        if value is not None
+                    ],
+                )
+            )
+            values = {
+                "id": record.id,
+                "account_id": account_id,
+                "embedding_space_id": space.id,
+                **target_columns,
+                "chunk_index": record.chunk_index,
+                "chunker_version": space.chunker_version,
+                "source_sha256": record.source_sha256,
+                "vector_payload": list(record.vector),
+                "dimensions": space.dimensions,
+                "state": record.state.value,
+                "created_at": current_time,
+            }
+            if existing is None:
+                await self._session.execute(insert(embedding_records).values(**values))
+            else:
+                await self._session.execute(
+                    update(embedding_records)
+                    .where(embedding_records.c.id == existing)
+                    .values(
+                        source_sha256=record.source_sha256,
+                        vector_payload=list(record.vector),
+                        dimensions=space.dimensions,
+                        state=record.state.value,
+                        invalidated_at=None,
+                    )
+                )
+        if activate:
+            await self._session.execute(
+                update(embedding_spaces)
+                .where(
+                    embedding_spaces.c.model_profile_id == model_profile_id,
+                    embedding_spaces.c.account_id == account_id,
+                    embedding_spaces.c.state == "active",
+                    embedding_spaces.c.id != space.id,
+                )
+                .values(state="retired", retired_at=current_time)
+            )
+            await self._session.execute(
+                update(embedding_spaces)
+                .where(embedding_spaces.c.id == space.id)
+                .values(state="active", activated_at=current_time)
+            )
+        return len(records)
+
+    async def forget_memory(
+        self,
+        *,
+        account_id: UUID,
+        memory_id: UUID,
+        reason: str = "policy",
+        now: datetime | None = None,
+    ) -> bool:
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        row = (
+            (
+                await self._session.execute(
+                    select(memories)
+                    .where(
+                        memories.c.id == memory_id,
+                        memories.c.account_id == account_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return False
+        await self._session.execute(
+            update(memories)
+            .where(memories.c.id == memory_id)
+            .values(status="forgotten", forgotten_at=current_time, updated_at=current_time)
+        )
+        await self._session.execute(
+            update(memory_versions)
+            .where(memory_versions.c.memory_id == memory_id)
+            .values(
+                payload={}, rendered_text=None, redacted_at=current_time, redaction_reason=reason
+            )
+        )
+        await self._session.execute(
+            update(embedding_records)
+            .where(
+                embedding_records.c.memory_version_id.in_(
+                    select(memory_versions.c.id).where(memory_versions.c.memory_id == memory_id)
+                )
+            )
+            .values(state="invalidated", invalidated_at=current_time)
+        )
+        return True
+
+    async def record_erasure(  # noqa: PLR0913 - erasure audit identity is explicit
+        self,
+        source_id: UUID | None = None,
+        *,
+        account_id: UUID,
+        memory_id: UUID | None = None,
+        reason: str = "policy",
+        policy_version: int = 1,
+        requested_by: str = "memory_worker",
+        scope_secret: bytes = b"memory-erasure-v1",
+        now: datetime | None = None,
+        derived_ids: dict[str, set[UUID]] | None = None,
+    ) -> UUID:
+        if policy_version < 1 or not requested_by or not scope_secret:
+            raise ValueError("erasure request metadata is invalid")
+        memory_id = memory_id or source_id
+        if memory_id is None:
+            raise ValueError("erasure source is required")
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        key = hmac.new(
+            scope_secret, account_id.bytes + memory_id.bytes + reason.encode(), "sha256"
+        ).digest()
+        request_id = uuid5(account_id, f"erasure:{memory_id}:{key.hex()}")
+        await self._session.execute(
+            postgresql_insert(data_erasure_requests)
+            .values(
+                id=request_id,
+                account_id=account_id,
+                scope_type="memory",
+                memory_id=memory_id,
+                contact_id=None,
+                state="completed",
+                requested_by=requested_by,
+                request_idempotency_key=key,
+                policy_version=policy_version,
+                created_at=current_time,
+                updated_at=current_time,
+                completed_at=current_time,
+            )
+            .on_conflict_do_nothing(constraint="uq_data_erasure_requests_idempotency")
+        )
+        await self._session.execute(
+            postgresql_insert(erasure_ledger)
+            .values(
+                account_scope_hmac=hmac.new(scope_secret, account_id.bytes, "sha256").digest(),
+                scope_type="memory",
+                target_scope_hmac=hmac.new(scope_secret, memory_id.bytes, "sha256").digest(),
+                request_id=request_id,
+                policy_version=policy_version,
+                completed_at=current_time,
+            )
+            .on_conflict_do_nothing(index_elements=[erasure_ledger.c.request_id])
+        )
+        await self.forget_memory(
+            account_id=account_id, memory_id=memory_id, reason=reason, now=current_time
+        )
+        for kind, targets in (derived_ids or {}).items():
+            if not targets:
+                continue
+            if kind == "embedding":
+                await self._session.execute(
+                    update(embedding_records)
+                    .where(embedding_records.c.id.in_(targets))
+                    .values(state="invalidated", invalidated_at=current_time)
+                )
+            elif kind == "summary":
+                await self._session.execute(
+                    update(summary_versions)
+                    .where(summary_versions.c.id.in_(targets))
+                    .values(invalidation_state="invalidated", redacted_at=current_time)
+                )
+        return request_id
+
+    async def _proposal_row(self, proposal: Any) -> Any:
+        row = (
+            (
+                await self._session.execute(
+                    select(memory_proposals)
+                    .where(
+                        memory_proposals.c.id == proposal.id,
+                        memory_proposals.c.account_id == proposal.account_id,
+                        memory_proposals.c.conversation_id == proposal.conversation_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is not None:
+            return row
+        return (
+            (
+                await self._session.execute(
+                    select(memory_proposals)
+                    .where(
+                        memory_proposals.c.account_id == proposal.account_id,
+                        memory_proposals.c.conversation_id == proposal.conversation_id,
+                        memory_proposals.c.semantic_key_hash == proposal.semantic_key_hash,
+                        memory_proposals.c.state.in_(
+                            ("received", "validating", "candidate", "accepted")
+                        ),
+                    )
+                    .order_by(memory_proposals.c.created_at.desc(), memory_proposals.c.id.desc())
+                    .limit(1)
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
 
     async def issue_review_action(  # noqa: PLR0913 - review token binding is explicit
         self,

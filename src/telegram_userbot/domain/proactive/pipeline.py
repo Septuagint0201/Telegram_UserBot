@@ -100,12 +100,24 @@ def preliminary_gate(value: AuthorizationInput) -> GateResult:  # noqa: PLR0911,
         return GateResult(False, "CONFLICTING_WORK")
     if not value.minimum_interval_ok:
         return GateResult(False, "MINIMUM_INTERVAL")
+    selected_occurrences = tuple(
+        occurrence
+        for occurrence in candidate.occurrences
+        if occurrence.id in set(decision.selected_occurrence_ids)
+    )
+    if not selected_occurrences:
+        return GateResult(False, "SELECTED_OCCURRENCE_INVALID")
     quiet = quiet_decision(
         now,
         timezone_name=candidate.timezone_name,
         policy=value.policy,
-        occurrence=candidate.occurrences[0],
+        occurrence=selected_occurrences[0],
     )
+    if any(
+        occurrence.quiet_bypass_possible != selected_occurrences[0].quiet_bypass_possible
+        for occurrence in selected_occurrences[1:]
+    ):
+        return GateResult(False, "MIXED_QUIET_BYPASS")
     if quiet.in_absolute_quiet:
         return GateResult(False, "ABSOLUTE_NO_SEND")
     if quiet.in_quiet_hours:
@@ -141,6 +153,8 @@ def final_gate(value: FinalGateInput) -> GateResult:  # noqa: PLR0911 - every sn
         return GateResult(False, "CONTENT_REVISION_INVALID")
     if value.snapshot_activity_revision != value.current_activity_revision:
         return GateResult(False, "ACTIVITY_REVISION_STALE")
+    if value.snapshot_activity_revision != value.authorization.candidate.activity_revision:
+        return GateResult(False, "ACTIVITY_REVISION_SNAPSHOT_INVALID")
     if not value.reservation_held:
         return GateResult(False, "RESERVATION_NOT_HELD")
     if not value.main_output_valid:

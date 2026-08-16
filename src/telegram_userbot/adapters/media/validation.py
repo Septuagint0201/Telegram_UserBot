@@ -86,9 +86,11 @@ class ImageIngestor:
             try:
                 async with asyncio.timeout(self.limits.timeout_seconds):
                     payload = await self._read_bounded(chunks)
+                    return await asyncio.to_thread(
+                        self.validate_bytes, payload, declared_mime=declared_mime
+                    )
             except TimeoutError as error:
                 raise ImageIngestionError("image_download_timeout") from error
-        return self.validate_bytes(payload, declared_mime=declared_mime)
 
     async def _read_bounded(self, chunks: AsyncIterable[bytes]) -> bytes:
         payload = bytearray()

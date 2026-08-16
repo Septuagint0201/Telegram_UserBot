@@ -400,13 +400,75 @@ def test_m7_due_jobs_are_idempotent_and_expired_leases_requeue() -> None:
     lease2 = store.claim(now=NOW + timedelta(seconds=1), owner=owner)
     assert lease2 is not None
     assert lease2.attempt_count == 2
-    assert store.complete(idempotency_key=key, owner=owner, now=NOW)
+    assert store.complete(idempotency_key=key, owner=owner, now=NOW) is True
+    late_key = sha256(b"late-lease").digest()
+    store.enqueue(account_id=account_id, idempotency_key=late_key, available_at=NOW)
+    late = store.claim(now=NOW, owner=owner, lease=timedelta(seconds=1))
+    assert late is not None
+    assert (
+        store.complete(idempotency_key=late_key, owner=owner, now=NOW + timedelta(seconds=2))
+        is False
+    )
     assert store.claim(now=NOW + timedelta(days=1), owner=uuid4()) is None
     expired = store.enqueue(
         account_id=account_id, idempotency_key=sha256(b"late").digest(), available_at=NOW
     )
     assert store.expire(now=NOW + timedelta(days=1), window_end=NOW) == 1
     assert expired.state is DueJobState.PENDING
+
+
+@pytest.mark.unit
+def test_m7_quiet_gate_uses_only_agent_selected_occurrences() -> None:
+    candidate = candidate_for(now=datetime(2026, 8, 16, 23, tzinfo=UTC))
+    first = candidate.occurrences[0]
+    second = replace(
+        first,
+        id=uuid4(),
+        occurrence_key=sha256(b"second-occurrence").digest(),
+        importance=0.5,
+        quiet_bypass_possible=False,
+    )
+    updated = replace(
+        candidate,
+        occurrences=(first, second),
+        membership_hash=membership_digest((first, second)),
+    )
+    decision = AgentDecision(
+        updated.id,
+        ProactiveAction.SEND_NOW,
+        "timely_support",
+        (second.id,),
+        "check in",
+        0.5,
+    )
+    assert (
+        preliminary_gate(
+            AuthorizationInput(
+                updated,
+                decision,
+                datetime(2026, 8, 16, 23, tzinfo=UTC),
+                policy(),
+                EffectiveMode.AUTO,
+            )
+        ).reason
+        == "QUIET_HOURS"
+    )
+
+
+@pytest.mark.unit
+def test_m7_final_gate_binds_activity_snapshot_to_candidate() -> None:
+    candidate = candidate_for()
+    decision = AgentDecision(
+        candidate.id,
+        ProactiveAction.SEND_NOW,
+        "timely_support",
+        (candidate.occurrences[0].id,),
+        "check in",
+        0.5,
+    )
+    authorization = AuthorizationInput(candidate, decision, NOW, policy(), EffectiveMode.AUTO)
+    final = FinalGateInput(authorization, 1, 1, EffectiveMode.AUTO, 1, 1, 0, 0, 1, 1)
+    assert final_gate(final).reason == "ACTIVITY_REVISION_SNAPSHOT_INVALID"
 
 
 @pytest.mark.unit

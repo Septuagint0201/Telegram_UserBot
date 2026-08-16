@@ -85,6 +85,8 @@ class DurableDueJobStore:
                 current is None
                 or current.state is not DueJobState.LEASED
                 or current.lease_owner != owner
+                or current.lease_expires_at is None
+                or current.lease_expires_at <= now.astimezone(UTC)
             ):
                 return False
             self._jobs[idempotency_key] = replace(
