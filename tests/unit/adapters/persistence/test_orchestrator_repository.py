@@ -1059,7 +1059,7 @@ async def test_failure_preflight_and_operational_block(monkeypatch: pytest.Monke
     fake = FakeSession(
         results=(
             FakeResult({"conversation_id": CONVERSATION, "turn_id": TURN}),
-            FakeResult(),
+            FakeResult(turn_row(state="generating")),
             FakeResult(run_row()),
             FakeResult(),
             FakeResult(),

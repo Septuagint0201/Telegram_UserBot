@@ -285,7 +285,7 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ### M7 Evidence
 
-- [x] 当前 HEAD 的 Windows/CPython 3.14.7 M7 unit、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为 `PASS`；`0022_m7_job_scope_and_deadline` 为前一迁移，当前 migration head 为 `0023_m7_proactive_snapshot`，补齐 occurrence/candidate 的 contact-setting 与 relationship-state 快照。针对当前 HEAD 的 GitHub Actions Linux service acceptance 为 `NOT RUN`，历史运行结果不绑定当前提交。
+- [x] 当前 HEAD 的 Windows/CPython 3.14.7 M7 unit、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为 `PASS`；`0022_m7_job_scope_and_deadline` 与 `0023_m7_proactive_snapshot` 为前序迁移，当前 migration head 为 `0024_runtime_fencing_provenance`，补齐 legacy nullable outbound provenance、发送 lease/fencing 及 model-run manifest metadata 的迁移闭环。针对当前 HEAD 的 GitHub Actions Linux service acceptance 为 `NOT RUN`，历史运行结果不绑定当前提交。
 - [x] 本机 Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为 `PASS`；本机无 Docker，Windows 本地 PostgreSQL/Redis service test 仍为 `NOT RUN`。
 
 ## 13. M8 — Production Compose与 Operations

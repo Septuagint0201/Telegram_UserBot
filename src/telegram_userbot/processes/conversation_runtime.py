@@ -4,6 +4,7 @@ import asyncio
 import secrets
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID
@@ -33,6 +34,12 @@ from telegram_userbot.application.ports.telegram import (
 )
 from telegram_userbot.domain.messaging import Direction, EventKind, NormalizedTelegramEvent
 from telegram_userbot.domain.shared.ids import AccountId, ConversationId, RunId
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeRecoveryReport:
+    expired_generations: int
+    stale_outbound_intents: int
 
 
 class OrchestratedTelegramIngestService:
@@ -114,98 +121,144 @@ class ConversationRuntimeService:
         new_uuid: Callable[[], UUID],
         now: Callable[[], datetime] | None = None,
         entropy: Callable[[int], bytes] = secrets.token_bytes,
+        max_model_attempts: int = 2,
+        max_generation_seconds: int = 60,
+        outbound_lease_seconds: int = 60,
     ) -> None:
+        if max_model_attempts < 1:
+            raise ValueError("max_model_attempts must be positive")
+        if max_generation_seconds < 1 or outbound_lease_seconds < 1:
+            raise ValueError("runtime lease and deadline values must be positive")
         self._session_factory = session_factory
         self._model = model
         self._telegram = telegram
         self._new_uuid = new_uuid
         self._now = now or (lambda: datetime.now(UTC))
         self._entropy = entropy
+        self._max_model_attempts = max_model_attempts
+        self._max_generation_seconds = max_generation_seconds
+        self._outbound_lease_seconds = outbound_lease_seconds
 
     async def run_due_turn(self, *, turn_id: UUID, owner: UUID) -> RunResult:
         async with self._session_factory() as session, session.begin():
             repository = ConversationOrchestratorRepository(session, new_uuid=self._new_uuid)
             await repository.seal_turn(turn_id=turn_id, now=self._now())
             claim = await repository.start_generation(turn_id=turn_id, owner=owner, now=self._now())
-        typing_started = False
+        typing_started = claim.typing_lease_token is not None
         if claim.typing_lease_token is not None:
-            typing_started = True
-            try:
+            # Read acknowledgement and typing are UX feedback, never a
+            # prerequisite for a durable Main AI result.
+            with suppress(Exception):
                 await self._start_auto_feedback(claim, claim.typing_lease_token)
-            except Exception:
-                async with self._session_factory() as session, session.begin():
-                    await ConversationOrchestratorRepository(
-                        session, new_uuid=self._new_uuid
-                    ).fail_generation(
-                        run_id=claim.run.id,
-                        now=self._now(),
-                        error_code="TELEGRAM_FEEDBACK_ERROR",
-                    )
-                await self._best_effort_stop_typing(claim.run.account_id, claim.run.conversation_id)
-                return RunResult(claim.run.id, "failed", "TELEGRAM_FEEDBACK_ERROR")
         invalidated = asyncio.Event()
-        model_task = asyncio.create_task(
-            self._model.generate(
-                ModelRequest(
-                    RunId(claim.run.id),
-                    "main_ai",
-                    claim.run.input_fingerprint.hex(),
-                )
-            )
-        )
-        monitor_task = asyncio.create_task(
-            self._maintain_generation(
-                claim=claim,
-                owner=owner,
-                model_task=model_task,
-                invalidated=invalidated,
-            )
-        )
         try:
-            response = await model_task
-        except asyncio.CancelledError:
-            if not invalidated.is_set():
-                raise
-            async with self._session_factory() as session, session.begin():
-                return await ConversationOrchestratorRepository(
-                    session, new_uuid=self._new_uuid
-                ).complete_generation(
-                    run_id=claim.run.id,
-                    owner=owner,
-                    text_output="cancelled stale generation",
-                    completed_at=self._now(),
-                    entropy=self._entropy(32),
+            loop = asyncio.get_running_loop()
+            deadline_seconds = float(self._max_generation_seconds)
+            deadline = loop.time() + deadline_seconds
+            error_code = "PROVIDER_TIMEOUT"
+            for attempt_no in range(1, self._max_model_attempts + 1):
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                model_task = asyncio.create_task(
+                    self._model.generate(
+                        ModelRequest(
+                            RunId(claim.run.id),
+                            "main_ai",
+                            claim.run.input_fingerprint.hex(),
+                        )
+                    )
                 )
-        except Exception as error:
-            error_code = "PROVIDER_TIMEOUT" if isinstance(error, TimeoutError) else "PROVIDER_ERROR"
+                monitor_task = asyncio.create_task(
+                    self._maintain_generation(
+                        claim=claim,
+                        owner=owner,
+                        model_task=model_task,
+                        invalidated=invalidated,
+                    )
+                )
+                try:
+                    response = await asyncio.wait_for(model_task, timeout=remaining)
+                except asyncio.CancelledError:
+                    if not invalidated.is_set():
+                        raise
+                    async with self._session_factory() as session, session.begin():
+                        return await ConversationOrchestratorRepository(
+                            session, new_uuid=self._new_uuid
+                        ).complete_generation(
+                            run_id=claim.run.id,
+                            owner=owner,
+                            text_output="stale generation discarded",
+                            completed_at=self._now(),
+                            entropy=self._entropy(32),
+                        )
+                except Exception as error:
+                    error_code = (
+                        "PROVIDER_TIMEOUT" if isinstance(error, TimeoutError) else "PROVIDER_ERROR"
+                    )
+                    can_retry = (
+                        attempt_no < self._max_model_attempts
+                        and self._is_retryable_model_error(error)
+                        and deadline - loop.time() > 0
+                    )
+                    if can_retry and await self._record_retry(
+                        run_id=claim.run.id,
+                        owner=owner,
+                        error_code=error_code,
+                    ):
+                        continue
+                    break
+                else:
+                    async with self._session_factory() as session, session.begin():
+                        result = await ConversationOrchestratorRepository(
+                            session, new_uuid=self._new_uuid
+                        ).complete_generation(
+                            run_id=claim.run.id,
+                            owner=owner,
+                            text_output=response.text.reveal_for_use(),
+                            completed_at=self._now(),
+                            entropy=self._entropy(32),
+                        )
+                    if result.delivery_group_id is not None:
+                        await self.dispatch_group(
+                            group_id=result.delivery_group_id,
+                            owner=owner,
+                        )
+                    return result
+                finally:
+                    monitor_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await monitor_task
             async with self._session_factory() as session, session.begin():
                 await ConversationOrchestratorRepository(
                     session, new_uuid=self._new_uuid
-                ).fail_generation(run_id=claim.run.id, now=self._now(), error_code=error_code)
-            return RunResult(claim.run.id, "failed", error_code)
-        else:
-            async with self._session_factory() as session, session.begin():
-                result = await ConversationOrchestratorRepository(
-                    session, new_uuid=self._new_uuid
-                ).complete_generation(
+                ).fail_generation(
                     run_id=claim.run.id,
                     owner=owner,
-                    text_output=response.text.reveal_for_use(),
-                    completed_at=self._now(),
-                    entropy=self._entropy(32),
+                    now=self._now(),
+                    error_code=error_code,
                 )
-            if result.delivery_group_id is not None:
-                await self.dispatch_group(
-                    group_id=result.delivery_group_id,
-                    owner=owner,
-                )
-            return result
+            return RunResult(claim.run.id, "failed", error_code)
         finally:
-            monitor_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await monitor_task
             if typing_started:
                 await self._best_effort_stop_typing(claim.run.account_id, claim.run.conversation_id)
+
+    @staticmethod
+    def _is_retryable_model_error(error: Exception) -> bool:
+        return isinstance(error, TimeoutError | ConnectionError) or bool(
+            getattr(error, "retryable", False)
+        )
+
+    async def _record_retry(self, *, run_id: UUID, owner: UUID, error_code: str) -> bool:
+        async with self._session_factory() as session, session.begin():
+            repository = ConversationOrchestratorRepository(session, new_uuid=self._new_uuid)
+            retry = getattr(repository, "retry_generation_attempt", None)
+            if retry is None:
+                # Lightweight fakes from M0-M4 predate durable attempt history.
+                return True
+            return bool(
+                await retry(run_id=run_id, owner=owner, now=self._now(), error_code=error_code)
+            )
 
     async def _maintain_generation(
         self,
@@ -257,33 +310,51 @@ class ConversationRuntimeService:
                 except Exception:
                     return
 
+    async def recover_once(self) -> RuntimeRecoveryReport:
+        """Recover only durable state; no model or Telegram call is made here."""
+
+        now = self._now()
+        async with self._session_factory() as session, session.begin():
+            expired_generations = await ConversationOrchestratorRepository(
+                session, new_uuid=self._new_uuid
+            ).recover_expired_generations(now=now)
+        async with self._session_factory() as session, session.begin():
+            stale_outbound_intents = await TelegramLifecycleRepository(
+                session, new_uuid=self._new_uuid
+            ).recover_stale_sending(
+                older_than=now - timedelta(seconds=self._outbound_lease_seconds),
+                now=now,
+            )
+        return RuntimeRecoveryReport(expired_generations, stale_outbound_intents)
+
     async def _start_auto_feedback(self, claim: GenerationClaim, lease_token: UUID) -> None:
         run = claim.run
         max_message_id = claim.max_telegram_message_id
         if max_message_id is not None:
-            receipt = await self._telegram.acknowledge_read(
-                TelegramReadRequest(
-                    AccountId(run.account_id),
-                    ConversationId(run.conversation_id),
-                    max_message_id,
-                )
-            )
-            now = self._now()
-            async with self._session_factory() as session, session.begin():
-                await TelegramLifecycleRepository(
-                    session, new_uuid=self._new_uuid
-                ).record_read_high_watermark(
-                    record=ReadHighWatermarkRecord(
-                        self._new_uuid(),
-                        run.account_id,
-                        run.conversation_id,
-                        receipt.max_telegram_message_id,
-                        sha256(
-                            f"m4-read-v1:{run.id}:{receipt.max_telegram_message_id}".encode()
-                        ).digest(),
-                        now,
+            with suppress(Exception):
+                receipt = await self._telegram.acknowledge_read(
+                    TelegramReadRequest(
+                        AccountId(run.account_id),
+                        ConversationId(run.conversation_id),
+                        max_message_id,
                     )
                 )
+                now = self._now()
+                async with self._session_factory() as session, session.begin():
+                    await TelegramLifecycleRepository(
+                        session, new_uuid=self._new_uuid
+                    ).record_read_high_watermark(
+                        record=ReadHighWatermarkRecord(
+                            self._new_uuid(),
+                            run.account_id,
+                            run.conversation_id,
+                            receipt.max_telegram_message_id,
+                            sha256(
+                                f"m4-read-v1:{run.id}:{receipt.max_telegram_message_id}".encode()
+                            ).digest(),
+                            now,
+                        )
+                    )
         await self._telegram.set_typing(
             TelegramTypingRequest(
                 AccountId(run.account_id),
@@ -349,10 +420,15 @@ class ConversationRuntimeService:
             if intent is None:
                 break
             completion = await delivery.send_prepared(intent=intent, now=self._now())
+            # The gateway call can outlive the send lease.  Fence persistence
+            # against the time it returned, not the time dispatch began.
+            completion = replace(completion, finished_at=self._now())
             async with self._session_factory() as session, session.begin():
-                await TelegramLifecycleRepository(session, new_uuid=self._new_uuid).finish_attempt(
-                    intent=intent, completion=completion
-                )
+                completed = await TelegramLifecycleRepository(
+                    session, new_uuid=self._new_uuid
+                ).finish_attempt(intent=intent, completion=completion)
+            if not completed:
+                break
             if completion.outcome == "succeeded":
                 sent += 1
             else:
@@ -364,4 +440,5 @@ __all__ = [
     "ConversationRuntimeService",
     "OrchestratedTelegramIngestService",
     "OrchestratorConflictError",
+    "RuntimeRecoveryReport",
 ]

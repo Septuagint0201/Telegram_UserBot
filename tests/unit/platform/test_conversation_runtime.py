@@ -135,6 +135,9 @@ class FakeRepository:
     async def fail_generation(self, **kwargs: object) -> None:
         type(self).failed = True
 
+    async def recover_expired_generations(self, **kwargs: object) -> int:
+        return 2
+
     async def preflight_intent(
         self, *, intent_id: UUID, owner: UUID, now: datetime
     ) -> OutboundIntentRecord | None:
@@ -187,8 +190,12 @@ class FakeLifecycle:
     async def set_typing_lease(self, *, record: object) -> None:
         type(self).typing_records += 1
 
-    async def finish_attempt(self, **kwargs: object) -> None:
+    async def finish_attempt(self, **kwargs: object) -> bool:
         type(self).attempts += 1
+        return True
+
+    async def recover_stale_sending(self, **kwargs: object) -> int:
+        return 3
 
 
 class FakeDelivery:
@@ -214,6 +221,16 @@ class GoodModel:
 class BadModel:
     async def generate(self, request: object) -> ModelResponse:
         raise TimeoutError
+
+
+class RetryModel:
+    calls = 0
+
+    async def generate(self, request: object) -> ModelResponse:
+        type(self).calls += 1
+        if self.calls == 1:
+            raise ConnectionError("synthetic transient failure")
+        return ModelResponse(SensitiveValue("retried answer"), "1" * 64)
 
 
 class FeedbackErrorTelegram(FakeTelegramGateway):
@@ -279,6 +296,32 @@ async def test_runtime_auto_success_and_provider_failure(monkeypatch: pytest.Mon
     copilot = await service.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
     assert copilot.draft_id == UUID(int=40)
     assert (len(telegram.read_requests), len(telegram.typing_requests)) == feedback_count
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_runtime_retries_only_bounded_transient_model_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "ConversationOrchestratorRepository", FakeRepository)
+    monkeypatch.setattr(runtime_module, "TelegramLifecycleRepository", FakeLifecycle)
+    monkeypatch.setattr(runtime_module, "TelegramDeliveryService", FakeDelivery)
+    FakeRepository.claim_value = claim(auto=False)
+    FakeRepository.result_value = RunResult(
+        UUID(int=20), "succeeded", "COPILOT_DRAFT_READY", draft_id=UUID(int=40)
+    )
+    RetryModel.calls = 0
+    service = runtime_module.ConversationRuntimeService(
+        cast(async_sessionmaker[AsyncSession], SessionFactory()),
+        model=RetryModel(),
+        telegram=FakeTelegramGateway(),
+        new_uuid=IDS.popleft,
+        now=lambda: NOW,
+        max_model_attempts=2,
+    )
+    result = await service.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
+    assert result.reason == "COPILOT_DRAFT_READY"
+    assert RetryModel.calls == 2
 
 
 @pytest.mark.unit
@@ -355,9 +398,9 @@ async def test_runtime_feedback_and_dispatch_fail_closed_branches(
         new_uuid=IDS.popleft,
         now=lambda: NOW,
     )
-    failed = await feedback_failure.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
-    assert failed.reason == "TELEGRAM_FEEDBACK_ERROR"
-    assert FakeRepository.failed
+    completed = await feedback_failure.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
+    assert completed.reason == "DELIVERY_PLANNED"
+    assert not FakeRepository.failed
 
     service = runtime_module.ConversationRuntimeService(
         cast(async_sessionmaker[AsyncSession], SessionFactory()),
@@ -378,3 +421,22 @@ async def test_runtime_feedback_and_dispatch_fail_closed_branches(
     assert await service.dispatch_group(group_id=UUID(int=30), owner=UUID(int=8)) == 0
 
     FakeDelivery.outcome = "succeeded"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_runtime_recovery_only_changes_durable_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_module, "ConversationOrchestratorRepository", FakeRepository)
+    monkeypatch.setattr(runtime_module, "TelegramLifecycleRepository", FakeLifecycle)
+    service = runtime_module.ConversationRuntimeService(
+        cast(async_sessionmaker[AsyncSession], SessionFactory()),
+        model=GoodModel(),
+        telegram=FakeTelegramGateway(),
+        new_uuid=IDS.popleft,
+        now=lambda: NOW,
+    )
+
+    report = await service.recover_once()
+
+    assert report.expired_generations == 2
+    assert report.stale_outbound_intents == 3

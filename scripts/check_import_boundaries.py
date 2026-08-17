@@ -5,6 +5,20 @@ import sys
 from pathlib import Path
 
 PROJECT_PACKAGE = "telegram_userbot"
+COMPOSITION_PROCESS_FILES = frozenset(
+    {"processes/conversation_runtime.py", "processes/memory_runtime.py"}
+)
+ALLOWED_ADAPTER_BRIDGES = frozenset(
+    {
+        ("embedding", "llm"),
+        ("media", "persistence"),
+        ("persistence", "media"),
+        ("queue", "persistence"),
+        ("telegram_bot", "persistence"),
+        ("telegram_bot", "webapp"),
+        ("webapp", "persistence"),
+    }
+)
 FORBIDDEN_DOMAIN_ROOTS = frozenset(
     {
         "aiogram",
@@ -49,6 +63,29 @@ def boundary_violations(source_root: Path) -> tuple[str, ...]:
                 (f"{PROJECT_PACKAGE}.adapters", f"{PROJECT_PACKAGE}.processes")
             ):
                 violations.append(f"{relative}: application imports outer layer {imported}")
+            if (
+                layer == "processes"
+                and imported.startswith(f"{PROJECT_PACKAGE}.adapters")
+                and relative not in COMPOSITION_PROCESS_FILES
+            ):
+                violations.append(f"{relative}: process imports adapter {imported}")
+            if layer == "adapters" and imported.startswith(f"{PROJECT_PACKAGE}.adapters."):
+                parts = imported.split(".")
+                if len(parts) >= 4:
+                    source_adapter = relative.split("/", maxsplit=2)[1]
+                    target_adapter = parts[2]
+                    if (
+                        source_adapter != target_adapter
+                        and (
+                            source_adapter,
+                            target_adapter,
+                        )
+                        not in ALLOWED_ADAPTER_BRIDGES
+                    ):
+                        violations.append(
+                            f"{relative}: adapter bridge {source_adapter}->{target_adapter} "
+                            f"is not declared ({imported})"
+                        )
     return tuple(violations)
 
 

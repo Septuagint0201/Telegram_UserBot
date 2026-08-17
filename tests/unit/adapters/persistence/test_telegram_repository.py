@@ -45,10 +45,12 @@ class ScriptedResult:
         *,
         scalar_rows: tuple[object, ...] = (),
         rows: tuple[object, ...] = (),
+        rowcount: int = 1,
     ) -> None:
         self.row = row
         self.scalar_rows = scalar_rows
         self.rows = rows
+        self.rowcount = rowcount
 
     def mappings(self) -> ScriptedResult:
         return self
@@ -314,19 +316,19 @@ async def test_claim_finish_recover_and_get_intent_state_paths() -> None:
         )
     )
     repository = TelegramLifecycleRepository(session(scripted))
-    claimed = await repository.claim_intent(intent_id=UUID(int=31), now=NOW)
+    claimed = await repository.claim_intent(account_id=UUID(int=1), intent_id=UUID(int=31), now=NOW)
     assert claimed is not None
     assert claimed.attempt_count == 1
     await repository.finish_attempt(
         intent=claimed,
         completion=AttemptCompletionRecord(AttemptOutcome.SUCCEEDED, NOW, telegram_message_id=700),
     )
-    fetched = await repository.get_intent(UUID(int=31))
+    fetched = await repository.get_intent(account_id=UUID(int=1), intent_id=UUID(int=31))
     assert fetched is not None
 
     missing = await TelegramLifecycleRepository(
         session(ScriptedSession(execute_results=(ScriptedResult(None),)))
-    ).claim_intent(intent_id=UUID(int=99), now=NOW)
+    ).claim_intent(account_id=UUID(int=1), intent_id=UUID(int=99), now=NOW)
     assert missing is None
 
     recovery_session = ScriptedSession(
@@ -426,6 +428,36 @@ async def test_attempt_validation_read_watermark_and_typing_paths() -> None:
         await typing_repository.set_typing_lease(
             record=TypingLeaseRecord(UUID(int=1), UUID(int=2), UUID(int=60), None, NOW)
         )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_late_outbound_completion_is_fenced_by_claim_attempt_and_lease() -> None:
+    intent = OutboundIntentRecord(
+        UUID(int=31),
+        UUID(int=30),
+        UUID(int=1),
+        UUID(int=2),
+        UUID(int=29),
+        0,
+        44,
+        "synthetic output",
+        payload_sha256("synthetic output"),
+        "sending",
+        None,
+        2,
+        7,
+        NOW + timedelta(seconds=30),
+    )
+    scripted = ScriptedSession(execute_results=(ScriptedResult(rowcount=0),))
+    completed = await TelegramLifecycleRepository(session(scripted)).finish_attempt(
+        intent=intent,
+        completion=AttemptCompletionRecord(AttemptOutcome.SUCCEEDED, NOW, telegram_message_id=701),
+    )
+    assert not completed
+    statement = str(cast(Any, scripted.statements[0]).compile())
+    assert "send_fencing_token" in statement
+    assert "send_lease_expires_at" in statement
 
 
 @pytest.mark.unit

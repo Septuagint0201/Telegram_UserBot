@@ -21,6 +21,7 @@ def test_m7_status_documents_are_consistent() -> None:
     assert "0021_m7_evidence_activity" in compatibility
     assert "0022_m7_job_scope_and_deadline" in compatibility
     assert "0023_m7_proactive_snapshot" in compatibility
+    assert "0024_runtime_fencing_provenance" in compatibility
     assert "M7" in plan
     assert "M7" in readme
     assert "M7" in design
@@ -34,6 +35,8 @@ def test_m7_status_documents_are_consistent() -> None:
         assert "0022_m7_job_scope_and_deadline" in document
     for document in (todo, plan, readme, design, compatibility, disclosure):
         assert "0023_m7_proactive_snapshot" in document
+    for document in (todo, plan, readme, design, compatibility, disclosure):
+        assert "0024_runtime_fencing_provenance" in document
     for document in (todo, plan, readme, design, compatibility, disclosure):
         assert "22:00" in document
         assert "00:00" in document

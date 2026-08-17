@@ -1383,8 +1383,8 @@ outbound_delivery_groups = Table(
     Column("intent_count", Integer, nullable=False),
     Column("sent_count", Integer, nullable=False, server_default=text("0")),
     Column("idempotency_key", LargeBinary, nullable=False),
-    Column("mode_version", BigInteger),
-    Column("content_revision", BigInteger),
+    Column("mode_version", BigInteger, nullable=False, server_default=text("1")),
+    Column("content_revision", BigInteger, nullable=False, server_default=text("0")),
     Column("account_control_version", BigInteger, nullable=False, server_default=text("1")),
     Column("logical_content_sha256", LargeBinary),
     Column("normalizer_version", Text, nullable=False, server_default=text("'normalized-text-v1'")),
@@ -1423,10 +1423,8 @@ outbound_delivery_groups = Table(
     ),
     CheckConstraint("sent_count >= 0 AND sent_count <= intent_count", name="sent_count_range"),
     CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_32_bytes"),
-    CheckConstraint("mode_version IS NULL OR mode_version >= 1", name="mode_version_positive"),
-    CheckConstraint(
-        "content_revision IS NULL OR content_revision >= 0", name="content_revision_nonnegative"
-    ),
+    CheckConstraint("mode_version >= 1", name="mode_version_positive"),
+    CheckConstraint("content_revision >= 0", name="content_revision_nonnegative"),
     UniqueConstraint(
         "account_id", "idempotency_key", name="uq_outbound_delivery_groups_idempotency"
     ),
@@ -1464,9 +1462,9 @@ outbound_intents = Table(
     Column("source", Text),
     Column("generation_no", Integer, nullable=False, server_default=text("1")),
     Column("account_control_version", BigInteger, nullable=False, server_default=text("1")),
-    Column("mode_version", BigInteger),
-    Column("content_revision", BigInteger),
-    Column("idempotency_key", LargeBinary),
+    Column("mode_version", BigInteger, nullable=False, server_default=text("1")),
+    Column("content_revision", BigInteger, nullable=False, server_default=text("0")),
+    Column("idempotency_key", LargeBinary, nullable=False),
     Column("sequence_no", Integer, nullable=False),
     Column("chunk_count", Integer, nullable=False, server_default=text("1")),
     Column("telegram_random_id", BigInteger, nullable=False),
@@ -1476,6 +1474,8 @@ outbound_intents = Table(
     Column("state", Text, nullable=False, server_default=text("'pending'")),
     Column("telegram_message_id", BigInteger),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("send_fencing_token", BigInteger, nullable=False, server_default=text("0")),
+    Column("send_lease_expires_at", UTC_TIMESTAMP),
     Column("next_attempt_at", UTC_TIMESTAMP),
     Column("unknown_since", UTC_TIMESTAMP),
     Column("last_error_code", Text),
@@ -1507,6 +1507,12 @@ outbound_intents = Table(
         name="state_values",
     ),
     CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+    CheckConstraint("send_fencing_token >= 0", name="send_fencing_token_nonnegative"),
+    CheckConstraint(
+        "(state = 'sending' AND send_lease_expires_at IS NOT NULL) OR "
+        "(state <> 'sending' AND send_lease_expires_at IS NULL)",
+        name="send_lease_matches_state",
+    ),
     CheckConstraint(
         "(state = 'sent' AND telegram_message_id IS NOT NULL AND sent_at IS NOT NULL) OR "
         "(state <> 'sent')",
@@ -1711,6 +1717,7 @@ model_runs = Table(
     Column("config_version_id", UUID_TYPE, nullable=False),
     Column("credential_version_id", UUID_TYPE, nullable=False),
     Column("context_manifest_id", UUID_TYPE),
+    Column("memory_input_manifest_id", UUID_TYPE),
     Column("prompt_version", Text, nullable=False),
     Column("prompt_bundle_sha256", LargeBinary, nullable=False),
     Column("capability_snapshot_sha256", LargeBinary, nullable=False),

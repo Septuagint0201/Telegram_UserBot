@@ -97,11 +97,14 @@ class ConversationRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get(self, conversation_id: UUID) -> ConversationRecord | None:
+    async def get(self, *, account_id: UUID, conversation_id: UUID) -> ConversationRecord | None:
         row = (
             (
                 await self._session.execute(
-                    select(conversations).where(conversations.c.id == conversation_id)
+                    select(conversations).where(
+                        conversations.c.id == conversation_id,
+                        conversations.c.account_id == account_id,
+                    )
                 )
             )
             .mappings()
@@ -109,9 +112,10 @@ class ConversationRepository:
         )
         return None if row is None else _conversation(row)
 
-    async def compare_and_set_mode(
+    async def compare_and_set_mode(  # noqa: PLR0913 - account-scoped CAS is explicit
         self,
         *,
+        account_id: UUID,
         conversation_id: UUID,
         expected_version: int,
         base_mode_override: str | None,
@@ -122,6 +126,7 @@ class ConversationRepository:
             update(conversations)
             .where(
                 conversations.c.id == conversation_id,
+                conversations.c.account_id == account_id,
                 conversations.c.mode_version == expected_version,
             )
             .values(
@@ -282,6 +287,7 @@ class DurableJobRepository:
                     background_jobs.c.state == JobState.LEASED,
                     background_jobs.c.lease_owner == owner,
                     background_jobs.c.fencing_token == fencing_token,
+                    background_jobs.c.lease_expires_at > now,
                 )
                 .values(
                     state=JobState.SUCCEEDED,

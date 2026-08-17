@@ -1,5 +1,6 @@
 """PostgreSQL conversation coordinator and final-send authorization boundary."""
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -38,6 +39,7 @@ from telegram_userbot.adapters.persistence.schema import (
     message_events,
     message_revisions,
     messages,
+    model_capability_snapshots,
     model_config_versions,
     model_credential_versions,
     model_credentials,
@@ -101,6 +103,43 @@ class _MainProfile:
     config_version_id: UUID
     credential_version_id: UUID
     config_sha256: bytes
+    capability_snapshot_sha256: bytes
+
+
+def _capability_snapshot_digest(row: RowMapping) -> bytes:
+    """Hash only admission-relevant capability data, never the config digest."""
+
+    fields = {
+        name: row[name]
+        for name in (
+            "endpoint_id",
+            "protocol",
+            "model_name",
+            "supports_text",
+            "supports_temperature",
+            "supports_reasoning_effort",
+            "supports_image",
+            "supports_stream",
+            "supports_structured_output",
+            "chat_token_limit_field",
+            "max_context_tokens",
+            "max_output_tokens_limit",
+            "max_images_per_request",
+            "max_image_bytes_per_request",
+            "auto_image_tokens",
+            "messages_auto_detail_equivalent",
+            "supported_input_roles",
+            "embedding_dimensions",
+            "metadata_schema_version",
+            "metadata",
+            "observed_at",
+            "expires_at",
+        )
+        if name in row
+    }
+    return sha256(
+        json.dumps(fields, sort_keys=True, separators=(",", ":"), default=str).encode()
+    ).digest()
 
 
 def _turn(row: RowMapping) -> TurnRecord:
@@ -1113,6 +1152,7 @@ class ConversationOrchestratorRepository:
                         model_config_versions.c.id.label("config_version_id"),
                         model_credential_versions.c.id.label("credential_version_id"),
                         model_config_versions.c.config_sha256,
+                        model_capability_snapshots,
                     )
                     .join(
                         model_config_versions,
@@ -1129,6 +1169,11 @@ class ConversationOrchestratorRepository:
                             model_credentials.c.profile_id == model_profiles.c.id,
                             model_credentials.c.status == "active",
                         ),
+                    )
+                    .join(
+                        model_capability_snapshots,
+                        model_capability_snapshots.c.id
+                        == model_config_versions.c.capability_snapshot_id,
                     )
                     .join(
                         model_credential_versions,
@@ -1156,6 +1201,7 @@ class ConversationOrchestratorRepository:
                 row["config_version_id"],
                 row["credential_version_id"],
                 row["config_sha256"],
+                _capability_snapshot_digest(row),
             )
         )
 
@@ -1284,7 +1330,11 @@ class ConversationOrchestratorRepository:
                 credential_version_id=profile.credential_version_id,
                 prompt_version="m4-main-ai-v1",
                 prompt_bundle_sha256=prompt_hash,
-                capability_snapshot_sha256=profile.config_sha256,
+                capability_snapshot_sha256=getattr(
+                    profile,
+                    "capability_snapshot_sha256",
+                    sha256(b"capability-snapshot-unavailable").digest(),
+                ),
                 input_fingerprint=input_fingerprint,
                 adapter_version="canonical-model-port-v1",
                 request_schema_version=1,
@@ -1373,6 +1423,7 @@ class ConversationOrchestratorRepository:
             run["state"] != "running"
             or turn["state"] != "generating"
             or turn["lease_owner"] != owner
+            or turn["lease_expires_at"] <= now
             or turn["active_generation_no"] < 1
             or scope.resolution.effective_mode is not expected_mode
             or scope.resolution.operational_state.value != "READY"
@@ -1603,7 +1654,12 @@ class ConversationOrchestratorRepository:
             return await self._supersede(run, turn, now=completed_at, reason=gate.reason)
         normalized = text_output.replace("\r\n", "\n").replace("\r", "\n").strip()
         if not normalized:
-            await self.fail_generation(run_id=run_id, now=completed_at, error_code="EMPTY_OUTPUT")
+            await self.fail_generation(
+                run_id=run_id,
+                owner=owner,
+                now=completed_at,
+                error_code="EMPTY_OUTPUT",
+            )
             return RunResult(run_id, "failed", "EMPTY_OUTPUT")
         output_digest = sha256(normalized.encode()).digest()
         await self._session.execute(
@@ -1764,7 +1820,95 @@ class ConversationOrchestratorRepository:
             chunks=tuple(outbound_chunks),
         )
 
-    async def fail_generation(self, *, run_id: UUID, now: datetime, error_code: str) -> None:
+    async def retry_generation_attempt(
+        self,
+        *,
+        run_id: UUID,
+        owner: UUID,
+        now: datetime,
+        error_code: str,
+    ) -> bool:
+        """Record a bounded retry without granting a new run or lease."""
+
+        identity = (
+            (
+                await self._session.execute(
+                    select(model_runs.c.conversation_id, model_runs.c.turn_id).where(
+                        model_runs.c.id == run_id
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if identity is None:
+            return False
+        await self._locked_scope(identity["conversation_id"], now)
+        turn = (
+            (
+                await self._session.execute(
+                    select(conversation_turns)
+                    .where(conversation_turns.c.id == identity["turn_id"])
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        run = (
+            (
+                await self._session.execute(
+                    select(model_runs).where(model_runs.c.id == run_id).with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            turn is None
+            or run is None
+            or run["state"] != "running"
+            or turn["state"] != "generating"
+            or turn["lease_owner"] != owner
+            or turn["lease_expires_at"] <= now
+        ):
+            return False
+        current_attempt = await self._session.scalar(
+            select(func.max(model_run_attempts.c.attempt_no)).where(
+                model_run_attempts.c.model_run_id == run_id
+            )
+        )
+        if current_attempt is None:
+            return False
+        result = await self._session.execute(
+            update(model_run_attempts)
+            .where(
+                model_run_attempts.c.model_run_id == run_id,
+                model_run_attempts.c.attempt_no == current_attempt,
+                model_run_attempts.c.state == "started",
+            )
+            .values(state="retryable_failed", completed_at=now, error_code=error_code)
+        )
+        if getattr(result, "rowcount", 1) != 1:
+            return False
+        await self._session.execute(
+            insert(model_run_attempts).values(
+                model_run_id=run_id,
+                attempt_no=int(current_attempt) + 1,
+                state="started",
+                started_at=now,
+            )
+        )
+        return True
+
+    async def fail_generation(
+        self,
+        *,
+        run_id: UUID,
+        now: datetime,
+        error_code: str,
+        owner: UUID | None = None,
+    ) -> None:
         identity = (
             (
                 await self._session.execute(
@@ -1779,10 +1923,16 @@ class ConversationOrchestratorRepository:
         if identity is None:
             return
         await self._locked_scope(identity["conversation_id"], now)
-        await self._session.execute(
-            select(conversation_turns.c.id)
-            .where(conversation_turns.c.id == identity["turn_id"])
-            .with_for_update()
+        turn = (
+            (
+                await self._session.execute(
+                    select(conversation_turns)
+                    .where(conversation_turns.c.id == identity["turn_id"])
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
         )
         run = (
             (
@@ -1793,13 +1943,15 @@ class ConversationOrchestratorRepository:
             .mappings()
             .one_or_none()
         )
-        if run is None or run["state"] != "running":
+        if run is None or turn is None or run["state"] != "running":
             return
         if (
             run["conversation_id"] != identity["conversation_id"]
             or run["turn_id"] != identity["turn_id"]
         ):
             raise OrchestratorConflictError("RUN_SCOPE_CHANGED")
+        if owner is not None and (turn["lease_owner"] != owner or turn["lease_expires_at"] <= now):
+            return
         await self._session.execute(
             update(model_run_attempts)
             .where(
@@ -1829,6 +1981,99 @@ class ConversationOrchestratorRepository:
             .where(copilot_drafts.c.model_run_id == run_id)
             .values(state="failed", terminal_at=now, terminal_reason=error_code)
         )
+
+    async def recover_expired_generations(self, *, now: datetime, limit: int = 100) -> int:
+        """Fence orphaned provider calls before a runtime resumes dispatching."""
+
+        if not 1 <= limit <= 1000:
+            raise ValueError("generation recovery limit must be between 1 and 1000")
+        candidates = tuple(
+            (
+                await self._session.execute(
+                    select(model_runs.c.id, model_runs.c.conversation_id, model_runs.c.turn_id)
+                    .join(conversation_turns, conversation_turns.c.id == model_runs.c.turn_id)
+                    .where(
+                        model_runs.c.state == "running",
+                        conversation_turns.c.state == "generating",
+                        conversation_turns.c.lease_expires_at <= now,
+                    )
+                    .order_by(conversation_turns.c.lease_expires_at, model_runs.c.id)
+                    .limit(limit)
+                )
+            ).mappings()
+        )
+        recovered = 0
+        for candidate in candidates:
+            await self._locked_scope(candidate["conversation_id"], now)
+            turn = (
+                (
+                    await self._session.execute(
+                        select(conversation_turns)
+                        .where(conversation_turns.c.id == candidate["turn_id"])
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            run = (
+                (
+                    await self._session.execute(
+                        select(model_runs)
+                        .where(model_runs.c.id == candidate["id"])
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                turn is None
+                or run is None
+                or run["state"] != "running"
+                or turn["state"] != "generating"
+                or turn["lease_expires_at"] > now
+            ):
+                continue
+            await self._session.execute(
+                update(model_run_attempts)
+                .where(
+                    model_run_attempts.c.model_run_id == run["id"],
+                    model_run_attempts.c.state == "started",
+                )
+                .values(
+                    state="unknown",
+                    completed_at=now,
+                    error_code="GENERATION_LEASE_EXPIRED",
+                )
+            )
+            await self._session.execute(
+                update(model_runs)
+                .where(model_runs.c.id == run["id"], model_runs.c.state == "running")
+                .values(
+                    state="failed",
+                    completed_at=now,
+                    error_code="GENERATION_LEASE_EXPIRED",
+                    is_complete=False,
+                )
+            )
+            await self._session.execute(
+                update(conversation_turns)
+                .where(
+                    conversation_turns.c.id == turn["id"],
+                    conversation_turns.c.state == "generating",
+                    conversation_turns.c.lease_expires_at <= now,
+                )
+                .values(
+                    state="failed",
+                    terminal_reason="GENERATION_LEASE_EXPIRED",
+                    completed_at=now,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
+            )
+            recovered += 1
+        return recovered
 
     async def _exact_grace_authorized(self, row: RowMapping) -> bool:
         authorization_id = await self._session.scalar(
@@ -2085,7 +2330,7 @@ class ConversationOrchestratorRepository:
             return None
         intent = await TelegramLifecycleRepository(
             self._session, new_uuid=self._new_uuid
-        ).claim_intent(intent_id=intent_id, now=now)
+        ).claim_intent(account_id=row["account_id"], intent_id=intent_id, now=now)
         if intent is None:
             return None
         await self._session.execute(

@@ -494,6 +494,24 @@ def test_m7_proactive_snapshot_closure_migration_is_recoverable() -> None:
 
 
 @pytest.mark.unit
+def test_runtime_fencing_and_provenance_migration_is_recoverable() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0024_runtime_fencing_provenance.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "0024_runtime_fencing_provenance"' in migration
+    assert 'down_revision: str | Sequence[str] | None = "0023_m7_proactive_snapshot"' in migration
+    assert "memory_input_manifest_id" in migration
+    assert "send_fencing_token" in migration
+    assert "send_lease_expires_at" in migration
+    assert "ck_outbound_intents_send_lease_matches_state" in migration
+    assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable

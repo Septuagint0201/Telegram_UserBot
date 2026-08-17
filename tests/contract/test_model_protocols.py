@@ -357,6 +357,26 @@ def test_embedding_wire_and_response_contract() -> None:
     assert normalized.vectors == ((1.0, 0.0), (0.0, 1.0))
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        [{"index": 1, "embedding": [1, 0]}],
+        [{"index": 0, "embedding": [1, float("nan")]}],
+        [{"index": 0, "embedding": [1, 0]}, {"index": 1, "embedding": [1]}],
+    ],
+)
+def test_embedding_response_rejects_noncontiguous_nonfinite_or_mismatched_vectors(
+    data: list[dict[str, object]],
+) -> None:
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_RESPONSE_MALFORMED"):
+        normalize_embedding_response(
+            ProviderWireResponse(
+                200,
+                SensitiveValue({"data": data, "usage": {"input_tokens": 1, "output_tokens": 0}}),
+            )
+        )
+
+
 @pytest.mark.contract
 def test_stream_usage_and_embedding_error_boundaries_fail_closed() -> None:
     chat_stream = ProviderWireResponse(

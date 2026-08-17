@@ -407,12 +407,13 @@ async def dispatch_fake(
     repository: TelegramLifecycleRepository,
     service: TelegramDeliveryService,
     *,
+    account_id: UUID,
     intent_id: UUID,
     now: datetime,
 ) -> bool:
     """Exercise the production sequence; runtime commits between these three steps."""
 
-    claimed = await repository.claim_intent(intent_id=intent_id, now=now)
+    claimed = await repository.claim_intent(account_id=account_id, intent_id=intent_id, now=now)
     if claimed is None:
         return False
     completion = await service.send_prepared(intent=claimed, now=now)
@@ -436,18 +437,32 @@ async def test_outbound_retries_reuse_random_id_and_partial_group(
         )
     )
     service = TelegramDeliveryService(fake)
-    assert await dispatch_fake(repository, service, intent_id=chunks[0].intent_id, now=NOW)
-    first_wait = await repository.get_intent(chunks[0].intent_id)
+    assert await dispatch_fake(
+        repository, service, account_id=account_id, intent_id=chunks[0].intent_id, now=NOW
+    )
+    first_wait = await repository.get_intent(account_id=account_id, intent_id=chunks[0].intent_id)
     assert first_wait is not None
     assert first_wait.state == "retry_wait"
     assert not await dispatch_fake(
-        repository, service, intent_id=chunks[0].intent_id, now=NOW + timedelta(seconds=1)
+        repository,
+        service,
+        account_id=account_id,
+        intent_id=chunks[0].intent_id,
+        now=NOW + timedelta(seconds=1),
     )
     assert await dispatch_fake(
-        repository, service, intent_id=chunks[0].intent_id, now=NOW + timedelta(seconds=7)
+        repository,
+        service,
+        account_id=account_id,
+        intent_id=chunks[0].intent_id,
+        now=NOW + timedelta(seconds=7),
     )
     assert await dispatch_fake(
-        repository, service, intent_id=chunks[1].intent_id, now=NOW + timedelta(seconds=8)
+        repository,
+        service,
+        account_id=account_id,
+        intent_id=chunks[1].intent_id,
+        now=NOW + timedelta(seconds=8),
     )
     assert [request.random_id for request in fake.send_requests[:2]] == [
         chunks[0].telegram_random_id,
@@ -469,12 +484,18 @@ async def test_send_unknown_and_crash_after_send_reconcile_without_blind_resend(
     await repository.create_delivery_group(group=group, chunks=chunks)
     fake = ReplayTelegramGateway(outcomes=deque([FakeSendOutcome.UNKNOWN_AFTER_ACCEPT]))
     service = TelegramDeliveryService(fake)
-    await dispatch_fake(repository, service, intent_id=chunks[0].intent_id, now=NOW)
-    unknown = await repository.get_intent(chunks[0].intent_id)
+    await dispatch_fake(
+        repository, service, account_id=account_id, intent_id=chunks[0].intent_id, now=NOW
+    )
+    unknown = await repository.get_intent(account_id=account_id, intent_id=chunks[0].intent_id)
     assert unknown is not None
     assert unknown.state == "unknown"
     assert not await dispatch_fake(
-        repository, service, intent_id=chunks[0].intent_id, now=NOW + timedelta(minutes=1)
+        repository,
+        service,
+        account_id=account_id,
+        intent_id=chunks[0].intent_id,
+        now=NOW + timedelta(minutes=1),
     )
 
     observed = normalized(
@@ -489,7 +510,7 @@ async def test_send_unknown_and_crash_after_send_reconcile_without_blind_resend(
         event_at=NOW + timedelta(seconds=2),
     )
     projected = await repository.ingest(observed)
-    reconciled = await repository.get_intent(chunks[0].intent_id)
+    reconciled = await repository.get_intent(account_id=account_id, intent_id=chunks[0].intent_id)
     assert projected.source == "ai"
     assert reconciled is not None
     assert reconciled.state == "sent"
@@ -497,7 +518,9 @@ async def test_send_unknown_and_crash_after_send_reconcile_without_blind_resend(
 
     crash_group, crash_chunks = delivery_plan(account_id, conversation_id)
     await repository.create_delivery_group(group=crash_group, chunks=crash_chunks)
-    claimed = await repository.claim_intent(intent_id=crash_chunks[0].intent_id, now=NOW)
+    claimed = await repository.claim_intent(
+        account_id=account_id, intent_id=crash_chunks[0].intent_id, now=NOW
+    )
     assert claimed is not None
     assert (
         await db_session.scalar(
@@ -524,7 +547,9 @@ async def test_send_unknown_and_crash_after_send_reconcile_without_blind_resend(
         )
         == 1
     )
-    recovered = await repository.get_intent(crash_chunks[0].intent_id)
+    recovered = await repository.get_intent(
+        account_id=account_id, intent_id=crash_chunks[0].intent_id
+    )
     assert recovered is not None
     assert recovered.state == "unknown"
 
@@ -632,7 +657,7 @@ async def test_unknown_outgoing_with_active_intent_stays_system_pending(
     repository = TelegramLifecycleRepository(db_session)
     group, chunks = delivery_plan(account_id, conversation_id)
     await repository.create_delivery_group(group=group, chunks=chunks)
-    await repository.claim_intent(intent_id=chunks[0].intent_id, now=NOW)
+    await repository.claim_intent(account_id=account_id, intent_id=chunks[0].intent_id, now=NOW)
     result = await repository.ingest(
         normalized(
             account_id=account_id,
@@ -719,7 +744,9 @@ async def test_outbound_attempt_can_only_complete_once(db_session: AsyncSession)
     repository = TelegramLifecycleRepository(db_session)
     group, chunks = delivery_plan(account_id, conversation_id)
     await repository.create_delivery_group(group=group, chunks=chunks)
-    claimed = await repository.claim_intent(intent_id=chunks[0].intent_id, now=NOW)
+    claimed = await repository.claim_intent(
+        account_id=account_id, intent_id=chunks[0].intent_id, now=NOW
+    )
     assert claimed is not None
     await repository.finish_attempt(
         intent=claimed,

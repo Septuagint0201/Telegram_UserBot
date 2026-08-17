@@ -13,7 +13,7 @@ import redis
 EXPECTED_POSTGRES_MAJOR = "17"
 EXPECTED_VECTOR_VERSION = "0.8.6"
 EXPECTED_REDIS_VERSION = "8.2.8"
-EXPECTED_REVISION = "0023_m7_proactive_snapshot"
+EXPECTED_REVISION = "0024_runtime_fencing_provenance"
 
 
 def _hash(path: Path) -> str:
@@ -64,9 +64,11 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
         raise RuntimeError("service image digests are required")
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "revision": EXPECTED_REVISION,
-        "migration_sha256": _hash(root / "alembic" / "versions" / "0023_m7_proactive_snapshot.py"),
+        "migration_sha256": _hash(
+            root / "alembic" / "versions" / "0024_runtime_fencing_provenance.py"
+        ),
         "migration_chain_sha256": {
             "0001_m1_durable_state": _hash(
                 root / "alembic" / "versions" / "0001_m1_durable_state.py"
@@ -136,6 +138,9 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
             ),
             "0023_m7_proactive_snapshot": _hash(
                 root / "alembic" / "versions" / "0023_m7_proactive_snapshot.py"
+            ),
+            "0024_runtime_fencing_provenance": _hash(
+                root / "alembic" / "versions" / "0024_runtime_fencing_provenance.py"
             ),
         },
         "roles_sha256": _hash(root / "deploy" / "postgres" / "m7_roles.sql"),

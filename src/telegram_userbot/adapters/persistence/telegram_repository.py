@@ -1,7 +1,7 @@
 """Transactional Telegram ingest, outbound identity, and recovery repository."""
 
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any, cast
 from uuid import UUID, uuid7
@@ -61,6 +61,8 @@ def _intent(row: RowMapping) -> OutboundIntentRecord:
         state=row["state"],
         telegram_message_id=row["telegram_message_id"],
         attempt_count=row["attempt_count"],
+        send_fencing_token=int(row.get("send_fencing_token", 0) or 0),
+        send_lease_expires_at=row.get("send_lease_expires_at"),
     )
 
 
@@ -614,13 +616,23 @@ class TelegramLifecycleRepository:
             )
         return group.id
 
-    async def claim_intent(self, *, intent_id: UUID, now: datetime) -> OutboundIntentRecord | None:
+    async def claim_intent(
+        self,
+        *,
+        account_id: UUID,
+        intent_id: UUID,
+        now: datetime,
+        lease_duration: timedelta = timedelta(seconds=60),
+    ) -> OutboundIntentRecord | None:
+        if lease_duration <= timedelta(0):
+            raise ValueError("outbound lease duration must be positive")
         row = (
             (
                 await self._session.execute(
                     select(outbound_intents)
                     .where(
                         outbound_intents.c.id == intent_id,
+                        outbound_intents.c.account_id == account_id,
                         outbound_intents.c.state.in_(("pending", "retry_wait")),
                         or_(
                             outbound_intents.c.next_attempt_at.is_(None),
@@ -643,6 +655,8 @@ class TelegramLifecycleRepository:
                     .values(
                         state=OutboundIntentState.SENDING,
                         attempt_count=outbound_intents.c.attempt_count + 1,
+                        send_fencing_token=outbound_intents.c.send_fencing_token + 1,
+                        send_lease_expires_at=now + lease_duration,
                         next_attempt_at=None,
                         last_error_code=None,
                         updated_at=now,
@@ -674,24 +688,10 @@ class TelegramLifecycleRepository:
         *,
         intent: OutboundIntentRecord,
         completion: AttemptCompletionRecord,
-    ) -> None:
+    ) -> bool:
         outcome = AttemptOutcome(completion.outcome)
         if outcome is AttemptOutcome.SUCCEEDED and completion.telegram_message_id is None:
             raise ValueError("successful attempt requires Telegram message id")
-        await self._session.execute(
-            update(outbound_attempts)
-            .where(
-                outbound_attempts.c.intent_id == intent.id,
-                outbound_attempts.c.attempt_no == intent.attempt_count,
-                outbound_attempts.c.state == "started",
-            )
-            .values(
-                state=outcome,
-                error_code=completion.error_code,
-                retry_after_seconds=completion.retry_after_seconds,
-                finished_at=completion.finished_at,
-            )
-        )
         states = {
             AttemptOutcome.SUCCEEDED: OutboundIntentState.SENT,
             AttemptOutcome.FLOOD_WAIT: OutboundIntentState.RETRY_WAIT,
@@ -713,10 +713,42 @@ class TelegramLifecycleRepository:
                 telegram_message_id=completion.telegram_message_id,
                 sent_at=completion.finished_at,
             )
-        await self._session.execute(
-            update(outbound_intents).where(outbound_intents.c.id == intent.id).values(**values)
+        intent_update = await self._session.execute(
+            update(outbound_intents)
+            .where(
+                outbound_intents.c.id == intent.id,
+                outbound_intents.c.account_id == intent.account_id,
+                outbound_intents.c.state == OutboundIntentState.SENDING,
+                outbound_intents.c.attempt_count == intent.attempt_count,
+                outbound_intents.c.send_fencing_token == intent.send_fencing_token,
+                outbound_intents.c.send_lease_expires_at.is_not(None),
+                outbound_intents.c.send_lease_expires_at > completion.finished_at,
+            )
+            .values(**values, send_lease_expires_at=None)
         )
+        if getattr(intent_update, "rowcount", 1) == 0:
+            return False
+        attempt_update = await self._session.execute(
+            update(outbound_attempts)
+            .where(
+                outbound_attempts.c.intent_id == intent.id,
+                outbound_attempts.c.account_id == intent.account_id,
+                outbound_attempts.c.attempt_no == intent.attempt_count,
+                outbound_attempts.c.state == "started",
+            )
+            .values(
+                state=outcome,
+                error_code=completion.error_code,
+                retry_after_seconds=completion.retry_after_seconds,
+                finished_at=completion.finished_at,
+            )
+        )
+        if getattr(attempt_update, "rowcount", 1) != 1:
+            # The accepted intent update and its attempt transition must be
+            # atomic.  The caller owns a transaction, so this rolls both back.
+            raise RuntimeError("claimed outbound attempt disappeared")
         await self._refresh_group(intent.delivery_group_id, completion.finished_at)
+        return True
 
     async def _reconcile_intent(
         self, intent_id: UUID, telegram_message_id: int, now: datetime
@@ -730,6 +762,7 @@ class TelegramLifecycleRepository:
                 sent_at=now,
                 updated_at=now,
                 unknown_since=None,
+                send_lease_expires_at=None,
                 last_error_code=None,
             )
             .returning(outbound_intents.c.delivery_group_id)
@@ -775,12 +808,19 @@ class TelegramLifecycleRepository:
                 update(outbound_intents)
                 .where(
                     outbound_intents.c.state == OutboundIntentState.SENDING,
-                    outbound_intents.c.updated_at <= older_than,
+                    or_(
+                        outbound_intents.c.send_lease_expires_at <= now,
+                        (
+                            outbound_intents.c.send_lease_expires_at.is_(None)
+                            & (outbound_intents.c.updated_at <= older_than)
+                        ),
+                    ),
                 )
                 .values(
                     state=OutboundIntentState.UNKNOWN,
                     unknown_since=now,
                     last_error_code="crash_after_dispatch",
+                    send_lease_expires_at=None,
                     updated_at=now,
                 )
                 .returning(outbound_intents.c.id, outbound_intents.c.delivery_group_id)
@@ -878,11 +918,14 @@ class TelegramLifecycleRepository:
             )
         )
 
-    async def get_intent(self, intent_id: UUID) -> OutboundIntentRecord | None:
+    async def get_intent(self, *, account_id: UUID, intent_id: UUID) -> OutboundIntentRecord | None:
         row = (
             (
                 await self._session.execute(
-                    select(outbound_intents).where(outbound_intents.c.id == intent_id)
+                    select(outbound_intents).where(
+                        outbound_intents.c.id == intent_id,
+                        outbound_intents.c.account_id == account_id,
+                    )
                 )
             )
             .mappings()

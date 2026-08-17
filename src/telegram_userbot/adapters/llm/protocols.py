@@ -1,11 +1,12 @@
 """Canonical-to-wire model protocol adapters with secret-safe request wrappers."""
 
 import base64
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Protocol, cast
+from typing import Any, Never, Protocol, cast
 
 from telegram_userbot.domain.model_config import (
     CanonicalModelConfig,
@@ -382,6 +383,10 @@ def _error_for_status(status_code: int) -> ProviderProtocolError:
     return ProviderProtocolError("PROVIDER_REJECTED")
 
 
+def _malformed_embedding() -> Never:
+    raise ValueError("embedding response is malformed")
+
+
 def _usage(raw: Mapping[str, Any], protocol: ModelProtocol) -> ModelUsage:
     try:
         if protocol is ModelProtocol.OPENAI_CHAT_COMPLETIONS:
@@ -469,13 +474,33 @@ def normalize_embedding_response(response: ProviderWireResponse) -> NormalizedEm
         raise _error_for_status(response.status_code)
     body = response.body.reveal_for_use()
     try:
-        ordered = sorted(body["data"], key=lambda item: item["index"])
-        vectors = tuple(tuple(float(value) for value in item["embedding"]) for item in ordered)
+        raw_items = body["data"]
+        if not isinstance(raw_items, Sequence) or isinstance(raw_items, str | bytes):
+            _malformed_embedding()
+        ordered = sorted(raw_items, key=lambda item: item["index"])
+        indices = [item["index"] for item in ordered]
+        if indices != list(range(len(ordered))) or any(
+            isinstance(index, bool) or not isinstance(index, int) for index in indices
+        ):
+            _malformed_embedding()
+        vectors_list: list[tuple[float, ...]] = []
+        for item in ordered:
+            raw_vector = item["embedding"]
+            if not isinstance(raw_vector, Sequence) or isinstance(raw_vector, str | bytes):
+                _malformed_embedding()
+            vector = tuple(float(raw_value) for raw_value in raw_vector)
+            if any(not math.isfinite(value) for value in vector):
+                _malformed_embedding()
+            vectors_list.append(vector)
+        vectors = tuple(vectors_list)
         usage = _usage(cast(Mapping[str, Any], body["usage"]), ModelProtocol.EMBEDDING)
-    except (KeyError, TypeError, ValueError) as error:
+        if not vectors or any(not vector for vector in vectors):
+            _malformed_embedding()
+        dimensions = len(vectors[0])
+        if any(len(vector) != dimensions for vector in vectors):
+            _malformed_embedding()
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise ProviderProtocolError("PROVIDER_RESPONSE_MALFORMED") from error
-    if not vectors or any(not vector for vector in vectors):
-        raise ProviderProtocolError("PROVIDER_RESPONSE_MALFORMED")
     return NormalizedEmbedding(vectors, usage)
 
 

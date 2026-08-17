@@ -178,6 +178,8 @@ class OutboundIntentRecord:
     state: str
     telegram_message_id: int | None
     attempt_count: int
+    send_fencing_token: int = 0
+    send_lease_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

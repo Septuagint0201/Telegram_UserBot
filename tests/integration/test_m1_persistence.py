@@ -149,6 +149,7 @@ async def test_repository_cas_and_composite_scope(db_session: AsyncSession) -> N
     )
     conversations_repository = ConversationRepository(db_session)
     changed = await conversations_repository.compare_and_set_mode(
+        account_id=account_id,
         conversation_id=conversation_id,
         expected_version=1,
         base_mode_override="AUTO",
@@ -159,6 +160,7 @@ async def test_repository_cas_and_composite_scope(db_session: AsyncSession) -> N
     assert changed.mode_version == 2
     assert (
         await conversations_repository.compare_and_set_mode(
+            account_id=account_id,
             conversation_id=conversation_id,
             expected_version=1,
             base_mode_override="HUMAN",

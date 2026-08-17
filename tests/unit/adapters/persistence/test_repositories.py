@@ -146,11 +146,12 @@ async def test_account_and_conversation_repositories_detach_records() -> None:
     assert await accounts.get(uuid7()) is None
 
     conversations = ConversationRepository(sql_session)
-    current = await conversations.get(conversation_id)
+    current = await conversations.get(account_id=account_id, conversation_id=conversation_id)
     assert current is not None
     assert current.mode_version == 2
     assert (
         await conversations.compare_and_set_mode(
+            account_id=account_id,
             conversation_id=conversation_id,
             expected_version=1,
             base_mode_override="HUMAN",
@@ -160,6 +161,7 @@ async def test_account_and_conversation_repositories_detach_records() -> None:
         is None
     )
     changed = await conversations.compare_and_set_mode(
+        account_id=account_id,
         conversation_id=conversation_id,
         expected_version=2,
         base_mode_override="AUTO",
