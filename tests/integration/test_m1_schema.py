@@ -42,6 +42,36 @@ async def test_empty_base_round_trip_reaches_exact_head_and_vector(
 
 
 @pytest.mark.integration
+async def test_pristine_base_to_head_keeps_m6_model_run_manifest_link(
+    postgres_engine: AsyncEngine,
+) -> None:
+    """Pin the M6 column/FK after the fixture's initial empty-to-head replay."""
+
+    async with postgres_engine.connect() as connection:
+        column = (
+            await connection.execute(
+                text(
+                    "SELECT data_type, udt_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'model_runs' "
+                    "AND column_name = 'memory_input_manifest_id'"
+                )
+            )
+        ).one_or_none()
+        foreign_key = await connection.scalar(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = 'model_runs'::regclass "
+                "AND conname = 'fk_model_runs_memory_input_manifest_scope'"
+            )
+        )
+
+    assert column == ("USER-DEFINED", "uuid")
+    assert foreign_key is not None
+    assert "FOREIGN KEY (memory_input_manifest_id, account_id)" in str(foreign_key)
+    assert "REFERENCES memory_input_manifests(id, account_id)" in str(foreign_key)
+
+
+@pytest.mark.integration
 async def test_schema_has_no_unnamed_constraints_or_indexes(postgres_engine: AsyncEngine) -> None:
     query = text(
         """

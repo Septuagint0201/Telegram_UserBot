@@ -184,6 +184,19 @@ def test_m6_table_inventory_is_topological_for_downgrade() -> None:
 
 
 @pytest.mark.unit
+def test_m6_model_run_manifest_column_replay_is_idempotent() -> None:
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0007_m6_memory_pipeline.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "ALTER TABLE model_runs ADD COLUMN IF NOT EXISTS memory_input_manifest_id uuid" in migration
+    )
+    assert "op.add_column" not in migration
+    assert '"fk_model_runs_memory_input_manifest"' in migration
+
+
+@pytest.mark.unit
 def test_m5_m6_scope_migration_drops_dependent_fks_before_candidate_keys() -> None:
     migration = (
         Path(__file__).resolve().parents[4]

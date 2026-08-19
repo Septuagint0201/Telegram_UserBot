@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 
 from alembic import op
-from sqlalchemy import Column
 
 from telegram_userbot.adapters.persistence.schema import M6_TABLES, metadata
 
@@ -19,10 +18,10 @@ def upgrade() -> None:
         "model_config_versions",
         ["id", "profile_id"],
     )
-    op.add_column(
-        "model_runs",
-        Column("memory_input_manifest_id", metadata.tables["memory_input_manifests"].c.id.type),
-    )
+    # M4 builds ``model_runs`` from the current metadata.  Newer metadata can
+    # already contain this M6 column, so the historical add must be replay-safe
+    # while still adding it to databases created before M6.
+    op.execute("ALTER TABLE model_runs ADD COLUMN IF NOT EXISTS memory_input_manifest_id uuid")
     tables = [metadata.tables[name] for name in M6_TABLES]
     metadata.create_all(bind=op.get_bind(), tables=tables, checkfirst=False)
     op.create_foreign_key(
