@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M7实现已经完成。M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、预算 reservation、严格 Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate 与 send-unknown 保守结算。M7 Windows静态/unit门禁为`PASS`；GitHub Actions Linux service acceptance for current HEAD 为`NOT RUN`，不复用历史提交的运行结果。真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。
+架构设计与M0—M7实现已经完成。M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、预算 reservation、严格 Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate 与 send-unknown 保守结算。M7验收基线（当时的current HEAD）`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`（tree `2fc4c24f8faa31a240fa89859dcdb8c14dd8219f`）的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 三个门禁全部为`PASS`：Preflight 422 passed、58 deselected、coverage 86.83%；PostgreSQL/Redis integration 479 passed、0 failed、0 errors、0 skipped；Chromium browser contract 1 passed。集成服务固定为 PostgreSQL 17.10/pgvector 0.8.6 与 Redis 8.2.8。后续纯文档提交不会重绑该服务验收。真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -46,7 +46,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M5 | Media 与 Context Contract | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M7 | Proactive Pipeline | IN REVIEW | WINDOWS STATIC/UNIT PASS; CURRENT HEAD GITHUB LINUX SERVICE ACCEPTANCE NOT RUN |
+| M7 | Proactive Pipeline | COMPLETE | WINDOWS STATIC/UNIT PASS; GITHUB LINUX SERVICE ACCEPTANCE PASS |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
 | M9 | Release candidate 验证 | WAITING | NOT RUN |
 
@@ -275,7 +275,7 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 - [x] **M7-009 实现 AUTO final gate 与 COPILOT draft**（依赖：M4-005、M7-005—M7-008）— AUTO 才能创建 outbound intent；COPILOT 只产生待批准 draft；HUMAN/PAUSED 不发送。
 - [x] **M7-010 实现 send-unknown 保守结算**（依赖：M3-009、M7-005、M7-009）— unknown 暂按已消费预算处理，reconciliation 后修正；禁止盲目重发。
 - [x] **M7-011 实现审计、设置与 Control Bot 命令**（依赖：M7-002—M7-010）— 管理 enable、时区、quiet hours、预算、候选和状态；每次变更版本化并可追责。
-- [ ] **M7-012 关闭 M7**（依赖：M7-001—M7-011）— DST、预算并发、quiet bypass、takeover 和 crash state-machine test 为 `PASS`；当前 HEAD 的 GitHub Actions Linux service acceptance 尚未取得 `PASS`，不能复用失败运行或历史提交结果；真实主动发送仍 disabled。
+- [x] **M7-012 关闭 M7**（依赖：M7-001—M7-011）— DST、预算并发、quiet bypass、takeover 和 crash state-machine test 为`PASS`；该M7验收基线的 GitHub Actions Linux service acceptance 已取得`PASS`，真实主动发送仍 disabled。
 
 ### M7 退出门禁
 
@@ -285,7 +285,8 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ### M7 Evidence
 
-- [x] 当前 HEAD 的 Windows/CPython 3.14.7 M7 unit、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为 `PASS`；`0022_m7_job_scope_and_deadline` 与 `0023_m7_proactive_snapshot` 为前序迁移，当前 migration head 为 `0024_runtime_fencing_provenance`，补齐 legacy nullable outbound provenance、发送 lease/fencing 及 model-run manifest metadata 的迁移闭环。针对当前 HEAD 的 GitHub Actions Linux service acceptance 为 `NOT RUN`，历史运行结果不绑定当前提交。
+- [x] M7验收基线（当时的current HEAD）`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`（tree `2fc4c24f8faa31a240fa89859dcdb8c14dd8219f`）的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 三个门禁全部为`PASS`：Preflight 为 422 passed、58 deselected、coverage 86.83%；PostgreSQL/Redis integration 为 479 passed、0 failed、0 errors、0 skipped（coverage 来自 artifact）；Chromium browser contract 为 1 passed。集成服务固定为 PostgreSQL 17.10/pgvector 0.8.6 与 Redis 8.2.8。
+- [x] 该验收基线的 Windows/CPython 3.14.7 M7 unit、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为`PASS`；`0022_m7_job_scope_and_deadline` 与 `0023_m7_proactive_snapshot` 为前序迁移，当前 migration head 为`0024_runtime_fencing_provenance`，补齐 legacy nullable outbound provenance、发送 lease/fencing 及 model-run manifest metadata 的迁移闭环。
 - [x] 本机 Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为 `PASS`；本机无 Docker，Windows 本地 PostgreSQL/Redis service test 仍为 `NOT RUN`。
 
 ## 13. M8 — Production Compose与 Operations
@@ -368,4 +369,4 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ## 17. 下一步
 
-M0—M6已经关闭，M7 Proactive Pipeline实现已完成但仍在等待当前 HEAD 的 Linux service acceptance。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，直到后续milestone取得各自授权与证据。
+M0—M7已经关闭；M8 Production Compose与Operations等待开始。真实Telegram、真实provider、真实AUTO、自动发送和生产部署仍禁止启用，真实backup/restore、production performance和soak保持`NOT RUN`，直到后续milestone取得各自授权与证据。

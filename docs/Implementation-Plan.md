@@ -2,7 +2,7 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M6已经取得精确GitLab证据；M7实现已完成，但当前 HEAD 的 Linux service acceptance 仍为`NOT RUN`，不能复用失败运行或历史提交结果。Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M7已经取得精确证据；M7验收基线（当时的current HEAD）`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`（tree `2fc4c24f8faa31a240fa89859dcdb8c14dd8219f`）的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 三个门禁全部为`PASS`：Preflight 422 passed、58 deselected、coverage 86.83%；PostgreSQL/Redis integration 479 passed、0 failed、0 errors、0 skipped（coverage 来自 artifact）；Chromium browser contract 1 passed。集成服务固定为 PostgreSQL 17.10/pgvector 0.8.6 与 Redis 8.2.8。后续纯文档提交不会重绑该服务验收。Telegram/provider live、真实backup/restore、部署和production load仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -72,7 +72,7 @@ deploy/
 | M4 | Conversation Orchestrator与Main AI | fake provider/Telegram | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M5 | Media与Context Contract | fake provider；测试图片 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | COMPLETE — WINDOWS/GITLAB LINUX PASS |
-| M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | IN REVIEW — WINDOWS STATIC/UNIT PASS; CURRENT HEAD GITHUB LINUX SERVICE ACCEPTANCE NOT RUN |
+| M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | COMPLETE — WINDOWS STATIC/UNIT PASS; GITHUB LINUX SERVICE ACCEPTANCE PASS (M7 EVIDENCE BASELINE) |
 | M8 | Production Compose、backup与运维加固 | 测试backup/alert targets | NOT STARTED |
 | M9 | Release candidate验证 | 受保护live smoke与授权测试peer | NOT STARTED |
 
@@ -339,7 +339,7 @@ deploy/
 
 ## 12. M7 — Proactive Pipeline
 
-当前状态：M7 Proactive Pipeline domain、migration、least-privilege roles、strict decision validation、budget reservation、DST/quiet policy、AUTO/COPILOT final-gate contract 与 content-free evidence mapping 已完成。Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build 与 Disclosure static checks 为 `PASS`；quiet 默认 `22:00–08:00`，absolute no-send 固定 `00:00–07:00`。`0022_m7_job_scope_and_deadline` 与 `0023_m7_proactive_snapshot` 为前序迁移，当前迁移 head 为 `0024_runtime_fencing_provenance`，补齐 legacy nullable outbound provenance、发送 lease/fencing 及 model-run manifest metadata 的迁移闭环；GitHub Actions Linux service acceptance for current HEAD 为 `NOT RUN`，历史提交的运行结果不绑定当前提交。本机无 Docker，Windows 本地 PostgreSQL/Redis service 仍为 `NOT RUN`。真实 Telegram/provider、真实 proactive send、Control Bot polling、Ubuntu production、backup/restore、load 与 soak 仍为 `NOT RUN`。
+当前状态：M7 Proactive Pipeline domain、migration、least-privilege roles、strict decision validation、budget reservation、DST/quiet policy、AUTO/COPILOT final-gate contract 与 content-free evidence mapping 已完成。M7验收基线（当时的current HEAD）`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`（tree `2fc4c24f8faa31a240fa89859dcdb8c14dd8219f`）的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 三个门禁全部为`PASS`：Preflight 为 422 passed、58 deselected、coverage 86.83%；PostgreSQL/Redis integration 为 479 passed、0 failed、0 errors、0 skipped（coverage 来自 artifact）；Chromium browser contract 为 1 passed。集成服务固定为 PostgreSQL 17.10/pgvector 0.8.6 与 Redis 8.2.8。Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build 与 Disclosure static checks 为`PASS`；quiet 默认 `22:00–08:00`，absolute no-send 固定 `00:00–07:00`。`0022_m7_job_scope_and_deadline` 与 `0023_m7_proactive_snapshot` 为前序迁移，当前迁移 head 为`0024_runtime_fencing_provenance`，补齐 legacy nullable outbound provenance、发送 lease/fencing 及 model-run manifest metadata 的迁移闭环。本机无 Docker，Windows 本地 PostgreSQL/Redis service 仍为`NOT RUN`。真实 Telegram/provider、真实 proactive send、Control Bot polling、Ubuntu production、backup/restore、load 与 soak 仍为`NOT RUN`。
 
 ### 12.1 目标
 
@@ -465,4 +465,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0—M6已经关闭并取得精确GitLab证据，M7实现已完成但当前 HEAD 的 Linux service acceptance 仍为`NOT RUN`。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO和生产部署仍不存在。
+M0—M7已经关闭；下一阶段为 M8 Production Compose与Operations。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO、生产部署、真实backup/restore、production load与soak仍不存在或为`NOT RUN`。

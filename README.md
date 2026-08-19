@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-V1架构设计与M0—M6已经完成，M7 Proactive Pipeline实现也已完成；当前 HEAD 的 M7 Linux PostgreSQL/Redis service acceptance 仍为`NOT RUN`。此前绑定旧 HEAD 的 GitHub Actions 运行曾因迁移约束重复创建而失败，不能作为当前 HEAD 的通过证据。M6保留原有签名 GitLab/GitHub 证据；M7 Windows static/unit 门禁已通过。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+V1架构设计与M0—M6已经完成，M7也已完成。M7源码验收基线（当时的current HEAD）`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6` 的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 的 Preflight、PostgreSQL/Redis service integration 和 Chromium browser contract 均为`PASS`；M7 acceptance 绑定该提交、tree、migration head 和 content-free artifacts。后续纯文档提交不会重绑该服务验收。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
@@ -117,7 +117,7 @@ M5签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`对应的[GitLab Linux p
 
 M6在Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；Ruff、strict mypy、import boundary、compileall、offline migration SQL、wheel/sdist Disclosure和secret/artifact scan均为`PASS`。M6签名证据基线`645fb8da5d5c35de6896825c5f29f22f08d0b168`已由[GitLab pipeline #2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)的13个作业和[GitHub Actions #31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)验证：GitLab M6 service执行329个测试并deselect 1个，line coverage 91.98%、branch coverage 84.32%；GitHub的preflight、PostgreSQL/Redis integration和Chromium browser contract均为`PASS`。迁移manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。该提交与重签前`9be7012edf3aabe1dd5db7a325b0f36efce27063`及[GitLab pipeline #2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)均仅为历史证据，不标识当前`main`。本机无Docker，Windows PostgreSQL/Redis integration仍为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署和真实backup/restore保持`NOT RUN`。
 
-M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、account/contact/bypass reservation、strict Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate和send-unknown保守结算。quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build、Disclosure和artifact static checks为`PASS`。`0022_m7_job_scope_and_deadline`和`0023_m7_proactive_snapshot`为前序迁移，当前 head 为`0024_runtime_fencing_provenance`：补齐 legacy nullable outbound provenance、发送 lease/fencing 和 model-run manifest metadata 的迁移闭环；GitHub Actions service acceptance for current HEAD 为`NOT RUN`，因此不把历史运行结果绑定到当前提交。当前本机无Docker，Windows本地PostgreSQL/Redis service test为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署、backup/restore、production load与soak保持`NOT RUN`。
+M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、account/contact/bypass reservation、strict Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate和send-unknown保守结算。quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。`0022_m7_job_scope_and_deadline`与`0023_m7_proactive_snapshot`为前序迁移，当前 head 为`0024_runtime_fencing_provenance`，GitHub Actions 已在固定 PostgreSQL 17.10/pgvector 0.8.6、Redis 8.2.8 和 Chromium 151.0.7922.34 上完成该M7验收基线。当前本机无Docker，Windows本地PostgreSQL/Redis service test为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署、backup/restore、production load与soak保持`NOT RUN`。
 
 常用本地门禁：
 
