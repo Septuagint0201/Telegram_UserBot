@@ -191,7 +191,7 @@ API key、Bot token、Telegram API hash、数据库密码、Redis密码、S3 sec
 - 创建固定非root UID/GID；`app/control/worker/migrate`默认非root运行。
 - root filesystem只读；仅显式volume、`tmpfs /tmp`和必要runtime目录可写。
 - 设置`no-new-privileges:true`、drop all capabilities、默认seccomp、有限`pids_limit`。
-- build context通过`.dockerignore`排除`.git`、`.codex`、`.env*`、Session、backup、media、logs和本机cache。
+- build context通过`.dockerignore`排除`.git`、`.handoff`、`.env*`、Session、backup、media、logs和本机cache。
 
 ### 6.3 PostgreSQL与扩展
 
