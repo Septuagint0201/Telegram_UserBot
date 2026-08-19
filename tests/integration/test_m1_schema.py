@@ -65,7 +65,8 @@ async def test_pristine_base_to_head_keeps_m6_model_run_manifest_link(
             )
         )
 
-    assert column == ("USER-DEFINED", "uuid")
+    # PostgreSQL exposes UUID as a built-in type in information_schema.
+    assert column == ("uuid", "uuid")
     assert foreign_key is not None
     assert "FOREIGN KEY (memory_input_manifest_id, account_id)" in str(foreign_key)
     assert "REFERENCES memory_input_manifests(id, account_id)" in str(foreign_key)

@@ -519,7 +519,10 @@ async def test_send_unknown_and_crash_after_send_reconcile_without_blind_resend(
     crash_group, crash_chunks = delivery_plan(account_id, conversation_id)
     await repository.create_delivery_group(group=crash_group, chunks=crash_chunks)
     claimed = await repository.claim_intent(
-        account_id=account_id, intent_id=crash_chunks[0].intent_id, now=NOW
+        account_id=account_id,
+        intent_id=crash_chunks[0].intent_id,
+        now=NOW,
+        lease_duration=timedelta(seconds=1),
     )
     assert claimed is not None
     assert (
@@ -540,6 +543,15 @@ async def test_send_unknown_and_crash_after_send_reconcile_without_blind_resend(
         )
     )
     assert accepted.telegram_message_id == 1001
+    # A claimed send may still be inside its RPC window even when its
+    # updated_at is older than the legacy recovery watermark.
+    assert (
+        await repository.recover_stale_sending(
+            older_than=NOW + timedelta(seconds=1),
+            now=NOW + timedelta(microseconds=500_000),
+        )
+        == 0
+    )
     assert (
         await repository.recover_stale_sending(
             older_than=NOW + timedelta(seconds=1),
