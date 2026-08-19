@@ -39,7 +39,7 @@ def upgrade() -> None:
             content_revision = COALESCE(content_revision, 0),
             idempotency_key = COALESCE(
               idempotency_key,
-              decode(md5(id::text) || md5(id::text || ':intent-v2'), 'hex')
+              decode(md5(id::text) || md5(id::text || ':' || 'intent-v2'), 'hex')
             );
         ALTER TABLE outbound_intents
           ALTER COLUMN mode_version SET DEFAULT 1,

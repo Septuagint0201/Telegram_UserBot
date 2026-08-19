@@ -1,10 +1,11 @@
+import ast
 import re
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 import pytest
-from sqlalchemy import ForeignKeyConstraint, PrimaryKeyConstraint, Table, UniqueConstraint
+from sqlalchemy import ForeignKeyConstraint, PrimaryKeyConstraint, Table, UniqueConstraint, text
 
 from telegram_userbot.adapters.persistence.engine import (
     DurableStateConfigurationError,
@@ -522,6 +523,38 @@ def test_runtime_fencing_and_provenance_migration_is_recoverable() -> None:
     assert "send_lease_expires_at" in migration
     assert "ck_outbound_intents_send_lease_matches_state" in migration
     assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
+def test_runtime_fencing_backfill_does_not_create_implicit_bind_parameter() -> None:
+    migration_path = (
+        Path(__file__).resolve().parents[4]
+        / "alembic"
+        / "versions"
+        / "0024_runtime_fencing_provenance.py"
+    )
+    migration = migration_path.read_text(encoding="utf-8")
+    module = ast.parse(migration, filename=str(migration_path))
+    statements: list[str] = []
+    for call in ast.walk(module):
+        if not (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "execute"
+            and call.args
+        ):
+            continue
+        argument = call.args[0]
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            statements.append(argument.value)
+    backfill = next(
+        statement for statement in statements if "outbound_delivery_groups" in statement
+    )
+
+    compiled = text(backfill).compile()
+    assert compiled.params == {}
+    assert "id::text || ':' || 'intent-v2'" in backfill
+    assert ":intent-v2" not in backfill
 
 
 @pytest.mark.unit
