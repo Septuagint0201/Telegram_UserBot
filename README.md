@@ -4,13 +4,14 @@
 
 ## 当前状态
 
-V1架构设计与M0—M6已经完成，M7也已完成。M7源码验收基线（当时的current HEAD）`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6` 的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 的 Preflight、PostgreSQL/Redis service integration 和 Chromium browser contract 均为`PASS`；M7 acceptance 绑定该提交、tree、migration head 和 content-free artifacts。后续纯文档提交不会重绑该服务验收。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+V1架构设计与M0—M6已经完成，M7也已完成。M7 implementation source baseline 是`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`，其 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 保留为源码实现证据；final acceptance baseline 是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`，GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340) 的 Preflight（422 passed、58 deselected）、PostgreSQL/Redis integration（479 passed、1 deselected）和 Chromium browser contract（1 passed）均为`PASS`，M7 acceptance 为12/12，migration manifest记录96 tables、0 unnamed constraints和5 migration paths `PASS`。final baseline相对implementation source只修改状态文档，不改变M7实现；CI仍会为每个被验证的提交生成并校验新的M7 acceptance manifest。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
 - 可以运行本地安全校验、fake-only Telegram/model contract、key-only ASGI测试和显式的disposable PostgreSQL/Redis/browser integration test，但不能连接真实Telegram/provider、启动完整业务服务或部署本项目；
 - 文档中的最终服务与业务命令仍是实现契约，不是已经存在的入口；
 - Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
+- final baseline的独立原生Linux amd64非live复现为`PASS`；`COMPAT-LINUX-ARM64-001`记录Linux arm64 locked-install在项目测试前因lock hash覆盖不足而独立`FAIL`，后续arm64 tests为`NOT RUN`，该兼容性backlog不属于M7或M8的`linux/amd64`门禁；
 - RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
 
 精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)、[M3 Compatibility Set](docs/compatibility/m3.md)、[M4 Compatibility Set](docs/compatibility/m4.md)、[M5 Compatibility Set](docs/compatibility/m5.md)、[M6 Compatibility Set](docs/compatibility/m6.md)和[M7 Compatibility Set](docs/compatibility/m7.md)。真实Telegram/provider仍未接入。
@@ -117,7 +118,7 @@ M5签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`对应的[GitLab Linux p
 
 M6在Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；Ruff、strict mypy、import boundary、compileall、offline migration SQL、wheel/sdist Disclosure和secret/artifact scan均为`PASS`。M6签名证据基线`645fb8da5d5c35de6896825c5f29f22f08d0b168`已由[GitLab pipeline #2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)的13个作业和[GitHub Actions #31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)验证：GitLab M6 service执行329个测试并deselect 1个，line coverage 91.98%、branch coverage 84.32%；GitHub的preflight、PostgreSQL/Redis integration和Chromium browser contract均为`PASS`。迁移manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。该提交与重签前`9be7012edf3aabe1dd5db7a325b0f36efce27063`及[GitLab pipeline #2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)均仅为历史证据，不标识当前`main`。本机无Docker，Windows PostgreSQL/Redis integration仍为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署和真实backup/restore保持`NOT RUN`。
 
-M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、account/contact/bypass reservation、strict Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate和send-unknown保守结算。quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。`0022_m7_job_scope_and_deadline`与`0023_m7_proactive_snapshot`为前序迁移，当前 head 为`0024_runtime_fencing_provenance`，GitHub Actions 已在固定 PostgreSQL 17.10/pgvector 0.8.6、Redis 8.2.8 和 Chromium 151.0.7922.34 上完成该M7验收基线。当前本机无Docker，Windows本地PostgreSQL/Redis service test为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署、backup/restore、production load与soak保持`NOT RUN`。
+M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、account/contact/bypass reservation、strict Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate和send-unknown保守结算。quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。`0022_m7_job_scope_and_deadline`与`0023_m7_proactive_snapshot`为前序迁移，当前 head 为`0024_runtime_fencing_provenance`；implementation source baseline `19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`由run `32229187875`验证，final acceptance baseline `7af2f524fcc4fc30fc04aa40de88a7b1302eb526`（tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`）由run `32234678340`在固定 PostgreSQL 17.10/pgvector 0.8.6、Redis 8.2.8 和 Chromium 151.0.7922.34 上验证。当前本机无Docker，Windows本地PostgreSQL/Redis service test为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、production Compose与部署、backup/restore、production load与soak保持`NOT RUN`。
 
 常用本地门禁：
 

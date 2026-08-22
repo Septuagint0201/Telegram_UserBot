@@ -2,7 +2,7 @@
 
 ## 1. 当前状态
 
-架构设计与M0—M7实现已经完成。M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、预算 reservation、严格 Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate 与 send-unknown 保守结算。M7验收基线（当时的current HEAD）`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`（tree `2fc4c24f8faa31a240fa89859dcdb8c14dd8219f`）的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 三个门禁全部为`PASS`：Preflight 422 passed、58 deselected、coverage 86.83%；PostgreSQL/Redis integration 479 passed、0 failed、0 errors、0 skipped；Chromium browser contract 1 passed。集成服务固定为 PostgreSQL 17.10/pgvector 0.8.6 与 Redis 8.2.8。后续纯文档提交不会重绑该服务验收。真实Telegram/provider live、应用容器、真实AUTO、生产部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。
+架构设计与M0—M7实现已经完成。M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、预算 reservation、严格 Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate 与 send-unknown 保守结算。M7 implementation source baseline 是`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`，其 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 保留为源码实现证据；final acceptance baseline 是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`，GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340) 三个门禁全部为`PASS`：Preflight 422 passed、58 deselected；PostgreSQL/Redis integration 479 passed、1 deselected；Chromium browser contract 1 passed；M7 acceptance为12/12，migration manifest记录96 tables、0 unnamed constraints和5 migration paths `PASS`。final baseline相对implementation source只修改状态文档，不改变M7实现；CI仍会为每个被验证的提交生成并校验新的M7 acceptance manifest。真实Telegram/provider live、应用容器、真实AUTO、production Compose与部署、真实backup/restore、production performance和live smoke仍为`NOT RUN`。
 
 - [V1 Implementation Plan](docs/Implementation-Plan.md)定义 milestone 范围、顺序和边界。
 - 本文件是日常执行清单：issue 必须按稳定 ID 跟踪，并记录依赖、交付物和验证结果。
@@ -46,7 +46,7 @@ M8 的 Compose 骨架可在 M0 后提前建立，但完成门禁必须等待 M7�
 | M4 | Conversation Orchestrator 与 Main AI | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M5 | Media 与 Context Contract | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
 | M6 | Memory、Summary 与 Embedding Pipeline | COMPLETE | WINDOWS PASS / GITLAB LINUX SERVICE INTEGRATION PASS |
-| M7 | Proactive Pipeline | COMPLETE | WINDOWS STATIC/UNIT PASS; GITHUB LINUX SERVICE ACCEPTANCE PASS |
+| M7 | Proactive Pipeline | COMPLETE | WINDOWS STATIC/UNIT PASS; GITHUB LINUX SERVICE ACCEPTANCE PASS; NATIVE LINUX AMD64 SUPPLEMENTAL PASS |
 | M8 | Production Compose 与 Operations | WAITING | NOT RUN |
 | M9 | Release candidate 验证 | WAITING | NOT RUN |
 
@@ -285,9 +285,10 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 
 ### M7 Evidence
 
-- [x] M7验收基线（当时的current HEAD）`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`（tree `2fc4c24f8faa31a240fa89859dcdb8c14dd8219f`）的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 三个门禁全部为`PASS`：Preflight 为 422 passed、58 deselected、coverage 86.83%；PostgreSQL/Redis integration 为 479 passed、0 failed、0 errors、0 skipped（coverage 来自 artifact）；Chromium browser contract 为 1 passed。集成服务固定为 PostgreSQL 17.10/pgvector 0.8.6 与 Redis 8.2.8。
-- [x] 该验收基线的 Windows/CPython 3.14.7 M7 unit、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为`PASS`；`0022_m7_job_scope_and_deadline` 与 `0023_m7_proactive_snapshot` 为前序迁移，当前 migration head 为`0024_runtime_fencing_provenance`，补齐 legacy nullable outbound provenance、发送 lease/fencing 及 model-run manifest metadata 的迁移闭环。
-- [x] 本机 Windows/CPython 3.14.7 的 M7 unit tests、Ruff、strict mypy、import boundary、build、Disclosure、coverage 和 artifact checks 为 `PASS`；本机无 Docker，Windows 本地 PostgreSQL/Redis service test 仍为 `NOT RUN`。
+- [x] M7 implementation source baseline `19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`的 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 与 Windows/CPython 3.14.7 M7 unit、Ruff、strict mypy、import boundary、build、Disclosure、coverage和artifact checks保留为源码实现证据；`0022_m7_job_scope_and_deadline`与`0023_m7_proactive_snapshot`为前序迁移，当前migration head为`0024_runtime_fencing_provenance`。
+- [x] M7 final acceptance baseline 是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`；GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340) 的Preflight为422 passed、58 deselected、coverage 86.93%，PostgreSQL/Redis integration为479 passed、1 deselected、coverage 90.45%，Chromium browser contract为1 passed。M7 acceptance为12/12，migration manifest记录96 tables、0 unnamed constraints和5 migration paths `PASS`。
+- [x] final baseline的独立原生Linux amd64非live复现为`PASS`，覆盖locked install、同等preflight、PostgreSQL/Redis integration/migration、M7 acceptance和Chromium contract；它不是Ubuntu 24.04 production、Compose、deployment或live证据。本机无Docker，Windows本地PostgreSQL/Redis service test仍为`NOT RUN`。
+- `COMPAT-LINUX-ARM64-001`兼容性backlog记录当前locked-install在任何项目测试前因`greenlet==3.5.5` Linux aarch64 wheel hash未被lock允许而独立`FAIL`；后续arm64 preflight、integration、migration、M7 acceptance和browser tests均为`NOT RUN`。该项不依赖且不阻塞M7/M8 `linux/amd64`门禁，跟踪任务见§15。
 
 ## 13. M8 — Production Compose与 Operations
 
@@ -350,6 +351,7 @@ M4-001—M4-011已经关闭。多分片continuation、Control Bot持久后端与
 - [ ] **X-005 Acceptance traceability** — 每项已完成任务能追溯到需求、测试、证据、签名 commit 和 artifact digest。
 - [ ] **X-006 Performance budget** — 测量 query、token、queue、memory、disk 和 latency，区分 synthetic 基线与生产证据。
 - [ ] **X-007 Dependency maintenance** — 通过单独变更升级依赖/镜像，重跑兼容、安全、migration 和 recovery 门禁。
+- [ ] **COMPAT-LINUX-ARM64-001 Linux arm64 locked-install coverage** — 跟踪`greenlet==3.5.5` aarch64 wheel hash覆盖与后续原生arm64复现；该兼容性backlog独立于M7/M8 `linux/amd64`门禁。
 
 ## 16. 必须在对应阶段确定的实现参数
 
