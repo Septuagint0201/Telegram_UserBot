@@ -4,21 +4,29 @@
 
 ## 当前状态
 
-V1架构设计与M0—M6已经完成，M7也已完成。M7 implementation source baseline 是`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`，其 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 保留为源码实现证据；final acceptance baseline 是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`，GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340) 的 Preflight（422 passed、58 deselected）、PostgreSQL/Redis integration（479 passed、1 deselected）和 Chromium browser contract（1 passed）均为`PASS`，M7 acceptance 为12/12，migration manifest记录96 tables、0 unnamed constraints和5 migration paths `PASS`。final baseline相对implementation source只修改状态文档，不改变M7实现；CI仍会为每个被验证的提交生成并校验新的M7 acceptance manifest。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
+Worker 实现已补齐，Design 保持冻结。2026-09-29 本地默认测试 **1775 passed、4 skipped，覆盖率 85.03%**。影子向量空间重建与回退、大积压分块、历史时区重切，以及主动扫描、决策、预算回收、AUTO/COPILOT 发布均已接入。
+
+当前 head 为 `0036_worker_complete`；queue inventory 已无 Worker 必需消费者缺口。运行 READY 仍需通过数据库、账号、恢复闸门、磁盘和依赖检查。详见 [Worker 运行说明](docs/runbooks/worker-runtime.md) 与 [本轮完成审计](docs/audits/2026-09-29-worker-complete.md)。
+
+代码检查和隔离初验已完成，用户已确认本阶段成果。本次提交保存当前源码和文档；完整 Compose、真实 Telegram/provider 与生产全链路验证按用户要求留待后续，不随本次推送启动。参见 [源码收尾记录](docs/audits/2026-09-29-source-closeout.md)。
+
+### 历史里程碑与证据边界
+
+V1架构设计与M0—M6已经完成，M7也已完成；M8 Production Compose与Operations已进入实现阶段，但尚未取得生产运行证据。M7 implementation source baseline 是`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`，其 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 保留为源码实现证据；final acceptance baseline 是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`，GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340) 的 Preflight（422 passed、58 deselected）、PostgreSQL/Redis integration（479 passed、1 deselected）和 Chromium browser contract（1 passed）均为`PASS`，M7 acceptance 为12/12，migration manifest记录96 tables、0 unnamed constraints和5 migration paths `PASS`。final baseline相对implementation source只修改状态文档，不改变M7实现；CI仍会为每个被验证的提交生成并校验新的M7 acceptance manifest。当前源码 Alembic head 为`0036_worker_complete`；M8生产Compose、真实Telegram/provider、真实AUTO、backup/restore、production load和24小时soak仍为`NOT RUN`。默认入口仍不连接Telegram或provider，也不启用真实AUTO。
 
 因此：
 
-- 可以运行本地安全校验、fake-only Telegram/model contract、key-only ASGI测试和显式的disposable PostgreSQL/Redis/browser integration test，但不能连接真实Telegram/provider、启动完整业务服务或部署本项目；
-- 文档中的最终服务与业务命令仍是实现契约，不是已经存在的入口；
+- 可以运行本地安全校验、fake-only Telegram/model contract、key-only ASGI测试和显式的disposable PostgreSQL/Redis/browser integration test；M8也提供显式的生产服务/运维入口，但真实Telegram/provider、生产部署和完整业务运行仍需按runbook取得前置条件与证据；
+- 文档中的服务与业务命令已有对应实现入口，但当前仍是未完成生产验证的候选实现，不能把入口存在误述为已部署或已启用；
 - Windows真实database/Redis、live Telegram/provider、Ubuntu production、backup/restore和24小时soak仍为`NOT RUN`；
 - final baseline的独立原生Linux amd64非live复现为`PASS`；`COMPAT-LINUX-ARM64-001`记录Linux arm64 locked-install在项目测试前因lock hash覆盖不足而独立`FAIL`，后续arm64 tests为`NOT RUN`，该兼容性backlog不属于M7或M8的`linux/amd64`门禁；
-- RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标。
+- RPO 15分钟、整机RTO 2小时和2 vCPU/4 GiB/40 GiB资源profile是待实现与实测的目标；2026-09-04检查的目标VM名义为64 GiB，根文件系统约60.9 GiB、可用约32.9 GiB，既不能证明40 GiB受限磁盘边界，也不是fresh soak环境。
 
-精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)、[M3 Compatibility Set](docs/compatibility/m3.md)、[M4 Compatibility Set](docs/compatibility/m4.md)、[M5 Compatibility Set](docs/compatibility/m5.md)、[M6 Compatibility Set](docs/compatibility/m6.md)和[M7 Compatibility Set](docs/compatibility/m7.md)。真实Telegram/provider仍未接入。
+精确兼容组合与平台边界见[M1 Compatibility Set](docs/compatibility/m1.md)、[M2 Compatibility Set](docs/compatibility/m2.md)、[M3 Compatibility Set](docs/compatibility/m3.md)、[M4 Compatibility Set](docs/compatibility/m4.md)、[M5 Compatibility Set](docs/compatibility/m5.md)、[M6 Compatibility Set](docs/compatibility/m6.md)、[M7 Compatibility Set](docs/compatibility/m7.md)和[M8 Compatibility Set](docs/compatibility/m8.md)。M8已实现真实Telegram/provider的显式生产组合路径，但尚未使用真实凭据完成live验证或启用真实AUTO。
 
 ## 架构摘要
 
-- Python模块化单体，生产目标为Ubuntu Server 24.04 amd64上的Docker Compose。
+- Python模块化单体，生产目标为Ubuntu Server 26.04 amd64上的Docker Compose。
 - `app`唯一持有Telethon Session并执行真人账号消息副作用。
 - `control`独立运行Control Bot和只处理API key的Telegram Web App。
 - `worker`异步执行Memory、Embedding、Proactive和补偿任务。
@@ -55,7 +63,7 @@ V1架构设计与M0—M6已经完成，M7也已完成。M7 implementation source
 生产支持面已经固定为：
 
 ```text
-Ubuntu Server 24.04 LTS
+Ubuntu Server 26.04 LTS
 linux/amd64
 Docker Engine + Compose v2
 2 vCPU / 4 GiB RAM / 40 GiB SSD
@@ -80,17 +88,18 @@ M0安全入口只验证配置并输出allowlist JSON日志：
 .\.venv\Scripts\telegram-userbot-check.exe
 ```
 
-该安全入口的外部集成开关仍必须全部为false；它不会启动M1数据库/Redis adapter，也没有Telegram连接实现。Alembic和integration test只能对显式提供的disposable PostgreSQL/Redis运行。
+该安全入口的外部集成开关仍必须全部为false；它不会启动M1数据库/Redis adapter、Telethon、Bot polling或生产 scheduler。M8的生产组合入口另行读取经过校验的部署配置和挂载 secret，未在该安全入口中调用。Alembic和integration test只能对显式提供的disposable PostgreSQL/Redis运行。
 
-## 计划中的运行入口
+## M8运行入口与运维边界
 
-最终Compose服务预计包含：
+M8工作树已定义下列Compose服务清单：
 
 ```text
 https-gateway
 app
 control
 worker
+ops-monitor
 postgres
 redis
 migrate
@@ -98,7 +107,9 @@ session-backup
 data-export
 ```
 
-M2已实现可嵌入`control`进程的model-control组件，M3已实现由`app`注入已连接client后才能使用的Telethon gateway，M4提供可注入的Conversation Orchestrator/runtime与Control Bot命令边界。默认入口既不创建Telegram client、读取Session或解密provider key，也不启动Bot polling、scheduler、Caddy或Compose wiring，因此仍不存在可部署的完整业务入口和真实AUTO发送路径。未来运行命令必须随实际Compose文件和runbook一起加入README，并经过Test Strategy与Disclosure审查。
+部署模板、operator边界和逐项runbook见[deploy/README.md](deploy/README.md)与[docs/runbooks/README.md](docs/runbooks/README.md)。它们已经定义Compose/Caddy、secret、health、backup/restore和升级操作的实现契约，但不等同于已验证的生产部署说明：在固定镜像、真实secret、隔离restore、Ubuntu运行时和soak证据完成前，完整业务服务与真实AUTO仍为`NOT RUN`。M8的逐项兼容性与当前 synthetic/production 边界见[M8 Compatibility Set](docs/compatibility/m8.md)；2026-09-04检查的目标VM根文件系统约60.9 GiB、可用约32.9 GiB，不能替代40 GiB受限磁盘边界或fresh soak证据。
+
+本地默认入口仍保持安全：不会连接真实Telegram/provider或启用真实AUTO。M2的model-control、M3的Telethon gateway和M4的Conversation Orchestrator均保留为可注入边界；真实Session、provider key、Bot polling、scheduler和Compose业务服务只能按上述runbook及Test Strategy/Disclosure门禁启动。
 
 ## 测试与证据
 
@@ -118,7 +129,7 @@ M5签名提交`9e6aeaf3a50ff58826a6830492c766a7983da9b6`对应的[GitLab Linux p
 
 M6在Windows/CPython 3.14.7有289个default测试`PASS`、41个非默认测试deselect，line coverage 88.71%、branch coverage 80.05%；Ruff、strict mypy、import boundary、compileall、offline migration SQL、wheel/sdist Disclosure和secret/artifact scan均为`PASS`。M6签名证据基线`645fb8da5d5c35de6896825c5f29f22f08d0b168`已由[GitLab pipeline #2763001231](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2763001231)的13个作业和[GitHub Actions #31907584107](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/31907584107)验证：GitLab M6 service执行329个测试并deselect 1个，line coverage 91.98%、branch coverage 84.32%；GitHub的preflight、PostgreSQL/Redis integration和Chromium browser contract均为`PASS`。迁移manifest记录80张表、零匿名约束和四条migration路径`PASS`，M6-001—M6-012 acceptance全部`PASS`。该提交与重签前`9be7012edf3aabe1dd5db7a325b0f36efce27063`及[GitLab pipeline #2762159878](https://gitlab.com/Septuagintks/telegram_userbot/-/pipelines/2762159878)均仅为历史证据，不标识当前`main`。本机无Docker，Windows PostgreSQL/Redis integration仍为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、部署和真实backup/restore保持`NOT RUN`。
 
-M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、account/contact/bypass reservation、strict Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate和send-unknown保守结算。quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。`0022_m7_job_scope_and_deadline`与`0023_m7_proactive_snapshot`为前序迁移，当前 head 为`0024_runtime_fencing_provenance`；implementation source baseline `19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`由run `32229187875`验证，final acceptance baseline `7af2f524fcc4fc30fc04aa40de88a7b1302eb526`（tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`）由run `32234678340`在固定 PostgreSQL 17.10/pgvector 0.8.6、Redis 8.2.8 和 Chromium 151.0.7922.34 上验证。当前本机无Docker，Windows本地PostgreSQL/Redis service test为`NOT RUN`；真实Telegram/provider、Control Bot polling、真实AUTO、production Compose与部署、backup/restore、production load与soak保持`NOT RUN`。
+M7新增deterministic occurrence/candidate、15分钟补偿扫描、DST/quiet/absolute no-send、account/contact/bypass reservation、strict Proactive Agent decision、Main AI text-only proactive context、AUTO/COPILOT final gate和send-unknown保守结算。quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。`0022_m7_job_scope_and_deadline`、`0023_m7_proactive_snapshot`和`0024_runtime_fencing_provenance`属于M7阶段历史迁移；当前源码 schema head 为`0036_worker_complete`。implementation source baseline `19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`由run `32229187875`验证，final acceptance baseline `7af2f524fcc4fc30fc04aa40de88a7b1302eb526`（tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`）由run `32234678340`在固定 PostgreSQL 17.10/pgvector 0.8.6、Redis 8.2.8 和 Chromium 151.0.7922.34 上验证。当前本机无Docker，Windows本地PostgreSQL/Redis service test为`NOT RUN`；M8生产Compose、真实Telegram/provider、Control Bot polling、真实AUTO、production deployment、backup/restore、production load与soak保持`NOT RUN`。
 
 常用本地门禁：
 

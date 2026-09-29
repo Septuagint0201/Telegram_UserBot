@@ -126,12 +126,23 @@ async def test_media_cleanup_claim_rechecks_references_after_lock_wait() -> None
     )
     pg_dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
     select_sql = str(session.execute.await_args.args[0].compile(dialect=pg_dialect))
+    select_params = session.execute.await_args.args[0].compile(dialect=pg_dialect).params
     assert "FOR UPDATE" in select_sql
     assert "SKIP LOCKED" in select_sql
+    assert frozenset({"pending", "leased", "running", "retry_wait"}) in {
+        frozenset(value) for value in select_params.values() if isinstance(value, list)
+    }
+    assert frozenset({"created", "running", "retry_wait"}) in {
+        frozenset(value) for value in select_params.values() if isinstance(value, list)
+    }
     assert session.scalar.await_count == 2
     claim_sql = str(session.scalar.await_args_list[1].args[0])
     assert claim_sql.startswith("UPDATE media_objects")
-    assert "message_media.media_object_id" in claim_sql
+    assert "context_manifest_items.media_object_id" in claim_sql
+    assert "memory_input_manifest_items.media_object_id" in claim_sql
+    assert "model_runs.state" in claim_sql
+    assert "memory_jobs.state" in claim_sql
+    assert "message_media.media_object_id" not in claim_sql
     assert "RETURNING media_objects.delete_fencing_token" in claim_sql
 
 

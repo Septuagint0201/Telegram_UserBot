@@ -2,7 +2,9 @@
 
 ## 1. 状态与使用方式
 
-本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M7已经取得精确证据；M7 implementation source baseline 是`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`，其 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 保留为源码实现证据。M7 final acceptance baseline 是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`；GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340) 的Preflight为422 passed、58 deselected，PostgreSQL/Redis integration为479 passed、1 deselected，Chromium browser contract为1 passed，M7 acceptance为12/12，migration manifest记录96 tables、0 unnamed constraints和5 migration paths `PASS`。final baseline相对implementation source只修改状态文档，不改变M7实现；CI仍会为每个被验证的提交生成并校验新的M7 acceptance manifest。Telegram/provider live、production Compose与部署、真实backup/restore、production load与soak仍为`NOT RUN`。
+本文件保留为历史工作包参考。2026-09-20 的[接手审计](audits/2026-09-20-takeover.md)确认，生产后台消费者仍有缺失；历史 M0—M7 结论不能证明当前产品链路完整。当前执行顺序以该审计的剩余工作为准，`Design.md` 继续保持冻结。
+
+本文把已完成的总体设计、九篇详细架构和ADR转换为首轮实现工作包。M0—M7已经取得精确证据，M8已进入实现阶段；当前全链路 schema head 为`0036_worker_complete`，但M8生产运行证据仍为`NOT RUN`。M7 implementation source baseline 是`19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`，其 GitHub Actions run [#32229187875](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32229187875) 保留为源码实现证据。M7 final acceptance baseline 是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`；GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340) 的Preflight为422 passed、58 deselected，PostgreSQL/Redis integration为479 passed、1 deselected，Chromium browser contract为1 passed，M7 acceptance为12/12，migration manifest记录96 tables、0 unnamed constraints和5 migration paths `PASS`。final baseline相对implementation source只修改状态文档，不改变M7实现；CI仍会为每个被验证的提交生成并校验新的M7 acceptance manifest。Telegram/provider live、production Compose与部署、真实backup/restore、production load与soak仍为`NOT RUN`。
 
 本文定义milestone的范围、边界和退出目标；根目录的[开发执行清单](../TODO.md)提供稳定issue ID、逐项依赖、验证要求和实时完成状态。
 
@@ -73,7 +75,7 @@ deploy/
 | M5 | Media与Context Contract | fake provider；测试图片 | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M6 | Memory/Summary/Embedding Pipeline | fake provider/embedding | COMPLETE — WINDOWS/GITLAB LINUX PASS |
 | M7 | Proactive Pipeline与COPILOT主动草稿 | fake provider/Telegram | COMPLETE — WINDOWS STATIC/UNIT PASS; GITHUB LINUX SERVICE ACCEPTANCE PASS (M7 EVIDENCE BASELINE) |
-| M8 | Production Compose、backup与运维加固 | 测试backup/alert targets | NOT STARTED |
+| M8 | Production Compose、backup与运维加固 | 测试backup/alert targets | IN PROGRESS — RUNTIME EVIDENCE NOT RUN |
 | M9 | Release candidate验证 | 受保护live smoke与授权测试peer | NOT STARTED |
 
 ## 5. M0 — 工程脚手架与安全默认值
@@ -339,7 +341,7 @@ deploy/
 
 ## 12. M7 — Proactive Pipeline
 
-当前状态：M7 Proactive Pipeline domain、migration、least-privilege roles、strict decision validation、budget reservation、DST/quiet policy、AUTO/COPILOT final-gate contract 与 content-free evidence mapping 已完成。M7 implementation source baseline `19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`及run `32229187875`保留为源码实现证据；final acceptance baseline是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`，GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340)取得Preflight 422 passed、58 deselected，PostgreSQL/Redis integration 479 passed、1 deselected，Chromium browser contract 1 passed，M7 acceptance 12/12，96 tables、0 unnamed constraints和5 migration paths `PASS`。Windows/CPython 3.14.7的M7 unit、static与artifact证据为`PASS`；quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。`0022_m7_job_scope_and_deadline`与`0023_m7_proactive_snapshot`为前序迁移，当前迁移head为`0024_runtime_fencing_provenance`。final baseline的独立原生Linux amd64非live复现为补充`PASS`，不代表Ubuntu 24.04 production；`COMPAT-LINUX-ARM64-001`的locked-install在项目测试前独立`FAIL`，后续arm64 tests为`NOT RUN`，且不属于M7/M8 `linux/amd64`门禁。本机无Docker，Windows本地PostgreSQL/Redis service仍为`NOT RUN`。真实 Telegram/provider、真实 proactive send、Control Bot polling、production Compose与部署、backup/restore、load与soak仍为`NOT RUN`。
+当前状态：M7 Proactive Pipeline domain、migration、least-privilege roles、strict decision validation、budget reservation、DST/quiet policy、AUTO/COPILOT final-gate contract 与 content-free evidence mapping 已完成。M7 implementation source baseline `19bf0c7974b7ef2e1a3e3b8064a10d4d162353b6`及run `32229187875`保留为源码实现证据；final acceptance baseline是签名提交`7af2f524fcc4fc30fc04aa40de88a7b1302eb526`、tree `a2eaab5195c393c3905cc92620af54b7d8c208ab`，GitHub Actions run [#32234678340](https://github.com/Septuagint0201/Telegram_UserBot/actions/runs/32234678340)取得Preflight 422 passed、58 deselected，PostgreSQL/Redis integration 479 passed、1 deselected，Chromium browser contract 1 passed，M7 acceptance 12/12，96 tables、0 unnamed constraints和5 migration paths `PASS`。Windows/CPython 3.14.7的M7 unit、static与artifact证据为`PASS`；quiet默认`22:00–08:00`，absolute no-send固定`00:00–07:00`。`0022_m7_job_scope_and_deadline`、`0023_m7_proactive_snapshot`和`0024_runtime_fencing_provenance`为M7阶段历史迁移，当前全链路迁移head为`0036_worker_complete`。final baseline的独立原生Linux amd64非live复现为补充`PASS`，不代表Ubuntu 26.04 production；`COMPAT-LINUX-ARM64-001`的locked-install在项目测试前独立`FAIL`，后续arm64 tests为`NOT RUN`，且不属于M7/M8 `linux/amd64`门禁。本机无Docker，Windows本地PostgreSQL/Redis service仍为`NOT RUN`。真实 Telegram/provider、真实 proactive send、Control Bot polling、production Compose与部署、backup/restore、load与soak仍为`NOT RUN`。
 
 ### 12.1 目标
 
@@ -374,7 +376,7 @@ deploy/
 
 ### 13.1 目标
 
-实现Ubuntu 24.04 amd64 Compose部署、Caddy、secret、migration、backup、health、alert、retention、export和runbook。
+实现Ubuntu 26.04 amd64 Compose部署、Caddy、secret、migration、backup、health、alert、retention、export和runbook。
 
 ### 13.2 代码/配置任务
 
@@ -404,6 +406,19 @@ deploy/
 - RPO/RTO只有实测达成后标PASS。
 - 首次release前所有Operations critical测试无quarantine。
 
+### 13.5 当前证据
+
+M8 operations 静态契约已有支持性测试通过，但不能使任何 M8 requirement 变为
+`PASS`；完整 Compose validation 仍需在目标 Ubuntu VM 重跑并绑定新的签名候选。
+此前 VM synthetic 运行暴露了两个已修复的
+实现阻塞：validation 的 `!override` volume 列表覆盖了 bootstrap init mount，
+以及 pgBackRest 2.45 不兼容 PostgreSQL 17。2026-09-04检查的目标VM根文件系统为
+约60.9 GiB、可用约32.9 GiB；M8契约的40 GiB是受限profile的最低支持/历史预算，
+不是由这次宿主探测即可证明的容量。在没有40 GiB配额模拟和完整24小时运行前，
+M8-015仍为`NOT RUN`/`BLOCKED`。生产镜像 digest、SBOM/license、真实
+backup/restore、RPO/RTO、故障恢复和24小时soak均保持`NOT RUN`。详见
+[M8 Compatibility Set](compatibility/m8.md)。
+
 ## 14. M9 — Release Candidate与首个部署门禁
 
 ### 14.1 目标
@@ -416,7 +431,7 @@ deploy/
 - 在隔离账号/peer执行真实Telegram/Web App smoke。
 - 对三个generation协议与embedding实际启用项执行synthetic provider smoke。
 - 执行backup/restore、upgrade/rollback和旧DB+最新erasure overlay。
-- 在2 vCPU/4 GiB/40 GiB Ubuntu 24.04 amd64运行24小时soak。
+- 在2 vCPU/4 GiB/40 GiB Ubuntu 26.04 amd64运行24小时soak。
 - 扫描source、image、artifact、logs、metrics和backup metadata的secret/正文。
 - 完成dependency/license/SBOM、image digest、commit signature和provenance核对。
 - 更新README运行命令、部署runbook、Disclosure和实际限制。
@@ -465,4 +480,4 @@ Issue必须引用受影响的架构section、ADR和acceptance IDs，并写明明
 
 ## 17. 当前结论
 
-M0—M7已经关闭；下一阶段为 M8 Production Compose与Operations。真实Telegram/provider smoke继续保持`NOT RUN`，应用容器、真实AUTO、生产部署、真实backup/restore、production load与soak仍不存在或为`NOT RUN`。
+M0—M7已经关闭；M8 Production Compose与Operations正在实现。应用容器与真实Telegram/provider的显式生产组合代码已存在，但相应live smoke、真实AUTO、生产部署、真实backup/restore、production load与soak均为`NOT RUN`，不能据此宣称已经启用或验证。

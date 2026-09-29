@@ -80,6 +80,16 @@
             "items": { "minLength": 1, "type": "string" },
             "uniqueItems": true
           },
+          "evidence_scope": {
+            "enum": [
+              "source-static",
+              "ci-synthetic",
+              "ubuntu-synthetic",
+              "ubuntu-production",
+              "manual"
+            ],
+            "type": "string"
+          },
           "reason": { "minLength": 1, "type": "string" }
         }
       }

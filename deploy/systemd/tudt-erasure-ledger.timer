@@ -1,0 +1,11 @@
+[Unit]
+Description=Telegram UserBot cumulative erasure ledger export
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=tudt-ops@erasure-ledger.service
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

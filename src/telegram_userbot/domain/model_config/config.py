@@ -41,6 +41,7 @@ GENERATION_PROTOCOLS = frozenset(
         ModelProtocol.ANTHROPIC_MESSAGES,
     }
 )
+MAX_GENERATION_OUTPUT_TOKENS = 8_192
 
 
 def profile_kind_for(role: LogicalRole) -> ProfileKind:
@@ -130,7 +131,7 @@ class CanonicalModelConfig:
             if (
                 self.max_output_tokens is None
                 or isinstance(self.max_output_tokens, bool)
-                or not 1 <= self.max_output_tokens <= 1_000_000
+                or not 1 <= self.max_output_tokens <= MAX_GENERATION_OUTPUT_TOKENS
             ):
                 raise ModelConfigurationError("generation output limit is invalid")
         elif self.temperature is not None or self.max_output_tokens is not None:

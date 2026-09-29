@@ -163,7 +163,10 @@ async def test_ingest_duplicate_unsupported_and_new_message_paths() -> None:
     ids = deque((UUID(int=10), UUID(int=11)))
     created_session = ScriptedSession(
         scalar_values=(9, UUID(int=11)),
-        execute_results=(ScriptedResult(None),),
+        execute_results=(
+            ScriptedResult({"status": "active", "automation_status": "allowed"}),
+            ScriptedResult(None),
+        ),
     )
     created = await TelegramLifecycleRepository(
         session(created_session), new_uuid=ids.popleft

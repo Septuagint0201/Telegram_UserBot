@@ -357,14 +357,34 @@ class OutboxRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def claim_batch(self, *, limit: int = 100) -> Sequence[OutboxRecord]:
+    async def claim_batch(
+        self,
+        *,
+        limit: int = 100,
+        topics: frozenset[str] | None = None,
+    ) -> Sequence[OutboxRecord]:
         if limit < 1 or limit > 1000:
             raise ValueError("outbox batch limit must be between 1 and 1000")
+        if topics is not None and (
+            not topics
+            or len(topics) > 32
+            or any(
+                not isinstance(topic, str)
+                or not topic
+                or len(topic) > 100
+                or any(character.isspace() for character in topic)
+                for topic in topics
+            )
+        ):
+            raise ValueError("outbox topic filter is invalid")
+        statement = select(transactional_outbox).where(
+            transactional_outbox.c.published_at.is_(None)
+        )
+        if topics is not None:
+            statement = statement.where(transactional_outbox.c.topic.in_(topics))
         rows = (
             await self._session.execute(
-                select(transactional_outbox)
-                .where(transactional_outbox.c.published_at.is_(None))
-                .order_by(transactional_outbox.c.id)
+                statement.order_by(transactional_outbox.c.id)
                 .limit(limit)
                 .with_for_update(skip_locked=True)
             )
@@ -377,6 +397,8 @@ class OutboxRepository:
                 aggregate_id=row["aggregate_id"],
                 aggregate_version=row["aggregate_version"],
                 payload=cast(dict[str, Any], row["payload"]),
+                payload_schema_version=row.get("payload_schema_version", 1),
+                account_id=row.get("account_id"),
             )
             for row in rows
         )
@@ -404,7 +426,10 @@ class OutboxRepository:
             CursorResult[Any],
             await self._session.execute(
                 update(transactional_outbox)
-                .where(transactional_outbox.c.id == outbox_id)
+                .where(
+                    transactional_outbox.c.id == outbox_id,
+                    transactional_outbox.c.published_at.is_(None),
+                )
                 .values(
                     publish_attempts=transactional_outbox.c.publish_attempts + 1,
                     last_error_code=error_code,

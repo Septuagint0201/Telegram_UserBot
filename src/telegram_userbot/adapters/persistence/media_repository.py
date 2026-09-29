@@ -6,17 +6,33 @@ from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram_userbot.adapters.media.storage import StoredMedia
-from telegram_userbot.adapters.persistence.schema import media_objects, message_media
+from telegram_userbot.adapters.persistence.schema import (
+    accounts,
+    context_manifest_items,
+    context_manifests,
+    data_erasure_requests,
+    erasure_media_checks,
+    erasure_progress,
+    media_objects,
+    memory_input_manifest_items,
+    memory_input_manifests,
+    memory_jobs,
+    message_media,
+    message_revisions,
+    model_runs,
+)
 from telegram_userbot.domain.shared.time import require_aware
 
 DEFAULT_MEDIA_DELETE_LEASE = timedelta(minutes=5)
 MEDIA_DELETE_RETRY_BASE = timedelta(minutes=1)
 MEDIA_DELETE_RETRY_CAP = timedelta(hours=1)
 MEDIA_DELETE_CRITICAL_AFTER = timedelta(hours=24)
+MEDIA_UPLOAD_TIMEOUT = timedelta(minutes=5)
 
 
 def _media_delete_backoff(attempt_count: int) -> timedelta:
@@ -30,8 +46,8 @@ def _media_delete_backoff(attempt_count: int) -> timedelta:
 class MediaDeletionLease:
     object_id: UUID
     account_id: UUID
-    storage_key: str
-    sha256: bytes
+    storage_key: str | None
+    sha256: bytes | None
     fencing_token: int
     attempt_count: int
     first_failed_at: datetime | None = None
@@ -53,7 +69,75 @@ class MediaRepository:
 
         await self._session.commit()
 
-    async def create_pending(
+    async def account_is_deleting(self, account_id: UUID) -> bool:
+        return await self._session.scalar(
+            select(accounts.c.status).where(accounts.c.id == account_id)
+        ) in ("deleting", "deleted")
+
+    async def inventory_requests(self, account_id: UUID) -> tuple[UUID, ...]:
+        # Match the worker's account admission lock while inspecting the filesystem.
+        await self._session.execute(
+            select(accounts.c.id).where(accounts.c.id == account_id).with_for_update(key_share=True)
+        )
+        return tuple(
+            (
+                await self._session.scalars(
+                    select(data_erasure_requests.c.id)
+                    .join(
+                        erasure_progress,
+                        erasure_progress.c.request_id == data_erasure_requests.c.id,
+                    )
+                    .where(
+                        data_erasure_requests.c.account_id == account_id,
+                        data_erasure_requests.c.scope_type.in_(("contact", "account")),
+                        data_erasure_requests.c.state == "derived_cleanup",
+                        erasure_progress.c.step_name == "physical_media",
+                        erasure_progress.c.state == "completed",
+                        ~select(erasure_media_checks.c.request_id)
+                        .where(erasure_media_checks.c.request_id == data_erasure_requests.c.id)
+                        .exists(),
+                    )
+                )
+            ).all()
+        )
+
+    async def inventory_objects(self, account_id: UUID) -> dict[UUID, bool | None]:
+        live = func.erasure_live_media(account_id).table_valued("id")
+        rows = (
+            await self._session.execute(
+                select(media_objects.c.id, media_objects.c.status, live.c.id.label("live_id"))
+                .outerjoin(live, live.c.id == media_objects.c.id)
+                .where(media_objects.c.account_id == account_id)
+            )
+        ).all()
+        return {
+            row.id: True if row.status == "deleted" else False if row.live_id else None
+            for row in rows
+        }
+
+    async def record_inventory(self, requests: tuple[UUID, ...], now: datetime) -> None:
+        for request_id in requests:
+            await self._session.execute(
+                postgresql_insert(erasure_media_checks)
+                .values(request_id=request_id, checked_at=now)
+                .on_conflict_do_nothing()
+            )
+
+    async def ready_bytes(self, *, account_id: UUID) -> int:
+        """Count files still present for the account's hard media quota."""
+
+        value = await self._session.scalar(
+            select(func.coalesce(func.sum(media_objects.c.byte_size), 0)).where(
+                media_objects.c.account_id == account_id,
+                media_objects.c.storage_key.is_not(None),
+                media_objects.c.status.in_(("ready", "delete_pending", "failed")),
+            )
+        )
+        if type(value) is not int or value < 0:
+            raise RuntimeError("media byte total is invalid")
+        return value
+
+    async def create_pending(  # noqa: PLR0913 - durable upload provenance is explicit
         self,
         *,
         object_id: UUID,
@@ -61,6 +145,8 @@ class MediaRepository:
         object_kind: str,
         parent_object_id: UUID | None,
         created_at: datetime,
+        source_message_id: UUID | None = None,
+        source_revision_no: int | None = None,
     ) -> None:
         retention = "media_original_30d" if object_kind == "original" else "media_provider_copy_24h"
         await self._session.execute(
@@ -72,6 +158,17 @@ class MediaRepository:
                 parent_object_id=parent_object_id,
                 retention_class=retention,
                 created_at=created_at,
+                source_revision_id=(
+                    select(message_revisions.c.id)
+                    .where(
+                        message_revisions.c.account_id == account_id,
+                        message_revisions.c.message_id == source_message_id,
+                        message_revisions.c.revision_no == source_revision_no,
+                    )
+                    .scalar_subquery()
+                    if source_message_id is not None
+                    else None
+                ),
             )
         )
 
@@ -83,11 +180,16 @@ class MediaRepository:
         stored: StoredMedia,
         ready_at: datetime,
     ) -> bool:
+        # Same account-before-object lock order as scope erasure and media admission.
+        await self._session.execute(
+            select(accounts.c.id).where(accounts.c.id == account_id).with_for_update(key_share=True)
+        )
         kind = await self._session.scalar(
             select(media_objects.c.object_kind).where(
                 media_objects.c.id == object_id,
                 media_objects.c.account_id == account_id,
                 media_objects.c.status == "pending",
+                media_objects.c.delete_requested_at.is_(None),
             )
         )
         if kind is None:
@@ -99,6 +201,7 @@ class MediaRepository:
                 media_objects.c.id == object_id,
                 media_objects.c.account_id == account_id,
                 media_objects.c.status == "pending",
+                media_objects.c.delete_requested_at.is_(None),
             )
             .values(
                 status="ready",
@@ -170,16 +273,73 @@ class MediaRepository:
         now: datetime,
         limit: int = 50,
         lease: timedelta = DEFAULT_MEDIA_DELETE_LEASE,
+        account_id: UUID | None = None,
     ) -> tuple[MediaDeletionLease, ...]:
         current_time = require_aware(now, "now")
         if limit <= 0 or limit > 100 or lease <= timedelta(0) or lease > timedelta(minutes=15):
             raise ValueError("media deletion claim policy is invalid")
-        unreferenced = ~media_objects.c.id.in_(
-            select(message_media.c.media_object_id).where(
-                message_media.c.media_object_id.is_not(None)
+        # A canonical message reference is durable metadata, not an infinite
+        # filesystem-retention lease.  Only manifests belonging to work that can
+        # still read bytes protect an expired object.  Terminal manifests remain
+        # auditable after the object is deleted because their hashes and typed
+        # references stay in PostgreSQL.
+        active_model_read = media_objects.c.id.in_(
+            select(context_manifest_items.c.media_object_id)
+            .select_from(
+                context_manifest_items.join(
+                    context_manifests,
+                    and_(
+                        context_manifests.c.id == context_manifest_items.c.manifest_id,
+                        context_manifests.c.account_id == context_manifest_items.c.account_id,
+                    ),
+                ).join(
+                    model_runs,
+                    and_(
+                        model_runs.c.context_manifest_id == context_manifests.c.id,
+                        model_runs.c.account_id == context_manifests.c.account_id,
+                    ),
+                )
+            )
+            .where(
+                context_manifest_items.c.media_object_id.is_not(None),
+                model_runs.c.state.in_(("created", "running", "retry_wait")),
+                context_manifests.c.scope_erased_at.is_(None),
             )
         )
+        active_memory_read = media_objects.c.id.in_(
+            select(memory_input_manifest_items.c.media_object_id)
+            .select_from(
+                memory_input_manifest_items.join(
+                    memory_input_manifests,
+                    and_(
+                        memory_input_manifests.c.id == memory_input_manifest_items.c.manifest_id,
+                        memory_input_manifests.c.account_id
+                        == memory_input_manifest_items.c.account_id,
+                    ),
+                ).join(
+                    memory_jobs,
+                    and_(
+                        memory_jobs.c.input_manifest_id == memory_input_manifests.c.id,
+                        memory_jobs.c.account_id == memory_input_manifests.c.account_id,
+                    ),
+                )
+            )
+            .where(
+                memory_input_manifest_items.c.media_object_id.is_not(None),
+                memory_jobs.c.state.in_(("pending", "leased", "running", "retry_wait")),
+                memory_input_manifests.c.scope_erased_at.is_(None),
+            )
+        )
+        not_actively_read = ~or_(active_model_read, active_memory_read)
         eligible = or_(
+            and_(
+                media_objects.c.status.in_(("pending", "rejected", "failed")),
+                media_objects.c.delete_next_attempt_at.is_(None),
+                or_(
+                    media_objects.c.delete_requested_at.is_not(None),
+                    media_objects.c.created_at <= current_time - MEDIA_UPLOAD_TIMEOUT,
+                ),
+            ),
             and_(
                 media_objects.c.status == "ready",
                 media_objects.c.expires_at <= current_time,
@@ -199,9 +359,22 @@ class MediaRepository:
                     select(media_objects)
                     .where(
                         eligible,
-                        unreferenced,
-                        media_objects.c.storage_key.is_not(None),
-                        media_objects.c.sha256.is_not(None),
+                        *(
+                            ()
+                            if account_id is None
+                            else (media_objects.c.account_id == account_id,)
+                        ),
+                        not_actively_read,
+                        or_(
+                            and_(
+                                media_objects.c.storage_key.is_not(None),
+                                media_objects.c.sha256.is_not(None),
+                            ),
+                            and_(
+                                media_objects.c.storage_key.is_(None),
+                                media_objects.c.sha256.is_(None),
+                            ),
+                        ),
                     )
                     .order_by(
                         media_objects.c.expires_at,
@@ -224,7 +397,7 @@ class MediaRepository:
                     media_objects.c.account_id == row["account_id"],
                     media_objects.c.status == row["status"],
                     media_objects.c.delete_fencing_token == row["delete_fencing_token"],
-                    unreferenced,
+                    not_actively_read,
                 )
                 .values(
                     status="delete_pending",
@@ -246,8 +419,8 @@ class MediaRepository:
                 MediaDeletionLease(
                     object_id=cast(UUID, row["id"]),
                     account_id=cast(UUID, row["account_id"]),
-                    storage_key=cast(str, row["storage_key"]),
-                    sha256=cast(bytes, row["sha256"]),
+                    storage_key=cast(str | None, row["storage_key"]),
+                    sha256=cast(bytes | None, row["sha256"]),
                     fencing_token=cast(int, fencing_token),
                     attempt_count=cast(int, row["delete_attempt_count"]) + 1,
                     first_failed_at=cast(datetime | None, row["delete_first_failed_at"]),

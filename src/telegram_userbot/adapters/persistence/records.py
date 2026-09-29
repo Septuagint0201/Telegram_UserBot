@@ -76,6 +76,8 @@ class OutboxRecord:
     aggregate_id: str
     aggregate_version: int
     payload: dict[str, Any]
+    payload_schema_version: int = 1
+    account_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,9 +9,10 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, cast
 from uuid import UUID, uuid7
 
-from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy import and_, case, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnElement
 
 from telegram_userbot.adapters.persistence.schema import (
     context_manifest_item_reasons,
@@ -23,6 +24,8 @@ from telegram_userbot.adapters.persistence.schema import (
     context_preview_deliveries,
     context_preview_requests,
     context_preview_tokens,
+    conversations,
+    data_erasure_requests,
     media_objects,
     memories,
     memory_versions,
@@ -47,6 +50,48 @@ PREVIEW_DELETE_RETRY_BASE = timedelta(minutes=1)
 PREVIEW_DELETE_RETRY_CAP = timedelta(hours=1)
 PREVIEW_DELETE_CRITICAL_AFTER = timedelta(hours=24)
 SCORE_QUANTUM = Decimal("0.0000001")
+
+
+def _scope_erasure_requested(
+    account_id: ColumnElement[UUID], conversation_id: ColumnElement[UUID]
+) -> ColumnElement[bool]:
+    # Failed cleanup still represents durable erasure intent. A memory-only
+    # request must not disable unrelated context from the same conversation.
+    return (
+        select(data_erasure_requests.c.account_id)
+        .select_from(
+            data_erasure_requests.join(
+                conversations, conversations.c.account_id == data_erasure_requests.c.account_id
+            )
+        )
+        .where(
+            data_erasure_requests.c.account_id == account_id,
+            conversations.c.id == conversation_id,
+            or_(
+                data_erasure_requests.c.scope_type == "account",
+                and_(
+                    data_erasure_requests.c.scope_type == "contact",
+                    data_erasure_requests.c.contact_id == conversations.c.contact_id,
+                ),
+            ),
+        )
+        .correlate_except(data_erasure_requests, conversations)
+        .exists()
+    )
+
+
+def _preview_delivery_erased() -> ColumnElement[bool]:
+    return (
+        select(context_preview_requests.c.id)
+        .where(
+            context_preview_requests.c.id == context_preview_deliveries.c.request_id,
+            _scope_erasure_requested(
+                context_preview_requests.c.account_id, context_preview_requests.c.conversation_id
+            ),
+        )
+        .correlate_except(context_preview_requests)
+        .exists()
+    )
 
 
 def _scores_match(persisted: object, expected: float | None) -> bool:
@@ -729,6 +774,9 @@ class ContextRepository:
                         context_manifests.c.id == manifest_id,
                         context_manifests.c.account_id == account_id,
                         context_manifests.c.conversation_id == conversation_id,
+                        ~_scope_erasure_requested(
+                            context_manifests.c.account_id, context_manifests.c.conversation_id
+                        ),
                     )
                 )
             )
@@ -812,8 +860,12 @@ class ContextRepository:
                         context_preview_requests.c.bot_identity == bot_identity,
                         context_preview_requests.c.state == "pending_confirmation",
                         context_preview_requests.c.token_expires_at > current_time,
+                        ~_scope_erasure_requested(
+                            context_preview_requests.c.account_id,
+                            context_preview_requests.c.conversation_id,
+                        ),
                     )
-                    .with_for_update()
+                    .with_for_update(of=context_preview_requests)
                 )
             )
             .mappings()
@@ -883,6 +935,10 @@ class ContextRepository:
                 context_preview_requests.c.bot_identity == request.bot_identity,
                 context_preview_requests.c.bot_chat_id == request.bot_chat_id,
                 context_preview_requests.c.state == "confirmed",
+                ~_scope_erasure_requested(
+                    context_preview_requests.c.account_id,
+                    context_preview_requests.c.conversation_id,
+                ),
             )
             .values(
                 state="delivering",
@@ -921,6 +977,10 @@ class ContextRepository:
                             context_preview_requests.c.admin_user_id == request.admin_user_id,
                             context_preview_requests.c.bot_identity == request.bot_identity,
                             context_preview_requests.c.bot_chat_id == request.bot_chat_id,
+                            ~_scope_erasure_requested(
+                                context_preview_requests.c.account_id,
+                                context_preview_requests.c.conversation_id,
+                            ),
                         )
                     )
                 )
@@ -981,6 +1041,16 @@ class ContextRepository:
                 context_preview_deliveries.c.bot_chat_id == request.bot_chat_id,
                 context_preview_deliveries.c.ordinal == ordinal,
                 context_preview_deliveries.c.state == "pending",
+                select(context_preview_requests.c.id)
+                .where(
+                    context_preview_requests.c.id == context_preview_deliveries.c.request_id,
+                    context_preview_requests.c.state == "delivering",
+                    ~_scope_erasure_requested(
+                        context_preview_requests.c.account_id,
+                        context_preview_requests.c.conversation_id,
+                    ),
+                )
+                .exists(),
             )
             .values(state="sending", last_error_code=None)
             .returning(context_preview_deliveries.c.id)
@@ -1071,7 +1141,11 @@ class ContextRepository:
                 state=state,
                 bot_message_id=message_id,
                 sent_at=current_time if state == "sent" else None,
-                delete_after=deletion_time if state == "sent" else None,
+                delete_after=(
+                    case((_preview_delivery_erased(), current_time), else_=deletion_time)
+                    if state == "sent"
+                    else None
+                ),
                 last_error_code="send_unknown" if state == "send_unknown" else None,
             )
             .returning(context_preview_deliveries.c.id)
@@ -1144,6 +1218,48 @@ class ContextRepository:
             raise RuntimeError("context_preview_delivery_conflict")
         return final_state, delivered, len(rows)
 
+    async def reconcile_erasure_previews(
+        self, *, bot_identity: str, now: datetime, limit: int = 50
+    ) -> int:
+        """Revoke preview capabilities in bounded batches without losing RPC evidence."""
+        current_time = require_aware(now, "now")
+        if not bot_identity or bot_identity != bot_identity.strip() or not 1 <= limit <= 100:
+            raise ValueError("context_preview_erasure_query_invalid")
+        request_ids = tuple(
+            await self._session.scalars(
+                select(context_preview_requests.c.id)
+                .where(
+                    context_preview_requests.c.bot_identity == bot_identity,
+                    context_preview_requests.c.last_error_code.is_distinct_from("erasure_scope"),
+                    _scope_erasure_requested(
+                        context_preview_requests.c.account_id,
+                        context_preview_requests.c.conversation_id,
+                    ),
+                )
+                .order_by(context_preview_requests.c.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        if not request_ids:
+            return 0
+        await self._session.execute(
+            update(context_preview_requests)
+            .where(context_preview_requests.c.id.in_(request_ids))
+            .values(state="cancelled", completed_at=current_time, last_error_code="erasure_scope")
+        )
+        await self._session.execute(
+            update(context_preview_tokens)
+            .where(
+                context_preview_tokens.c.request_id.in_(request_ids),
+                context_preview_tokens.c.used_at.is_(None),
+            )
+            .values(used_at=current_time)
+        )
+        # Delivery evidence remains intact. due_preview_deletions independently
+        # expedites known IDs; active leases, retry backoff and unknown RPCs survive.
+        return len(request_ids)
+
     async def due_preview_deletions(
         self,
         *,
@@ -1181,7 +1297,10 @@ class ContextRepository:
                         context_preview_deliveries.c.bot_identity == bot_identity,
                         eligible,
                         context_preview_deliveries.c.bot_message_id.is_not(None),
-                        context_preview_deliveries.c.delete_after <= current_time,
+                        or_(
+                            context_preview_deliveries.c.delete_after <= current_time,
+                            _preview_delivery_erased(),
+                        ),
                     )
                     .order_by(
                         context_preview_deliveries.c.delete_after,
@@ -1205,6 +1324,9 @@ class ContextRepository:
                 )
                 .values(
                     state="delete_pending",
+                    delete_after=func.least(
+                        context_preview_deliveries.c.delete_after, current_time
+                    ),
                     delete_claimed_at=current_time,
                     delete_lease_expires_at=current_time + lease,
                     delete_fencing_token=context_preview_deliveries.c.delete_fencing_token + 1,
@@ -1224,7 +1346,7 @@ class ContextRepository:
                     cast(int, row["bot_chat_id"]),
                     cast(int, row["bot_message_id"]),
                     cast(int, fencing_token),
-                    cast(datetime, row["delete_after"]),
+                    min(cast(datetime, row["delete_after"]), current_time),
                     cast(int, row["delete_attempt_count"]) + 1,
                     row["delete_critical_alerted_at"] is not None,
                 )
@@ -1294,29 +1416,45 @@ class ContextRepository:
             request_state = "send_unknown"
         else:
             request_state = "delete_pending"
+        erased = _scope_erasure_requested(
+            context_preview_requests.c.account_id, context_preview_requests.c.conversation_id
+        )
         completed_request = await self._session.scalar(
             update(context_preview_requests)
             .where(
                 context_preview_requests.c.id == deletion.request_id,
                 context_preview_requests.c.bot_identity == deletion.bot_identity,
                 context_preview_requests.c.bot_chat_id == deletion.bot_chat_id,
-                context_preview_requests.c.state.in_(
-                    ("delivered", "send_unknown", "delete_pending", "delete_partial")
+                or_(
+                    erased,
+                    context_preview_requests.c.state.in_(
+                        ("delivered", "send_unknown", "delete_pending", "delete_partial")
+                    ),
                 ),
             )
             .values(
-                state=request_state,
+                state=case((erased, "cancelled"), else_=request_state),
                 completed_at=(
-                    current_time
-                    if request_state in {"deleted", "delete_partial", "send_unknown"}
-                    else None
+                    case(
+                        (erased, current_time),
+                        else_=(
+                            current_time
+                            if request_state in {"deleted", "delete_partial", "send_unknown"}
+                            else None
+                        ),
+                    )
                 ),
                 last_error_code=(
-                    error_code or "delete_failed"
-                    if request_state == "delete_partial"
-                    else "send_unknown"
-                    if request_state == "send_unknown"
-                    else None
+                    case(
+                        (erased, "erasure_scope"),
+                        else_=(
+                            error_code or "delete_failed"
+                            if request_state == "delete_partial"
+                            else "send_unknown"
+                            if request_state == "send_unknown"
+                            else None
+                        ),
+                    )
                 ),
             )
             .returning(context_preview_requests.c.id)

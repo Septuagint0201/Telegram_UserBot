@@ -22,12 +22,14 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import CursorResult, RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from telegram_userbot.adapters.persistence.memory_source_hash import evidence_hash_expression
 from telegram_userbot.adapters.persistence.schema import (
     conversations,
     data_erasure_requests,
     embedding_records,
     embedding_spaces,
     erasure_ledger,
+    erasure_progress,
     media_objects,
     memories,
     memory_evidence,
@@ -85,6 +87,11 @@ class MemoryJobLease:
     lease_owner: UUID
     fencing_token: int
     input_manifest_id: UUID | None = None
+    pipeline_version: str | None = None
+    policy_version: str | None = None
+    prompt_version: str | None = None
+    input_schema_version: int | None = None
+    output_schema_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +213,7 @@ class MemoryRepository:
                     await self._session.execute(
                         select(
                             message_revisions.c.revision_no,
-                            message_revisions.c.content_sha256,
+                            evidence_hash_expression().label("content_sha256"),
                             message_revisions.c.redacted_at,
                             messages.c.current_revision_no,
                             messages.c.deleted_at,
@@ -294,6 +301,14 @@ class MemoryRepository:
             target_kind=record.target_kind,
             target_id=record.target_id,
             account_id=account_id,
+        )
+
+    async def load_current_embedding_target(
+        self, *, target_kind: str, target_id: UUID, account_id: UUID
+    ) -> str:
+        """Load and lock canonical text for the durable embedding consumer."""
+        return await self._require_embedding_target_current(
+            target_kind=target_kind, target_id=target_id, account_id=account_id
         )
 
     async def _require_embedding_target_current(
@@ -537,7 +552,12 @@ class MemoryRepository:
                 policy_version=policy_version,
                 prompt_version=prompt_version,
                 input_schema_version=1,
-                output_schema_version=1,
+                output_schema_version={
+                    "episode": 1,
+                    "reconciliation": 1,
+                    "rolling_summary": 2,
+                    "consolidation": 3,
+                }[job_kind],
                 created_at=current_time,
                 updated_at=current_time,
             )
@@ -651,6 +671,11 @@ class MemoryRepository:
                         memory_jobs.c.range_end_event_id,
                         memory_jobs.c.job_version,
                         memory_jobs.c.input_manifest_id,
+                        memory_jobs.c.pipeline_version,
+                        memory_jobs.c.policy_version,
+                        memory_jobs.c.prompt_version,
+                        memory_jobs.c.input_schema_version,
+                        memory_jobs.c.output_schema_version,
                     )
                 )
             )
@@ -668,6 +693,11 @@ class MemoryRepository:
             lease_owner=owner,
             fencing_token=cast(int, updated["job_version"]),
             input_manifest_id=cast(UUID | None, updated["input_manifest_id"]),
+            pipeline_version=cast(str, updated["pipeline_version"]),
+            policy_version=cast(str, updated["policy_version"]),
+            prompt_version=cast(str, updated["prompt_version"]),
+            input_schema_version=cast(int, updated["input_schema_version"]),
+            output_schema_version=cast(int, updated["output_schema_version"]),
         )
 
     async def complete_job(  # noqa: PLR0913 - lease and retry policy are explicit
@@ -720,12 +750,19 @@ class MemoryRepository:
         )
         return result.rowcount == 1
 
-    async def create_manifest(
+    async def create_manifest(  # noqa: PLR0913 - manifest provenance fields are explicit
+        # The manifest fields mirror the durable provenance columns and are
+        # intentionally explicit at this persistence boundary.
         self,
         manifest: InputManifest,
         *,
         lease: MemoryJobLease,
         now: datetime,
+        model_config_version_id: UUID | None = None,
+        credential_version_id: UUID | None = None,
+        prompt_bundle_sha256: bytes | None = None,
+        capability_snapshot_sha256: bytes | None = None,
+        timezone_snapshot: str | None = None,
     ) -> None:
         current_time = require_aware(now, "now")
         if (
@@ -735,14 +772,54 @@ class MemoryRepository:
             or manifest.range_start_event_id != lease.range_start_event_id
             or manifest.range_end_event_id != lease.range_end_event_id
             or lease.input_manifest_id is not None
+            or (
+                lease.pipeline_version is not None
+                and manifest.pipeline_version != lease.pipeline_version
+            )
+            or (
+                lease.policy_version is not None and manifest.policy_version != lease.policy_version
+            )
+            or (
+                lease.prompt_version is not None and manifest.prompt_version != lease.prompt_version
+            )
+            or (
+                lease.input_schema_version is not None
+                and manifest.input_schema_version != lease.input_schema_version
+            )
+            or (
+                lease.output_schema_version is not None
+                and manifest.output_schema_version != lease.output_schema_version
+            )
         ):
             raise ValueError("manifest does not match the claimed memory generation")
+        provenance = (
+            model_config_version_id,
+            credential_version_id,
+            prompt_bundle_sha256,
+            capability_snapshot_sha256,
+        )
+        if any(value is not None for value in provenance) and (
+            any(value is None for value in provenance)
+            or not isinstance(prompt_bundle_sha256, bytes)
+            or len(prompt_bundle_sha256) != 32
+            or not isinstance(capability_snapshot_sha256, bytes)
+            or len(capability_snapshot_sha256) != 32
+        ):
+            raise ValueError("memory generation provenance must be complete")
         for source in manifest.sources:
             await self._require_manifest_source_scope(
                 source,
                 account_id=manifest.account_id,
                 conversation_id=manifest.conversation_id,
             )
+        purpose = {
+            "episode": "memory_episode",
+            "rolling_summary": "memory_rolling_summary",
+            "consolidation": "memory_consolidation",
+            "reconciliation": "memory_reconciliation",
+        }.get(lease.job_kind)
+        if purpose is None:
+            raise ValueError("memory manifest job kind is unsupported")
         await self._session.execute(
             insert(memory_input_manifests).values(
                 id=manifest.id,
@@ -750,7 +827,9 @@ class MemoryRepository:
                 conversation_id=manifest.conversation_id,
                 memory_job_id=lease.id,
                 generation=manifest.generation,
-                manifest_kind="episode",
+                manifest_kind=lease.job_kind,
+                logical_role="memory_agent",
+                purpose=purpose,
                 range_start_event_id=manifest.range_start_event_id,
                 range_end_event_id=manifest.range_end_event_id,
                 pipeline_version=manifest.pipeline_version,
@@ -758,6 +837,11 @@ class MemoryRepository:
                 prompt_version=manifest.prompt_version,
                 input_schema_version=manifest.input_schema_version,
                 output_schema_version=manifest.output_schema_version,
+                model_config_version_id=model_config_version_id,
+                credential_version_id=credential_version_id,
+                timezone_snapshot=timezone_snapshot,
+                prompt_bundle_sha256=prompt_bundle_sha256,
+                capability_snapshot_sha256=capability_snapshot_sha256,
                 input_token_estimate=manifest.input_token_estimate,
                 image_count=manifest.image_count,
                 manifest_sha256=manifest.manifest_sha256,
@@ -785,6 +869,9 @@ class MemoryRepository:
                     inclusion_role="episode",
                     trust_class=source.trust.value,
                     source_content_sha256=source.content_sha256,
+                    source_revision=source.revision,
+                    source_redacted=source.redacted,
+                    source_visual_only=source.visual_only,
                     selection_reason_code="memory_trigger",
                 )
             )
@@ -881,8 +968,9 @@ class MemoryRepository:
                 retention_class="memory_proposal",
             )
             .on_conflict_do_nothing(constraint="uq_memory_proposals_idempotency")
+            .returning(memory_proposals.c.id)
         )
-        if cast(CursorResult[Any], result).rowcount != 1:
+        if result.scalar_one_or_none() is None:
             await self._require_matching_proposal_replay(
                 validated,
                 recorded_proposal_id=persisted_proposal_id,
@@ -1283,8 +1371,8 @@ class MemoryRepository:
                         messages.c.is_tombstone.is_(True),
                         messages.c.current_revision_no != message_revisions.c.revision_no,
                         message_revisions.c.redacted_at.is_not(None),
-                        message_revisions.c.content_sha256.is_(None),
-                        message_revisions.c.content_sha256
+                        evidence_hash_expression().is_(None),
+                        evidence_hash_expression()
                         != memory_proposal_evidence.c.source_content_sha256,
                     ),
                 )
@@ -1475,7 +1563,7 @@ class MemoryRepository:
                     source_content_sha256=evidence.source_content_sha256,
                     created_at=current_time,
                 )
-                .on_conflict_do_nothing(constraint="pk_memory_evidence")
+                .on_conflict_do_nothing(constraint="uq_memory_evidence_source")
             )
         await self._session.execute(
             update(memory_proposals)
@@ -2039,13 +2127,12 @@ class MemoryRepository:
         )
         if row is None:
             return False
-        if row.get("status") == "forgotten":
-            return True
-        await self._session.execute(
-            update(memories)
-            .where(memories.c.id == memory_id, memories.c.account_id == account_id)
-            .values(status="forgotten", forgotten_at=current_time, updated_at=current_time)
-        )
+        if row.get("status") != "forgotten":
+            await self._session.execute(
+                update(memories)
+                .where(memories.c.id == memory_id, memories.c.account_id == account_id)
+                .values(status="forgotten", forgotten_at=current_time, updated_at=current_time)
+            )
         await self._session.execute(
             update(memory_versions)
             .where(
@@ -2059,14 +2146,76 @@ class MemoryRepository:
         await self._session.execute(
             update(embedding_records)
             .where(
+                embedding_records.c.account_id == account_id,
                 embedding_records.c.memory_version_id.in_(
                     select(memory_versions.c.id).where(
                         memory_versions.c.memory_id == memory_id,
                         memory_versions.c.account_id == account_id,
                     )
-                )
+                ),
             )
             .values(state="invalidated", invalidated_at=current_time)
+        )
+        proposal_scope = or_(
+            memory_proposals.c.id.in_(
+                select(memory_proposal_targets.c.proposal_id).where(
+                    memory_proposal_targets.c.account_id == account_id,
+                    memory_proposal_targets.c.target_memory_id == memory_id,
+                )
+            ),
+            memory_proposals.c.accepted_memory_version_id.in_(
+                select(memory_versions.c.id).where(
+                    memory_versions.c.account_id == account_id,
+                    memory_versions.c.memory_id == memory_id,
+                )
+            ),
+            memory_proposals.c.id.in_(
+                select(memory_proposal_evidence.c.proposal_id)
+                .select_from(
+                    memory_proposal_evidence.join(
+                        memory_evidence,
+                        and_(
+                            memory_evidence.c.message_revision_id
+                            == memory_proposal_evidence.c.message_revision_id,
+                            memory_evidence.c.account_id == memory_proposal_evidence.c.account_id,
+                        ),
+                    )
+                )
+                .where(
+                    memory_proposal_evidence.c.account_id == account_id,
+                    memory_evidence.c.account_id == account_id,
+                    memory_evidence.c.memory_version_id.in_(
+                        select(memory_versions.c.id).where(
+                            memory_versions.c.account_id == account_id,
+                            memory_versions.c.memory_id == memory_id,
+                        )
+                    ),
+                )
+            ),
+        )
+        await self._session.execute(
+            update(memory_proposals)
+            .where(memory_proposals.c.account_id == account_id, proposal_scope)
+            .values(
+                proposed_payload={},
+                proposed_text=None,
+                state=case(
+                    (memory_proposals.c.state != ProposalState.ACCEPTED.value, "invalidated"),
+                    else_=memory_proposals.c.state,
+                ),
+                validation_code=case(
+                    (memory_proposals.c.state != ProposalState.ACCEPTED.value, "memory_forget"),
+                    else_=memory_proposals.c.validation_code,
+                ),
+                decision_reason_code=case(
+                    (memory_proposals.c.state != ProposalState.ACCEPTED.value, "memory_forget"),
+                    else_=memory_proposals.c.decision_reason_code,
+                ),
+                decided_at=case(
+                    (memory_proposals.c.state != ProposalState.ACCEPTED.value, current_time),
+                    else_=memory_proposals.c.decided_at,
+                ),
+            )
         )
         return True
 
@@ -2167,6 +2316,186 @@ class MemoryRepository:
                     .values(invalidation_state="invalidated", redacted_at=current_time)
                 )
         return request_id
+
+    async def reconcile_erasure_request(
+        self,
+        *,
+        account_id: UUID,
+        request_id: UUID,
+        erasure_scope_secret: bytes,
+        now: datetime,
+    ) -> bool:
+        """Advance queued erasure with durable per-step progress.
+
+        Control-side request creation and the worker-side redaction are separate
+        transactions.  The row lock makes a duplicate wakeup harmless; each
+        progress insert is idempotent so a crash can resume at the next step.
+        Contact/account requests quiesce the scope, redact canonical and derived
+        payloads, and complete only after physical cleanup and inventory evidence.
+        """
+
+        current_time = require_aware(now, "now")
+        if account_id.int == 0 or request_id.int == 0 or len(erasure_scope_secret) < 32:
+            raise ValueError("erasure reconciliation input is invalid")
+        row = (
+            (
+                await self._session.execute(
+                    select(data_erasure_requests)
+                    .where(
+                        data_erasure_requests.c.id == request_id,
+                        data_erasure_requests.c.account_id == account_id,
+                        or_(
+                            data_erasure_requests.c.state.in_(
+                                (
+                                    "requested",
+                                    "quiescing",
+                                    "redacting",
+                                    "media_cleanup",
+                                    "derived_cleanup",
+                                )
+                            ),
+                            and_(
+                                data_erasure_requests.c.state == "failed",
+                                data_erasure_requests.c.last_error_code
+                                == "ERASURE_SCOPE_PIPELINE_UNAVAILABLE",
+                            ),
+                        ),
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return False
+
+        if row["scope_type"] in {"contact", "account"}:
+            from telegram_userbot.adapters.persistence.scope_erasure_repository import (  # noqa: PLC0415
+                ScopeErasureRepository,
+            )
+
+            if row["scope_type"] == "contact" and not isinstance(row["contact_id"], UUID):
+                raise ValueError("erasure contact scope is invalid")
+            await ScopeErasureRepository(self._session).prepare(
+                account_id=account_id,
+                request_id=request_id,
+                contact_id=cast(UUID, row["contact_id"])
+                if row["scope_type"] == "contact"
+                else None,
+                now=current_time,
+                scope_secret=erasure_scope_secret,
+                policy_version=int(row["policy_version"]),
+            )
+            return True
+
+        step_names = ("logical_redaction", "ledger", "finalize")
+        for ordinal, step_name in enumerate(step_names, start=1):
+            progress_key = hashlib.sha256(
+                request_id.bytes + ordinal.to_bytes(2, "big") + step_name.encode("ascii")
+            ).digest()
+            await self._session.execute(
+                postgresql_insert(erasure_progress)
+                .values(
+                    request_id=request_id,
+                    step_name=step_name,
+                    state="pending",
+                    idempotency_key=progress_key,
+                    attempt_count=0,
+                    updated_at=current_time,
+                )
+                .on_conflict_do_nothing(constraint="uq_erasure_progress_request_step")
+            )
+
+        if row["scope_type"] != "memory" or row["memory_id"] is None:
+            await self._session.execute(
+                update(data_erasure_requests)
+                .where(
+                    data_erasure_requests.c.id == request_id,
+                    data_erasure_requests.c.account_id == account_id,
+                )
+                .values(
+                    state="failed",
+                    last_error_code="ERASURE_SCOPE_PIPELINE_UNAVAILABLE",
+                    updated_at=current_time,
+                )
+            )
+            await self._session.execute(
+                update(erasure_progress)
+                .where(erasure_progress.c.request_id == request_id)
+                .values(state="failed", updated_at=current_time)
+            )
+            return True
+
+        memory_id = cast(UUID, row["memory_id"])
+        await self._session.execute(
+            update(data_erasure_requests)
+            .where(
+                data_erasure_requests.c.id == request_id,
+                data_erasure_requests.c.account_id == account_id,
+            )
+            .values(state="redacting", updated_at=current_time)
+        )
+        await self.forget_memory(
+            account_id=account_id,
+            memory_id=memory_id,
+            reason="queued_erasure",
+            now=current_time,
+        )
+        await self._session.execute(
+            update(erasure_progress)
+            .where(
+                erasure_progress.c.request_id == request_id,
+                erasure_progress.c.step_name == "logical_redaction",
+            )
+            .values(state="completed", updated_at=current_time)
+        )
+        await self._session.execute(
+            postgresql_insert(erasure_ledger)
+            .values(
+                account_scope_hmac=hmac.new(
+                    erasure_scope_secret, account_id.bytes, "sha256"
+                ).digest(),
+                scope_type="memory",
+                target_scope_hmac=hmac.new(
+                    erasure_scope_secret, memory_id.bytes, "sha256"
+                ).digest(),
+                request_id=request_id,
+                policy_version=int(row["policy_version"]),
+                completed_at=current_time,
+            )
+            .on_conflict_do_nothing(index_elements=[erasure_ledger.c.request_id])
+        )
+        await self._session.execute(
+            update(erasure_progress)
+            .where(
+                erasure_progress.c.request_id == request_id,
+                erasure_progress.c.step_name == "ledger",
+            )
+            .values(state="completed", updated_at=current_time)
+        )
+        await self._session.execute(
+            update(data_erasure_requests)
+            .where(
+                data_erasure_requests.c.id == request_id,
+                data_erasure_requests.c.account_id == account_id,
+            )
+            .values(
+                state="completed",
+                completed_at=current_time,
+                updated_at=current_time,
+                last_error_code=None,
+            )
+        )
+        await self._session.execute(
+            update(erasure_progress)
+            .where(
+                erasure_progress.c.request_id == request_id,
+                erasure_progress.c.step_name == "finalize",
+            )
+            .values(state="completed", updated_at=current_time)
+        )
+        return True
 
     async def execute_next_review_action(
         self,
@@ -2682,8 +3011,8 @@ class MemoryRepository:
                             messages.c.is_tombstone.is_(True),
                             messages.c.current_revision_no != message_revisions.c.revision_no,
                             message_revisions.c.redacted_at.is_not(None),
-                            message_revisions.c.content_sha256.is_(None),
-                            message_revisions.c.content_sha256
+                            evidence_hash_expression().is_(None),
+                            evidence_hash_expression()
                             != memory_proposal_evidence.c.source_content_sha256,
                         ),
                     )

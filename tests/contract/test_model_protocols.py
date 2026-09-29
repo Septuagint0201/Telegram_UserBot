@@ -2,6 +2,7 @@ import asyncio
 import base64
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import Any, cast
 from uuid import uuid7
 
 import pytest
@@ -20,6 +21,13 @@ from telegram_userbot.adapters.llm import (
     build_generation_request,
     normalize_embedding_response,
     normalize_generation_response,
+)
+from telegram_userbot.adapters.llm.protocols import (
+    _image_base64,
+    _image_mime,
+    _stream_body,
+    _stream_event_text,
+    _stream_text,
 )
 from telegram_userbot.domain.model_config import (
     CanonicalModelConfig,
@@ -163,6 +171,212 @@ def test_generation_wire_rejects_legacy_or_unresolved_contracts() -> None:
             SensitiveValue("SYNTHETIC_KEY"),
             image_capabilities(ModelProtocol.OPENAI_CHAT_COMPLETIONS),
         )
+
+
+@pytest.mark.contract
+def test_generation_wire_resolves_optional_chat_fields_and_omits_optional_values() -> None:
+    chat = replace(
+        config(ModelProtocol.OPENAI_CHAT_COMPLETIONS),
+        protocol_options={"token_limit_field": "auto"},
+    )
+    no_schema = replace(generation(), response_schema=None)
+    request = build_generation_request(
+        chat,
+        no_schema,
+        SensitiveValue("SYNTHETIC_KEY"),
+        replace(
+            image_capabilities(ModelProtocol.OPENAI_CHAT_COMPLETIONS),
+            chat_token_limit_field=cast(
+                str,
+                config(ModelProtocol.OPENAI_CHAT_COMPLETIONS).protocol_options["token_limit_field"],
+            ),
+        ),
+    )
+    body = request.body.reveal_for_use()
+    assert body["max_completion_tokens"] == 200
+    assert "response_format" not in body
+
+    messages = replace(config(ModelProtocol.ANTHROPIC_MESSAGES), temperature=None)
+    user_only = CanonicalGenerationRequest(
+        (CanonicalMessage("user", (CanonicalContent(ContentKind.TEXT, SensitiveValue("input")),)),),
+        response_schema=None,
+    )
+    messages_request = build_generation_request(
+        messages,
+        user_only,
+        SensitiveValue("SYNTHETIC_KEY"),
+        image_capabilities(ModelProtocol.ANTHROPIC_MESSAGES),
+    )
+    messages_body = messages_request.body.reveal_for_use()
+    assert "system" not in messages_body
+    assert "output_config" not in messages_body
+    assert "temperature" not in messages_body
+
+
+@pytest.mark.contract
+def test_protocol_image_helpers_fail_closed_for_incomplete_image_objects() -> None:
+    incomplete = cast(Any, type("IncompleteImage", (), {"image_bytes": None})())
+    with pytest.raises(ProviderProtocolError, match="IMAGE_PAYLOAD_INVALID"):
+        _image_base64(incomplete)
+
+    incomplete_mime = cast(Any, type("IncompleteImage", (), {"image_mime": None})())
+    with pytest.raises(ProviderProtocolError, match="IMAGE_PAYLOAD_INVALID"):
+        _image_mime(incomplete_mime)
+
+
+@pytest.mark.contract
+def test_stream_text_rejects_non_mapping_and_malformed_protocol_events() -> None:
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_MALFORMED"):
+        _stream_text((SensitiveValue(cast(Any, "not-a-mapping")),), ModelProtocol.OPENAI_RESPONSES)
+
+    malformed = (
+        (ModelProtocol.OPENAI_CHAT_COMPLETIONS, {"choices": "not-a-sequence"}),
+        (ModelProtocol.OPENAI_CHAT_COMPLETIONS, {"choices": [42]}),
+        (ModelProtocol.OPENAI_CHAT_COMPLETIONS, {"choices": [{"delta": "not-a-map"}]}),
+        (ModelProtocol.ANTHROPIC_MESSAGES, {"type": "content_block_delta", "delta": "bad"}),
+    )
+    for protocol, event in malformed:
+        with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_MALFORMED"):
+            _stream_event_text(event, protocol)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("protocol", "events"),
+    [
+        (ModelProtocol.OPENAI_RESPONSES, ({"type": "response.output_text.delta", "delta": "x"},)),
+        (
+            ModelProtocol.OPENAI_RESPONSES,
+            ({"type": "response.completed", "response": "bad"},),
+        ),
+        (
+            ModelProtocol.OPENAI_RESPONSES,
+            (
+                {
+                    "type": "response.completed",
+                    "response": {"status": "completed", "usage": "bad"},
+                },
+            ),
+        ),
+        (ModelProtocol.OPENAI_CHAT_COMPLETIONS, ({"choices": "bad"},)),
+        (ModelProtocol.OPENAI_CHAT_COMPLETIONS, ({"choices": [42]},)),
+        (
+            ModelProtocol.OPENAI_CHAT_COMPLETIONS,
+            ({"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},),
+        ),
+        (
+            ModelProtocol.ANTHROPIC_MESSAGES,
+            ({"type": "message_start", "message": {"usage": {}}},),
+        ),
+        (
+            ModelProtocol.ANTHROPIC_MESSAGES,
+            (
+                {"type": "message_start", "message": "bad"},
+                {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {}},
+                {"type": "message_stop"},
+            ),
+        ),
+        (
+            ModelProtocol.ANTHROPIC_MESSAGES,
+            (
+                {"type": "message_start", "message": {"usage": {}}},
+                {"type": "message_delta", "delta": "bad", "usage": {}},
+                {"type": "message_stop"},
+            ),
+        ),
+        (
+            ModelProtocol.ANTHROPIC_MESSAGES,
+            (
+                {"type": "message_start", "message": {"usage": "bad"}},
+                {"type": "message_delta", "delta": {}, "usage": {}},
+                {"type": "message_stop"},
+            ),
+        ),
+    ],
+)
+def test_stream_terminal_metadata_rejects_incomplete_sequences(
+    protocol: ModelProtocol, events: tuple[Mapping[str, object], ...]
+) -> None:
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_INCOMPLETE"):
+        _stream_body(tuple(SensitiveValue(event) for event in events), protocol)
+
+
+@pytest.mark.contract
+def test_stream_terminal_metadata_rejects_missing_message_stop_and_invalid_chat_metadata() -> None:
+    responses = (
+        SensitiveValue({"type": "message_start", "message": {"usage": {}}}),
+        SensitiveValue({"type": "message_delta", "delta": {}, "usage": {}}),
+    )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_INCOMPLETE"):
+        _stream_body(responses, ModelProtocol.ANTHROPIC_MESSAGES)
+
+    chat_events = (
+        SensitiveValue({"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+        SensitiveValue({"_transport_sse_done": True}),
+    )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_INCOMPLETE"):
+        _stream_body(chat_events, ModelProtocol.OPENAI_CHAT_COMPLETIONS)
+
+
+@pytest.mark.contract
+def test_stream_terminal_metadata_rejects_validly_terminated_malformed_events() -> None:
+    chat_done = (
+        SensitiveValue({"choices": "bad"}),
+        SensitiveValue({"_transport_sse_done": True}),
+    )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_INCOMPLETE"):
+        _stream_body(chat_done, ModelProtocol.OPENAI_CHAT_COMPLETIONS)
+
+    chat_choice = (
+        SensitiveValue({"choices": [42]}),
+        SensitiveValue({"_transport_sse_done": True}),
+    )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_INCOMPLETE"):
+        _stream_body(chat_choice, ModelProtocol.OPENAI_CHAT_COMPLETIONS)
+
+    messages_usage = (
+        SensitiveValue({"type": "message_start", "message": {"usage": "bad"}}),
+        SensitiveValue(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {},
+            }
+        ),
+        SensitiveValue({"type": "message_stop"}),
+    )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_INCOMPLETE"):
+        _stream_body(messages_usage, ModelProtocol.ANTHROPIC_MESSAGES)
+
+
+@pytest.mark.contract
+def test_generation_and_embedding_normalizers_reject_non_mapping_payload_types() -> None:
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_RESPONSE_MALFORMED"):
+        normalize_generation_response(
+            ModelProtocol.OPENAI_RESPONSES,
+            ProviderWireResponse(200, SensitiveValue(cast(Any, "not-a-mapping"))),
+        )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_RESPONSE_MALFORMED"):
+        normalize_embedding_response(
+            ProviderWireResponse(
+                200,
+                SensitiveValue(
+                    {"data": "not-a-sequence", "usage": {"input_tokens": 1, "output_tokens": 0}}
+                ),
+            )
+        )
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_RESPONSE_MALFORMED"):
+        normalize_embedding_response(
+            ProviderWireResponse(
+                200,
+                SensitiveValue(
+                    {
+                        "data": [{"index": 0, "embedding": "not-a-vector"}],
+                        "usage": {"input_tokens": 1, "output_tokens": 0},
+                    }
+                ),
+            )
+        )
     with pytest.raises(ProviderProtocolError, match="DETAIL"):
         CanonicalContent(
             ContentKind.IMAGE,
@@ -305,6 +519,19 @@ def test_stream_error_and_malformed_response_contracts() -> None:
         (
             SensitiveValue({"type": "response.output_text.delta", "delta": "SYNTHETIC_"}),
             SensitiveValue({"type": "response.output_text.delta", "delta": "OUTPUT"}),
+            SensitiveValue(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "status": "completed",
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 2,
+                            "total_tokens": 3,
+                        },
+                    },
+                }
+            ),
         ),
     )
     assert (
@@ -329,6 +556,18 @@ def test_stream_error_and_malformed_response_contracts() -> None:
             ModelProtocol.OPENAI_RESPONSES,
             ProviderWireResponse(200, SensitiveValue({"usage": {}})),
         )
+
+
+@pytest.mark.contract
+def test_chat_stream_requests_terminal_usage_chunk() -> None:
+    stream_request = replace(generation(), stream=True)
+    request = build_generation_request(
+        config(ModelProtocol.OPENAI_CHAT_COMPLETIONS),
+        stream_request,
+        SensitiveValue("SYNTHETIC_KEY"),
+        image_capabilities(ModelProtocol.OPENAI_CHAT_COMPLETIONS),
+    )
+    assert request.body.reveal_for_use()["stream_options"] == {"include_usage": True}
 
 
 @pytest.mark.contract
@@ -362,6 +601,8 @@ def test_embedding_wire_and_response_contract() -> None:
     [
         [{"index": 1, "embedding": [1, 0]}],
         [{"index": 0, "embedding": [1, float("nan")]}],
+        [{"index": 0, "embedding": [True, 0]}],
+        [{"index": 0, "embedding": ["1", 0]}],
         [{"index": 0, "embedding": [1, 0]}, {"index": 1, "embedding": [1]}],
     ],
 )
@@ -387,7 +628,23 @@ def test_stream_usage_and_embedding_error_boundaries_fail_closed() -> None:
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             }
         ),
-        (SensitiveValue({"choices": [{"delta": {"content": "SYNTHETIC_CHAT"}}]}),),
+        (
+            SensitiveValue(
+                {"choices": [{"delta": {"content": "SYNTHETIC_CHAT"}, "finish_reason": None}]}
+            ),
+            SensitiveValue({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+            SensitiveValue(
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                }
+            ),
+            SensitiveValue({"_transport_sse_done": True}),
+        ),
     )
     assert (
         normalize_generation_response(
@@ -403,7 +660,28 @@ def test_stream_usage_and_embedding_error_boundaries_fail_closed() -> None:
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             }
         ),
-        (SensitiveValue({"type": "content_block_delta", "delta": {"text": "SYNTHETIC_MESSAGES"}}),),
+        (
+            SensitiveValue(
+                {
+                    "type": "message_start",
+                    "message": {"usage": {"input_tokens": 1, "output_tokens": 0}},
+                }
+            ),
+            SensitiveValue(
+                {
+                    "type": "content_block_delta",
+                    "delta": {"text": "SYNTHETIC_MESSAGES"},
+                }
+            ),
+            SensitiveValue(
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 1},
+                }
+            ),
+            SensitiveValue({"type": "message_stop"}),
+        ),
     )
     assert (
         normalize_generation_response(
@@ -467,6 +745,177 @@ def test_stream_usage_and_embedding_error_boundaries_fail_closed() -> None:
         )
 
 
+@pytest.mark.contract
+@pytest.mark.parametrize("invalid_usage", [True, "1", 1.0])
+def test_usage_requires_exact_nonnegative_integers(invalid_usage: object) -> None:
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_USAGE_MALFORMED"):
+        normalize_generation_response(
+            ModelProtocol.OPENAI_RESPONSES,
+            ProviderWireResponse(
+                200,
+                SensitiveValue(
+                    {
+                        "output_text": "SYNTHETIC_OUTPUT",
+                        "status": "completed",
+                        "usage": {
+                            "input_tokens": invalid_usage,
+                            "output_tokens": 1,
+                        },
+                    }
+                ),
+            ),
+        )
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("protocol", "body"),
+    [
+        (
+            ModelProtocol.OPENAI_RESPONSES,
+            {
+                "output": [{"type": "message", "content": 42}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ),
+        (
+            ModelProtocol.OPENAI_CHAT_COMPLETIONS,
+            {
+                "choices": "not-a-choice-array",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        ),
+        (
+            ModelProtocol.ANTHROPIC_MESSAGES,
+            {
+                "content": 42,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ),
+    ],
+)
+def test_three_protocol_nonstream_malformed_payloads_fail_with_stable_error(
+    protocol: ModelProtocol,
+    body: Mapping[str, object],
+) -> None:
+    with pytest.raises(ProviderProtocolError, match=r"^PROVIDER_RESPONSE_MALFORMED$"):
+        normalize_generation_response(protocol, ProviderWireResponse(200, SensitiveValue(body)))
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("protocol", "response"),
+    [
+        (
+            ModelProtocol.OPENAI_RESPONSES,
+            ProviderWireResponse(
+                200,
+                SensitiveValue({}),
+                (
+                    SensitiveValue({"type": "response.output_text.delta", "delta": 42}),
+                    SensitiveValue(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "status": "completed",
+                                "usage": {"input_tokens": 1, "output_tokens": 1},
+                            },
+                        }
+                    ),
+                ),
+            ),
+        ),
+        (
+            ModelProtocol.OPENAI_CHAT_COMPLETIONS,
+            ProviderWireResponse(
+                200,
+                SensitiveValue({}),
+                (
+                    SensitiveValue(
+                        {"choices": [{"delta": {"content": 42}, "finish_reason": None}]}
+                    ),
+                    SensitiveValue({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+                    SensitiveValue(
+                        {
+                            "choices": [],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                        }
+                    ),
+                    SensitiveValue({"_transport_sse_done": True}),
+                ),
+            ),
+        ),
+        (
+            ModelProtocol.ANTHROPIC_MESSAGES,
+            ProviderWireResponse(
+                200,
+                SensitiveValue({}),
+                (
+                    SensitiveValue(
+                        {
+                            "type": "message_start",
+                            "message": {"usage": {"input_tokens": 1, "output_tokens": 0}},
+                        }
+                    ),
+                    SensitiveValue({"type": "content_block_delta", "delta": {"text": 42}}),
+                    SensitiveValue(
+                        {
+                            "type": "message_delta",
+                            "delta": {"stop_reason": "end_turn"},
+                            "usage": {"output_tokens": 1},
+                        }
+                    ),
+                    SensitiveValue({"type": "message_stop"}),
+                ),
+            ),
+        ),
+    ],
+)
+def test_three_protocol_streams_map_malformed_deltas_to_stable_errors(
+    protocol: ModelProtocol,
+    response: ProviderWireResponse,
+) -> None:
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_STREAM_MALFORMED"):
+        normalize_generation_response(protocol, response)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("protocol", "body"),
+    [
+        (
+            ModelProtocol.OPENAI_RESPONSES,
+            {
+                "output_text": "SYNTHETIC_OUTPUT",
+                "status": True,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ),
+        (
+            ModelProtocol.OPENAI_CHAT_COMPLETIONS,
+            {
+                "choices": [{"message": {"content": "SYNTHETIC_OUTPUT"}, "finish_reason": ""}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        ),
+        (
+            ModelProtocol.ANTHROPIC_MESSAGES,
+            {
+                "content": [{"type": "text", "text": "SYNTHETIC_OUTPUT"}],
+                "stop_reason": "contains whitespace",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ),
+    ],
+)
+def test_finish_reason_is_a_bounded_content_free_string(
+    protocol: ModelProtocol,
+    body: Mapping[str, object],
+) -> None:
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_FINISH_REASON_MALFORMED"):
+        normalize_generation_response(protocol, ProviderWireResponse(200, SensitiveValue(body)))
+
+
 class BlockingTransport:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -481,6 +930,81 @@ class BlockingTransport:
             self.cancelled = True
             raise
         raise AssertionError("unreachable")
+
+
+class StaticTransport:
+    def __init__(self, response: ProviderWireResponse) -> None:
+        self.response = response
+
+    async def send(self, request: ProviderWireRequest) -> ProviderWireResponse:
+        del request
+        return self.response
+
+
+@pytest.mark.contract
+@pytest.mark.asyncio
+async def test_canonical_client_enforces_requested_generation_output_ceiling() -> None:
+    client = CanonicalProtocolClient(
+        StaticTransport(
+            ProviderWireResponse(
+                200,
+                SensitiveValue(
+                    {
+                        "output_text": "SYNTHETIC_OUTPUT",
+                        "status": "completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 201},
+                    }
+                ),
+            )
+        )
+    )
+
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_OUTPUT_LIMIT_EXCEEDED"):
+        await client.generate(
+            config=config(ModelProtocol.OPENAI_RESPONSES),
+            request=generation(),
+            api_key=SensitiveValue("SYNTHETIC_KEY"),
+            capabilities=image_capabilities(ModelProtocol.OPENAI_RESPONSES),
+        )
+
+
+@pytest.mark.contract
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "data",
+    [
+        [{"index": 0, "embedding": [1, 0]}],
+        [
+            {"index": 0, "embedding": [1, 0, 0]},
+            {"index": 1, "embedding": [0, 1, 0]},
+        ],
+    ],
+)
+async def test_canonical_client_binds_embedding_count_and_dimensions_to_request(
+    data: list[dict[str, object]],
+) -> None:
+    client = CanonicalProtocolClient(
+        StaticTransport(
+            ProviderWireResponse(
+                200,
+                SensitiveValue(
+                    {
+                        "data": data,
+                        "usage": {"input_tokens": 2, "output_tokens": 0},
+                    }
+                ),
+            )
+        )
+    )
+
+    with pytest.raises(ProviderProtocolError, match="PROVIDER_RESPONSE_MALFORMED"):
+        await client.embed(
+            config=config(ModelProtocol.EMBEDDING),
+            request=CanonicalEmbeddingRequest(
+                (SensitiveValue("SYNTHETIC_A"), SensitiveValue("SYNTHETIC_B"))
+            ),
+            api_key=SensitiveValue("SYNTHETIC_KEY"),
+        )
 
 
 @pytest.mark.contract

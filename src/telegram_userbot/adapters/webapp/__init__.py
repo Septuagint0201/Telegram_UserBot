@@ -1,6 +1,13 @@
 """Key-only Telegram Web App adapter."""
 
-from telegram_userbot.adapters.webapp.app import ModelKeyMutationPort, create_key_web_app
+from telegram_userbot.adapters.webapp.app import (
+    ClientNetworkIdentityResolver,
+    ClientNetworkRateLimitPort,
+    DirectPeerClientResolver,
+    FixedWindowClientRateLimiter,
+    ModelKeyMutationPort,
+    create_key_web_app,
+)
 from telegram_userbot.adapters.webapp.auth import (
     IssuedLaunchToken,
     LaunchTokenCodec,
@@ -11,6 +18,10 @@ from telegram_userbot.adapters.webapp.auth import (
 from telegram_userbot.adapters.webapp.key_service import ModelKeyMutationService
 
 __all__ = [
+    "ClientNetworkIdentityResolver",
+    "ClientNetworkRateLimitPort",
+    "DirectPeerClientResolver",
+    "FixedWindowClientRateLimiter",
     "IssuedLaunchToken",
     "LaunchTokenCodec",
     "ModelKeyMutationPort",

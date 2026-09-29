@@ -1,0 +1,38 @@
+{
+  "services": {
+    "postgres": {
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "./postgres/bootstrap",
+          "target": "/docker-entrypoint-initdb.d",
+          "read_only": true,
+          "bind": {"create_host_path": false}
+        }
+      ],
+      "secrets": [
+        "postgres_database_password",
+        "app_database_password",
+        "control_database_password",
+        "worker_database_password",
+        "migrator_database_password",
+        "export_database_password",
+        "monitor_database_password"
+      ],
+      "group_add": [
+        "21008",
+        "21004",
+        "21005",
+        "21006",
+        "21007",
+        "21011",
+        "21017"
+      ],
+      "environment": {
+        "POSTGRES_PASSWORD_FILE": "/run/secrets/postgres_database_password",
+        "POSTGRES_INITDB_ARGS": "--auth-local=peer --auth-host=scram-sha-256",
+        "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256"
+      }
+    }
+  }
+}

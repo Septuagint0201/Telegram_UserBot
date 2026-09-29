@@ -50,6 +50,7 @@ class RepositoryFake(ContextRepository):
         self.deletion_critical = False
         self.claim_result = True
         self.commit_count = 0
+        self.erasure_revocations = 0
         self.initial_states: tuple[str, ...] = ()
         self.prepared_count = 0
         self.persisted_delete_after: datetime | None = None
@@ -152,6 +153,11 @@ class RepositoryFake(ContextRepository):
         )
         total = len(states) if states else self.prepared_count
         return ("send_unknown" if unknown else "delivered", sent, total)
+
+    async def reconcile_erasure_previews(
+        self, *, bot_identity: str, now: datetime, limit: int = 50
+    ) -> int:
+        return self.erasure_revocations
 
     async def due_preview_deletions(
         self,
@@ -558,3 +564,14 @@ async def test_durable_preview_delete_failure_is_persisted_and_alerted() -> None
     repository.deletion_critical = True
     assert await service.delete_due(now=NOW) == 0
     assert alerts[-1] == "preview_delete_failed_critical"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_erasure_revocation_commits_even_without_known_message_ids() -> None:
+    repository = RepositoryFake()
+    repository.erasure_revocations = 1
+    repository.due_deletions = ()
+    service = backend(repository, RebuilderFake(), GatewayFake())
+    assert await service.delete_due(now=NOW) == 0
+    assert repository.commit_count == 1

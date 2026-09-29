@@ -1,12 +1,16 @@
 from collections.abc import AsyncIterator, Iterator
 from os import environ
 from pathlib import Path
+from uuid import uuid4
 
 import psycopg
 import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
+from anyio import to_thread
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -18,7 +22,7 @@ from testcontainers.core.container import DockerContainer
 
 POSTGRES_IMAGE = (
     "pgvector/pgvector:0.8.6-pg17-bookworm@"
-    "sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38"
+    "sha256:f193b9c848deb27b0e892f85ed07b53fd83ccb1feb634ba415b1cdc44411bedc"
 )
 REDIS_IMAGE = (
     "redis:8.2.8-bookworm@sha256:2f7462b9e93e0a7ae2edf3a0a0babc8a4d29f8bfc50849b906b7caaef925edc1"
@@ -85,6 +89,7 @@ def migrated_database(postgres_dsn: str) -> Iterator[str]:
     previous = environ.get("TUDT_DATABASE_DSN")
     environ["TUDT_DATABASE_DSN"] = postgres_dsn
     config = Config(ROOT / "alembic.ini")
+    config.attributes["allow_test_database_dsn"] = True
     try:
         command.upgrade(config, "head")
         command.downgrade(config, "base")
@@ -113,6 +118,10 @@ def migrated_database(postgres_dsn: str) -> Iterator[str]:
         command.upgrade(config, "head")
         command.downgrade(config, "0014_m7_budget_integrity")
         command.upgrade(config, "head")
+        command.downgrade(config, "0024_runtime_fencing_provenance")
+        command.upgrade(config, "head")
+        command.downgrade(config, "0026_m8_data_export")
+        command.upgrade(config, "head")
 
         sync_dsn = postgres_dsn.replace("postgresql+psycopg://", "postgresql://", 1)
         role_scripts = (
@@ -123,6 +132,7 @@ def migrated_database(postgres_dsn: str) -> Iterator[str]:
             (ROOT / "deploy" / "postgres" / "m5_roles.sql").read_text(encoding="utf-8"),
             (ROOT / "deploy" / "postgres" / "m6_roles.sql").read_text(encoding="utf-8"),
             (ROOT / "deploy" / "postgres" / "m7_roles.sql").read_text(encoding="utf-8"),
+            (ROOT / "deploy" / "postgres" / "m8_roles.sql").read_text(encoding="utf-8"),
         )
         with psycopg.connect(sync_dsn, autocommit=True) as connection:
             for role_script in role_scripts:
@@ -156,3 +166,58 @@ async def db_session(postgres_engine: AsyncEngine) -> AsyncIterator[AsyncSession
         await session.close()
         await transaction.rollback()
         await connection.close()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def isolated_scope_erasure_engine(postgres_dsn: str) -> AsyncIterator[AsyncEngine]:
+    """Committed race/rollback tests must not leave tombstones in other tests' DB."""
+    name = "erasure_" + uuid4().hex
+    url = make_url(postgres_dsn)
+    admin_dsn = url.set(drivername="postgresql").render_as_string(hide_password=False)
+    test_url = url.set(database=name)
+
+    def create() -> None:
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                psycopg.sql.SQL("CREATE DATABASE {}").format(psycopg.sql.Identifier(name))
+            )
+        engine = create_engine(test_url)
+        try:
+            with engine.begin() as connection:
+                config = Config(str(ROOT / "alembic.ini"))
+                config.attributes["connection"] = connection
+                command.upgrade(config, "head")
+                for number in range(1, 9):
+                    connection.execute(
+                        text(
+                            (ROOT / "deploy/postgres" / f"m{number}_roles.sql").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                    )
+        finally:
+            engine.dispose()
+
+    def drop() -> None:
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(
+                psycopg.sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    psycopg.sql.Identifier(name)
+                )
+            )
+
+    engine = create_async_engine(test_url)
+    try:
+        await to_thread.run_sync(create)
+        yield engine
+    finally:
+        await engine.dispose()
+        await to_thread.run_sync(drop)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def isolated_scope_erasure_session(
+    isolated_scope_erasure_engine: AsyncEngine,
+) -> AsyncIterator[AsyncSession]:
+    async with AsyncSession(isolated_scope_erasure_engine) as session, session.begin():
+        yield session

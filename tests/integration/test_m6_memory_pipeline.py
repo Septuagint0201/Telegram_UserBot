@@ -512,7 +512,7 @@ async def test_m6_durable_control_backend_empty_scope_is_metadata_only(
 
 
 @pytest.mark.integration
-async def test_m6_confirmed_review_actions_execute_accept_reject_and_forget(
+async def test_m6_confirmed_review_actions_execute_accept_reject_and_forget(  # noqa: PLR0915
     postgres_engine: AsyncEngine,
 ) -> None:
     connection = await postgres_engine.connect()
@@ -698,6 +698,25 @@ async def test_m6_confirmed_review_actions_execute_accept_reject_and_forget(
                 )
             ).one()
             assert version_row == ({}, None)
+            proposal_rows = (
+                await reader.execute(
+                    select(
+                        memory_proposals.c.id,
+                        memory_proposals.c.state,
+                        memory_proposals.c.proposed_payload,
+                        memory_proposals.c.proposed_text,
+                    )
+                    .where(memory_proposals.c.id.in_((accepted_proposal, rejected_proposal)))
+                    .order_by(memory_proposals.c.id)
+                )
+            ).all()
+            proposal_by_id = {row.id: row for row in proposal_rows}
+            assert proposal_by_id[accepted_proposal].state == "accepted"
+            assert proposal_by_id[accepted_proposal].proposed_payload == {}
+            assert proposal_by_id[accepted_proposal].proposed_text is None
+            assert proposal_by_id[rejected_proposal].state == "invalidated"
+            assert proposal_by_id[rejected_proposal].proposed_payload == {}
+            assert proposal_by_id[rejected_proposal].proposed_text is None
             assert (
                 await reader.scalar(
                     select(memory_review_actions.c.state).where(

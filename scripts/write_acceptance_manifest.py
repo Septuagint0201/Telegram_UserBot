@@ -23,6 +23,7 @@ class RequirementRecord(TypedDict):
     evidence: list[str]
     tests: NotRequired[list[str]]
     reason: NotRequired[str]
+    evidence_scope: NotRequired[str]
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -68,6 +69,233 @@ def _tested_requirement(
     if reason is not None:
         record["reason"] = reason
     return record
+
+
+def _m8_tested_requirement(
+    requirement_id: str,
+    *evidence: str,
+    test_ids: tuple[str, ...],
+    junit_results: dict[str, JUnitStatus],
+) -> RequirementRecord:
+    """Bind a static or synthetic M8 contract to exact JUnit identities."""
+
+    record = _tested_requirement(
+        requirement_id,
+        *evidence,
+        test_ids=test_ids,
+        junit_results=junit_results,
+    )
+    record["evidence_scope"] = "ci-synthetic"
+    return record
+
+
+def _m8_not_run_requirement(
+    requirement_id: str,
+    *evidence: str,
+    test_ids: tuple[str, ...],
+    reason: str,
+) -> RequirementRecord:
+    """Record supporting static tests without overstating unrun runtime evidence."""
+
+    record: RequirementRecord = {
+        "id": requirement_id,
+        "status": "NOT RUN",
+        "evidence": list(evidence),
+        "reason": reason,
+        "evidence_scope": "source-static",
+    }
+    if test_ids:
+        record["tests"] = list(test_ids)
+    return record
+
+
+def _requirements_for_m8(_root: Path) -> list[RequirementRecord]:
+    """Return M8 traceability without claiming unrun Ubuntu operations passed."""
+
+    runtime_reason = "CI static and synthetic contracts do not constitute Ubuntu runtime evidence"
+    not_run_mapping: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], ...] = (
+        (
+            "M8-001",
+            ("deploy/images/base-images.lock.json", "deploy/sbom/README.md"),
+            (
+                "tests.operations.test_m8_supply_chain_static::"
+                "test_m8_base_image_lock_is_valid_and_platform_specific",
+                "tests.operations.test_m8_supply_chain_static::"
+                "test_image_dockerfiles_use_posix_source_commit_guard_and_package_ops_scripts",
+            ),
+            "immutable production images and their SBOMs have not been built and reviewed",
+        ),
+        (
+            "M8-002",
+            ("deploy/compose.yaml",),
+            (
+                "tests.operations.test_m8_compose_static::"
+                "test_production_compose_has_exact_services_network_membership_and_volumes",
+            ),
+            runtime_reason,
+        ),
+        (
+            "M8-003",
+            ("deploy/config/secret-files.json", "deploy/compose.yaml"),
+            (
+                "tests.operations.test_m8_compose_static::"
+                "test_secrets_are_files_with_exact_minimal_service_mounts",
+                "tests.operations.test_m8_postgres_bootstrap_static::"
+                "test_steady_postgres_has_no_database_password_mount",
+            ),
+            (
+                "selected file-secret and mount contracts are covered statically, but complete "
+                "runtime identity and Session/keyring/backup permission separation have not run "
+                "in Ubuntu Compose"
+            ),
+        ),
+        (
+            "M8-004",
+            ("deploy/caddy/Caddyfile",),
+            (
+                "tests.operations.test_m8_caddy_static::"
+                "test_caddy_only_routes_key_webapp_and_credential_api",
+            ),
+            "Caddy has not been parsed and served with TLS on Ubuntu",
+        ),
+        (
+            "M8-005",
+            ("deploy/compose.yaml", "docs/runbooks/m8-upgrade-rollback.md"),
+            (
+                "tests.operations.test_m8_postgres_bootstrap_static::"
+                "test_role_closure_starts_with_privilege_reset_and_restores_readiness_grant",
+            ),
+            runtime_reason,
+        ),
+        (
+            "M8-006",
+            ("deploy/postgres/run-backup.sh", "docs/runbooks/m8-backup-restore.md"),
+            (
+                "tests.operations.test_m8_restore_and_systemd::"
+                "test_backup_restore_scripts_and_runbooks_preserve_fail_closed_boundaries",
+            ),
+            (
+                "off-host backup target, retention, and restore owner remain undecided; "
+                "pgBackRest and WAL backup have not been exercised on an Ubuntu target"
+            ),
+        ),
+        (
+            "M8-007",
+            ("deploy/ops/session_backup.py", "docs/runbooks/m8-backup-restore.md"),
+            (
+                "tests.operations.test_m8_ops_scripts::"
+                "test_session_backup_identity_json_rejects_duplicate_security_keys",
+            ),
+            "Telethon session backup has not been exercised after an app-owner shutdown",
+        ),
+        (
+            "M8-008",
+            ("deploy/ops/restore_gate.py", "docs/runbooks/m8-backup-restore.md"),
+            (
+                "tests.operations.test_m8_restore_and_systemd::"
+                "test_restore_gate_blocks_every_unreconciled_side_effect_surface",
+            ),
+            (
+                "restore and erasure-ledger replay have not been completed on an isolated "
+                "Ubuntu target"
+            ),
+        ),
+        (
+            "M8-009",
+            ("src/telegram_userbot/platform/health/disk.py",),
+            (
+                "tests.operations.test_m8_ops_scripts::"
+                "test_monitor_disk_stats_matches_canonical_95_percent_and_one_gib_boundaries",
+            ),
+            (
+                "the disk-boundary calculation is covered statically, but retention, media "
+                "reference protection, and disk-pressure behavior have not run in Compose"
+            ),
+        ),
+        (
+            "M8-010",
+            ("src/telegram_userbot/platform/health/status.py",),
+            (
+                "tests.operations.test_m8_ops_scripts::"
+                "test_monitor_uses_latest_service_projection_complete_jobs_and_free_space_gate",
+            ),
+            (
+                "the service projection contract is covered statically, but runtime logs, "
+                "metrics, alerts, redaction, and /server_status have not run in Ubuntu Compose"
+            ),
+        ),
+        (
+            "M8-011",
+            ("deploy/ops/data_export.py", "docs/runbooks/m8-backup-restore.md"),
+            (
+                "tests.operations.test_m8_data_export_leases::"
+                "test_reclaimed_export_aborts_and_cleans_only_its_attempt_artifact",
+            ),
+            (
+                "reclaimed-export cleanup is covered statically, but end-to-end age encryption, "
+                "recipient handling, and SSH/SFTP retrieval have not run on Ubuntu"
+            ),
+        ),
+        (
+            "M8-012",
+            ("docs/architecture/09-test-strategy.md",),
+            (
+                "tests.unit.platform.test_m8_managed_deadline::"
+                "test_managed_deadline_stops_after_sigterm_and_preserves_terminal_status",
+            ),
+            "shutdown and dependency recovery have not been exercised in production Compose",
+        ),
+        (
+            "M8-013",
+            ("docs/runbooks/m8-install.md", "docs/runbooks/m8-upgrade-rollback.md"),
+            (
+                "tests.operations.test_m8_restore_and_systemd::"
+                "test_backup_restore_scripts_and_runbooks_preserve_fail_closed_boundaries",
+            ),
+            (
+                "runbook fail-closed boundaries are covered statically, but a fresh Ubuntu "
+                "install, upgrade, rollback, patch, and restore reproduction has not run"
+            ),
+        ),
+        (
+            "M8-014",
+            ("deploy/compose.validation.yaml", "tests/operations"),
+            (
+                "tests.operations.test_m8_synthetic_ready::"
+                "test_synthetic_state_is_ready_but_explicitly_separate_from_production",
+            ),
+            "production Compose security and recovery integration has not been run on Ubuntu",
+        ),
+        (
+            "M8-015",
+            ("docs/architecture/09-test-strategy.md",),
+            (),
+            (
+                "the target VM's nominal 64 GiB disk has a 60.9 GiB root filesystem with "
+                "about 32.9 GiB free, which cannot prove the 40 GiB minimum; "
+                "the required quota-constrained 24-hour 2 vCPU / 4 GiB / 40 GiB soak "
+                "has not run"
+            ),
+        ),
+        (
+            "M8-016",
+            ("TODO.md", "docs/Implementation-Plan.md"),
+            (),
+            (
+                "M8 remains open while required production image, restore, integration, "
+                "and soak evidence is NOT RUN"
+            ),
+        ),
+    )
+    return [
+        _m8_not_run_requirement(
+            requirement_id,
+            *evidence,
+            test_ids=test_ids,
+            reason=reason,
+        )
+        for requirement_id, evidence, test_ids, reason in not_run_mapping
+    ]
 
 
 def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
@@ -875,6 +1103,8 @@ def _requirements_for(  # noqa: PLR0911 - milestone mappings remain explicit
             )
             for requirement_id, evidence, test_ids in m7_mapping
         ]
+    if milestone == "M8":
+        return _requirements_for_m8(root)
     raise ValueError("unsupported milestone")
 
 
@@ -934,19 +1164,30 @@ def build_manifest(root: Path, commit: str, *, milestone: str = "M0") -> dict[st
         "external_evidence": [
             {
                 "name": "telegram-provider-live-runtime"
-                if uses_disposable_services
+                if milestone != "M0"
                 else "telegram-provider-database-redis-runtime",
                 "status": "NOT RUN",
                 "reason": (
                     f"{milestone} validates only disposable services and local fakes"
                     if uses_disposable_services
-                    else "M0 explicitly contains no external adapters or credentials"
+                    else (
+                        "M0 explicitly contains no external adapters or credentials"
+                        if milestone == "M0"
+                        else "M8 CI runs only static and synthetic operations contracts"
+                    )
                 ),
             },
             {
                 "name": "ubuntu-production-deployment",
                 "status": "NOT RUN",
-                "reason": "production deployment evidence starts in M8",
+                "reason": (
+                    "production deployment evidence starts in M8"
+                    if milestone != "M8"
+                    else (
+                        "M8 CI contains no live Ubuntu deployment, credentials, Telegram, "
+                        "or provider calls"
+                    )
+                ),
             },
         ],
     }
@@ -962,7 +1203,7 @@ def main() -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument(
         "--milestone",
-        choices=("M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7"),
+        choices=("M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8"),
         default="M0",
     )
     parser.add_argument("--output", required=True, type=Path)

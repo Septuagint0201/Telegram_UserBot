@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 from uuid import uuid7
@@ -24,6 +24,7 @@ from telegram_userbot.adapters.media import (
     StoredMedia,
     ValidatedImage,
 )
+from telegram_userbot.adapters.media import cleanup as media_cleanup
 from telegram_userbot.adapters.media import storage as media_storage
 from telegram_userbot.adapters.persistence.media_repository import (
     MediaDeletionLease,
@@ -221,6 +222,74 @@ def test_private_store_is_atomic_hash_verified_and_provider_copy_clears_exif(
 
 
 @pytest.mark.unit
+def test_private_store_read_uses_one_bounded_stable_file_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = image_bytes()
+    image = ImageIngestor().validate_bytes(payload, declared_mime="image/png")
+    store = PrivateMediaStore(tmp_path / "stable-read")
+    stored = store.store_provider_copy(account_id=uuid7(), object_id=uuid7(), image=image)
+    real_open = os.open
+    real_fstat = os.fstat
+    open_flags: list[int] = []
+    calls = 0
+
+    def tracked_open(path: os.PathLike[str] | str, flags: int, *args: int) -> int:
+        open_flags.append(flags)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(media_storage.os, "open", tracked_open)  # type: ignore[attr-defined]
+    assert (
+        store.read_verified(
+            storage_key=stored.storage_key,
+            expected_sha256=stored.sha256,
+            max_bytes=len(payload) * 2,
+        )
+        == store.resolve_key(stored.storage_key).read_bytes()
+    )
+    # POSIX walks the root and every parent with descriptor-relative,
+    # no-follow opens; Windows uses one resolved-path file open.
+    assert open_flags
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        assert all(flags & nofollow for flags in open_flags)
+
+    def drifting_fstat(descriptor: int) -> os.stat_result:
+        nonlocal calls
+        current = real_fstat(descriptor)
+        calls += 1
+        if calls == 1:
+            return current
+        return cast(
+            os.stat_result,
+            SimpleNamespace(
+                st_dev=current.st_dev,
+                st_ino=current.st_ino,
+                st_mode=current.st_mode,
+                st_size=current.st_size + 1,
+                st_mtime_ns=current.st_mtime_ns,
+                st_ctime_ns=current.st_ctime_ns,
+            ),
+        )
+
+    monkeypatch.setattr(media_storage.os, "fstat", drifting_fstat)  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="media_object_changed"):
+        store.read_verified(
+            storage_key=stored.storage_key,
+            expected_sha256=stored.sha256,
+            max_bytes=len(payload) * 2,
+        )
+
+    with pytest.raises(ValueError, match="media_hash_invalid"):
+        store.read_verified(
+            storage_key=stored.storage_key,
+            expected_sha256=b"short",
+            max_bytes=len(payload),
+        )
+
+
+@pytest.mark.unit
 def test_private_store_delete_is_hash_verified_and_missing_is_idempotent(tmp_path: Path) -> None:
     payload = image_bytes()
     image = ImageIngestor().validate_bytes(payload, declared_mime="image/png")
@@ -242,12 +311,22 @@ def test_private_store_delete_is_hash_verified_and_missing_is_idempotent(tmp_pat
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_durable_media_cleanup_records_success_and_hash_failure(tmp_path: Path) -> None:
+async def test_durable_media_cleanup_records_success_and_hash_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    thread_calls: list[str] = []
+
+    async def run_in_thread(function, *args, **kwargs):  # type: ignore[no-untyped-def]
+        thread_calls.append(function.__name__)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(media_cleanup.asyncio, "to_thread", run_in_thread)  # type: ignore[attr-defined]
     payload = image_bytes()
     image = ImageIngestor().validate_bytes(payload, declared_mime="image/png")
     store = PrivateMediaStore(tmp_path / "durable-cleanup")
-    stored = store.store_original(account_id=uuid7(), object_id=uuid7(), image=image)
     account_id, object_id = uuid7(), uuid7()
+    stored = store.store_original(account_id=account_id, object_id=object_id, image=image)
     repository = AsyncMock(spec=MediaRepository)
     repository.claim_expired.return_value = (
         MediaDeletionLease(
@@ -269,10 +348,11 @@ async def test_durable_media_cleanup_records_success_and_hash_failure(tmp_path: 
     repository.finish_deletion.assert_awaited_once()
     assert repository.finish_deletion.await_args.kwargs["deleted"] is True
 
-    damaged = store.store_original(account_id=uuid7(), object_id=uuid7(), image=image)
+    damaged_account, damaged_id = uuid7(), uuid7()
+    damaged = store.store_original(account_id=damaged_account, object_id=damaged_id, image=image)
     repository.reset_mock()
     repository.claim_expired.return_value = (
-        MediaDeletionLease(uuid7(), uuid7(), damaged.storage_key, b"x" * 32, 2, 2),
+        MediaDeletionLease(damaged_id, damaged_account, damaged.storage_key, b"x" * 32, 2, 2),
     )
     repository.finish_deletion.return_value = MediaDeletionOutcome(True, True)
     alerts: list[str] = []
@@ -288,7 +368,7 @@ async def test_durable_media_cleanup_records_success_and_hash_failure(tmp_path: 
 
     repository.reset_mock()
     repository.claim_expired.return_value = (
-        MediaDeletionLease(uuid7(), uuid7(), "already-missing.png", b"m" * 32, 3, 1),
+        MediaDeletionLease(object_id, account_id, stored.storage_key, stored.sha256, 3, 1),
     )
     repository.finish_deletion.return_value = MediaDeletionOutcome(True)
     report = await DurableMediaCleanup(
@@ -299,7 +379,7 @@ async def test_durable_media_cleanup_records_success_and_hash_failure(tmp_path: 
 
     repository.reset_mock()
     repository.claim_expired.return_value = (
-        MediaDeletionLease(uuid7(), uuid7(), "still-missing.png", b"m" * 32, 4, 1),
+        MediaDeletionLease(object_id, account_id, stored.storage_key, stored.sha256, 4, 1),
     )
     repository.finish_deletion.return_value = MediaDeletionOutcome(False)
     report = await DurableMediaCleanup(
@@ -307,6 +387,28 @@ async def test_durable_media_cleanup_records_success_and_hash_failure(tmp_path: 
         store=store,
     ).run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
     assert report == type(report)(0, 0, 0)
+    assert thread_calls == ["erase_object"] * 4
+
+    repository.reset_mock()
+    repository.claim_expired.return_value = ()
+    report = await DurableMediaCleanup(
+        repository=cast(MediaRepository, repository),
+        store=store,
+    ).run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
+    assert report == type(report)(0, 0, 0)
+    repository.commit_cleanup_boundary.assert_not_awaited()
+
+    repository.reset_mock()
+    repository.claim_expired.return_value = (
+        MediaDeletionLease(damaged_id, damaged_account, damaged.storage_key, b"x" * 32, 5, 1),
+    )
+    repository.finish_deletion.return_value = MediaDeletionOutcome(False)
+    report = await DurableMediaCleanup(
+        repository=cast(MediaRepository, repository),
+        store=store,
+    ).run_once(now=datetime(2030, 1, 1, tzinfo=UTC))
+    assert report == type(report)(0, 0, 0)
+    repository.finish_deletion.assert_awaited_once()
 
 
 @pytest.mark.unit

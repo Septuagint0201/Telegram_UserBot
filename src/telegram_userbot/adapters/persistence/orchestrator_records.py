@@ -35,6 +35,7 @@ class ModelRunRecord:
     profile_id: UUID
     config_version_id: UUID
     credential_version_id: UUID
+    orchestration_claim_fingerprint: bytes
     input_fingerprint: bytes
     started_at: datetime
     snapshot: WorkSnapshot

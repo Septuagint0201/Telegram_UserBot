@@ -6,14 +6,36 @@ from pathlib import Path
 
 PROJECT_PACKAGE = "telegram_userbot"
 COMPOSITION_PROCESS_FILES = frozenset(
-    {"processes/conversation_runtime.py", "processes/memory_runtime.py"}
+    {
+        "processes/app.py",
+        # M8 keeps lifecycle and provider/database assembly in process-owned
+        # modules.  They are composition roots even though ``app.py``,
+        # ``control.py`` and ``worker.py`` delegate parts of startup to them.
+        "processes/app_scheduler.py",
+        "processes/conversation_runtime.py",
+        "processes/control.py",
+        "processes/memory_runtime.py",
+        "processes/embedding_runtime.py",
+        "processes/memory_pipeline.py",
+        "processes/proactive_pipeline.py",
+        "processes/memory_periods.py",
+        "processes/media_cleanup.py",
+        "processes/erasure_reconcile.py",
+        "processes/migrate.py",
+        "processes/model_gateway.py",
+        "processes/runtime_outbox.py",
+        "processes/worker.py",
+        "processes/worker_executors.py",
+    }
 )
 ALLOWED_ADAPTER_BRIDGES = frozenset(
     {
         ("embedding", "llm"),
+        ("llm", "persistence"),
         ("media", "persistence"),
         ("persistence", "media"),
         ("queue", "persistence"),
+        ("telegram_bot", "queue"),
         ("telegram_bot", "persistence"),
         ("telegram_bot", "webapp"),
         ("webapp", "persistence"),

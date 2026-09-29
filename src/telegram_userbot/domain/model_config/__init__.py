@@ -7,6 +7,7 @@ from telegram_userbot.domain.model_config.capabilities import (
 from telegram_userbot.domain.model_config.config import (
     GENERATION_PROTOCOLS,
     GENERATION_ROLES,
+    MAX_GENERATION_OUTPUT_TOKENS,
     CanonicalModelConfig,
     LogicalRole,
     ModelConfigurationError,
@@ -18,6 +19,7 @@ from telegram_userbot.domain.model_config.config import (
 __all__ = [
     "GENERATION_PROTOCOLS",
     "GENERATION_ROLES",
+    "MAX_GENERATION_OUTPUT_TOKENS",
     "CanonicalModelConfig",
     "LogicalRole",
     "ModelCapabilities",

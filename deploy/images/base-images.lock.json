@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "target_platform": {
+    "os": "linux",
+    "architecture": "amd64"
+  },
+  "verified_at": "2026-08-23",
+  "verification_method": "Registry manifest inspection from an Ubuntu 26.04 amd64 validation host; manifests only, images not pulled",
+  "base_images": [
+    {
+      "id": "python_runtime",
+      "purpose": "Application and operations image base",
+      "reference": "python:3.14.7-slim-bookworm@sha256:ff4ceef5258b9303b40c004af0bd31ac82c6248a6b951f9d9b329bf456f1f4b7",
+      "index_digest": "sha256:23c59390fc717bf09f9336908199a0ae75d9c4264bf296123f94ad772fea3b52",
+      "platform_digest": "sha256:ff4ceef5258b9303b40c004af0bd31ac82c6248a6b951f9d9b329bf456f1f4b7"
+    },
+    {
+      "id": "postgres_pgvector",
+      "purpose": "PostgreSQL 17, pgvector 0.8.6 and pgBackRest 2.59.1 compatibility base",
+      "reference": "pgvector/pgvector:0.8.6-pg17-bookworm@sha256:f193b9c848deb27b0e892f85ed07b53fd83ccb1feb634ba415b1cdc44411bedc",
+      "index_digest": "sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38",
+      "platform_digest": "sha256:f193b9c848deb27b0e892f85ed07b53fd83ccb1feb634ba415b1cdc44411bedc"
+    },
+    {
+      "id": "redis",
+      "purpose": "Redis 8.2.8 queue and cache base",
+      "reference": "redis:8.2.8-bookworm@sha256:d9f0312a780ed4ad4c22c05790c20b3902498b563ba01f3f1134678b9bd2f311",
+      "index_digest": "sha256:2f7462b9e93e0a7ae2edf3a0a0babc8a4d29f8bfc50849b906b7caaef925edc1",
+      "platform_digest": "sha256:d9f0312a780ed4ad4c22c05790c20b3902498b563ba01f3f1134678b9bd2f311"
+    },
+    {
+      "id": "caddy_runtime",
+      "purpose": "Caddy 2.11.4 gateway runtime base",
+      "reference": "caddy:2.11.4-alpine@sha256:98eb57d882ccd5213d1688764db10c1ca2c58a1ca3a6717a3411ad798f7a423a",
+      "index_digest": "sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648",
+      "platform_digest": "sha256:98eb57d882ccd5213d1688764db10c1ca2c58a1ca3a6717a3411ad798f7a423a"
+    }
+  ],
+  "production_artifacts": {
+    "status": "NOT_BUILT",
+    "images": [],
+    "sbom_status": "NOT_GENERATED",
+    "license_status": "NOT_GENERATED"
+  }
+}

@@ -1,7 +1,7 @@
 """PostgreSQL M7 schema and role contracts on the disposable service."""
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid7
 
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from telegram_userbot.adapters.persistence.proactive_repository import ProactiveRepository
 from telegram_userbot.adapters.persistence.schema import (
     M7_TABLES,
+    M8_MODEL_TABLES,
     conversation_turns,
     conversations,
     copilot_drafts,
@@ -25,18 +26,20 @@ from telegram_userbot.adapters.persistence.schema import (
 )
 from telegram_userbot.domain.proactive.models import BudgetLimits, BudgetReservation
 from telegram_userbot.domain.proactive.pipeline import ProactiveTarget
+from telegram_userbot.platform.compatibility import EXPECTED_SCHEMA_REVISION
 from tests.integration.test_m1_persistence import NOW, seed_conversation
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-async def seed_budget_binding(
+async def seed_budget_binding(  # noqa: PLR0913 - scoped synthetic authorization fixture
     session: AsyncSession,
     account_id: UUID,
     contact_id: UUID,
     conversation_id: UUID,
     *,
     policy_id: UUID | None = None,
+    now: datetime = NOW,
 ) -> tuple[UUID, UUID, UUID]:
     policy_id = uuid7() if policy_id is None else policy_id
     candidate_id = uuid7()
@@ -62,9 +65,9 @@ async def seed_budget_binding(
             generation=1,
             membership_hash=b"m" * 32,
             state="send_selected",
-            window_start_at=NOW,
-            window_end_at=NOW + timedelta(hours=1),
-            due_at=NOW,
+            window_start_at=now,
+            window_end_at=now + timedelta(hours=1),
+            due_at=now,
             policy_version_id=policy_id,
             timezone_name="UTC",
             mode_version=1,
@@ -100,9 +103,9 @@ async def test_m7_schema_inventory_constraints_and_head(db_session: AsyncSession
             "AND tablename LIKE 'proactive_%' ORDER BY tablename"
         )
     )
-    assert set(rows) == set(M7_TABLES)
+    assert set(rows) == set(M7_TABLES) | set(M8_MODEL_TABLES)
     assert await db_session.scalar(text("SELECT version_num FROM alembic_version")) == (
-        "0024_runtime_fencing_provenance"
+        EXPECTED_SCHEMA_REVISION
     )
     indexes = set(
         await db_session.scalars(
@@ -388,6 +391,7 @@ async def test_m7_terminal_candidate_job_is_not_reclaimed(db_session: AsyncSessi
             id=job_id,
             account_id=account_id,
             candidate_id=candidate_id,
+            conversation_id=conversation_id,
             job_kind="candidate_due",
             idempotency_key=b"t" * 32,
             available_at=NOW,

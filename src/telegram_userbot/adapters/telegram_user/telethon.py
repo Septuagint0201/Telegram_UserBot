@@ -1,10 +1,11 @@
-"""Telethon side-effect adapter with an injected client and no Session ownership."""
+"""Telethon side-effect adapter with an injected connected client."""
 
 from collections.abc import Awaitable, Callable
 from typing import Protocol, cast
 
 from telethon import functions, types  # type: ignore[import-untyped]
 from telethon.errors import FloodWaitError, RPCError  # type: ignore[import-untyped]
+from telethon.tl import custom  # type: ignore[import-untyped]
 
 from telegram_userbot.application.ports.telegram import (
     TelegramFloodWaitError,
@@ -26,11 +27,44 @@ class TelethonClient(Protocol):
     def __call__(self, request: object) -> Awaitable[object]: ...
 
 
-class MessageResponse(Protocol):
-    id: int
-
-
 PeerResolver = Callable[[AccountId, ConversationId], Awaitable[object]]
+
+
+def _valid_message_id(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _sent_message_id(response: object, *, random_id: int) -> int:
+    """Extract the result without guessing which outgoing request was accepted."""
+
+    if isinstance(response, (types.Message, custom.Message, types.UpdateShortSentMessage)):
+        message_id = _valid_message_id(response.id)
+        if message_id is not None:
+            return message_id
+        raise TelegramSendUnknownError("telegram_response_message_id_invalid")
+
+    if isinstance(response, (types.Updates, types.UpdatesCombined)):
+        mappings = tuple(
+            update for update in response.updates if isinstance(update, types.UpdateMessageID)
+        )
+        matching_ids = {
+            message_id
+            for update in mappings
+            if update.random_id == random_id
+            if (message_id := _valid_message_id(update.id)) is not None
+        }
+        if len(matching_ids) == 1:
+            return matching_ids.pop()
+        if len(matching_ids) > 1:
+            raise TelegramSendUnknownError("telegram_response_message_id_ambiguous")
+        if mappings:
+            raise TelegramSendUnknownError("telegram_response_random_id_mismatch")
+
+    # The RPC may already have been accepted. Treat every unprovable response as
+    # unknown so the delivery state machine reconciles instead of blindly retrying.
+    raise TelegramSendUnknownError("telegram_response_missing_message_id")
 
 
 class TelethonTelegramGateway(TelegramGateway):
@@ -56,10 +90,7 @@ class TelethonTelegramGateway(TelegramGateway):
             raise TelegramSendUnknownError("send_unknown") from error
         except RPCError as error:
             raise TelegramPermanentError("telegram_rpc_rejected") from error
-        message_id = getattr(response, "id", None)
-        if not isinstance(message_id, int):
-            raise TelegramTransientError("telegram_response_missing_message_id")
-        return TelegramSendReceipt(message_id)
+        return TelegramSendReceipt(_sent_message_id(response, random_id=request.random_id))
 
     async def acknowledge_read(self, request: TelegramReadRequest) -> TelegramReadReceipt:
         peer = await self._resolve_peer(request.account_id, request.conversation_id)

@@ -1,0 +1,46 @@
+# LOCAL SYNTHETIC RESTORE ONLY. This third overlay is accepted only when
+# deploy/ops/run_restore.py receives its exact acknowledgement string. It does
+# not exercise off-host S3, public routing, production credentials, or RPO/RTO.
+services:
+  postgres:
+    command: ["postgres", "-c", "archive_mode=off"]
+    volumes:
+      - type: bind
+        source: "${LOCAL_PGBACKREST_REPOSITORY_DIR:?set an isolated synthetic pgBackRest repository}"
+        target: /backup-repository
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      PGBACKREST_REPO_TYPE: posix
+      TUDT_LOCAL_BACKUP_VALIDATION: explicit-local-synthetic-only
+      PGBACKREST_S3_ENDPOINT: local.invalid
+      PGBACKREST_S3_BUCKET: synthetic-only
+      PGBACKREST_S3_REGION: synthetic-only
+
+  postgres-restore:
+    volumes:
+      - type: bind
+        source: "${LOCAL_PGBACKREST_REPOSITORY_DIR:?set an isolated synthetic pgBackRest repository}"
+        target: /backup-repository
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      PGBACKREST_REPO_TYPE: posix
+      TUDT_LOCAL_BACKUP_VALIDATION: explicit-local-synthetic-only
+      PGBACKREST_S3_ENDPOINT: local.invalid
+      PGBACKREST_S3_BUCKET: synthetic-only
+      PGBACKREST_S3_REGION: synthetic-only
+
+  session-restore:
+    volumes:
+      - type: bind
+        source: "${LOCAL_RESTIC_REPOSITORY_DIR:?set an isolated synthetic restic repository}"
+        target: /local-restic-repository
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      RESTIC_REPOSITORY: /local-restic-repository
+      TUDT_LOCAL_BACKUP_VALIDATION: explicit-local-synthetic-only

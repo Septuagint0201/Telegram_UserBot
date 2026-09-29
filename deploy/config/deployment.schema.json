@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/telegram-userbot/deployment.schema.json",
+  "title": "Content-free production deployment manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "deployable",
+    "deployment_id",
+    "source_commit",
+    "target",
+    "database_compatibility",
+    "runtime_identity",
+    "startup_policy",
+    "images",
+    "public_host",
+    "timezone",
+    "resource_profile",
+    "secret_manifest"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "deployable": {"type": "boolean"},
+    "deployment_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{2,62}$"},
+    "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ubuntu",
+        "os",
+        "architecture",
+        "vcpu",
+        "memory_gib",
+        "minimum_disk_gib",
+        "validation_disk_gib"
+      ],
+      "properties": {
+        "ubuntu": {"const": "26.04"},
+        "os": {"const": "linux"},
+        "architecture": {"const": "amd64"},
+        "vcpu": {"const": 2},
+        "memory_gib": {"const": 4},
+        "minimum_disk_gib": {"const": 40},
+        "validation_disk_gib": {"const": 64}
+      }
+    },
+    "database_compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_revision", "pgvector_version"],
+      "properties": {
+        "schema_revision": {"const": "0036_worker_complete"},
+        "pgvector_version": {"const": "0.8.6"}
+      }
+    },
+    "runtime_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "telegram_user_id",
+        "control_bot_user_id",
+        "control_bot_username",
+        "control_admin_user_ids"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "telegram_user_id": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "control_bot_user_id": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "control_bot_username": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 32,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*[Bb][Oo][Tt]$"
+        },
+        "control_admin_user_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807}
+        }
+      }
+    },
+    "startup_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_provisioning", "restore_gate_required"],
+      "properties": {
+        "session_provisioning": {"const": "preprovisioned_one_shot"},
+        "restore_gate_required": {"const": true}
+      }
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "application",
+        "database",
+        "gateway",
+        "redis",
+        "session-backup",
+        "data-export"
+      ],
+      "properties": {
+        "application": {"$ref": "#/$defs/artifact"},
+        "database": {"$ref": "#/$defs/artifact"},
+        "gateway": {"$ref": "#/$defs/artifact"},
+        "redis": {"$ref": "#/$defs/artifact"},
+        "session-backup": {"$ref": "#/$defs/artifact"},
+        "data-export": {"$ref": "#/$defs/artifact"}
+      }
+    },
+    "public_host": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+    "resource_profile": {"const": "v1_2cpu_4g_minimum40_target"},
+    "secret_manifest": {"const": "secret-files.json"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"deployable": {"const": true}}, "required": ["deployable"]},
+      "then": {
+        "properties": {
+          "source_commit": {"not": {"const": "0000000000000000000000000000000000000000"}},
+          "public_host": {
+            "allOf": [
+              {"not": {"pattern": "\\.invalid$"}},
+              {"not": {"enum": ["localhost", "example.com"]}}
+            ]
+          },
+          "images": {
+            "properties": {
+              "application": {"$ref": "#/$defs/builtArtifact"},
+              "database": {"$ref": "#/$defs/builtArtifact"},
+              "gateway": {"$ref": "#/$defs/builtArtifact"},
+              "redis": {"$ref": "#/$defs/builtArtifact"},
+              "session-backup": {"$ref": "#/$defs/builtArtifact"},
+              "data-export": {"$ref": "#/$defs/builtArtifact"}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reference"],
+      "properties": {
+        "status": {"enum": ["NOT_BUILT", "BUILT"]},
+        "reference": {
+          "type": "string",
+          "pattern": "^[^\\s@]+@sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "builtArtifact": {
+      "allOf": [
+        {"$ref": "#/$defs/artifact"},
+        {
+          "properties": {
+            "status": {"const": "BUILT"},
+            "reference": {"not": {"pattern": "@sha256:0{64}$"}}
+          }
+        }
+      ]
+    }
+  }
+}

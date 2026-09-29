@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import and_, case, exists, insert, or_, select, text, update
+from sqlalchemy import and_, case, exists, false, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -260,18 +261,27 @@ class ProactiveRepository:
         idempotency_key: bytes,
         available_at: datetime,
         candidate_id: UUID | None = None,
-        job_kind: str = "candidate_due",
+        job_kind: str | None = None,
         now: datetime | None = None,
     ) -> UUID:
-        if len(idempotency_key) != 32 or job_kind not in {
+        if len(idempotency_key) != 32:
+            raise ValueError("proactive job identity is invalid")
+        effective_job_kind = (
+            ("candidate_due" if candidate_id is not None else "compensation_scan")
+            if job_kind is None
+            else job_kind
+        )
+        if effective_job_kind not in {
             "candidate_due",
             "compensation_scan",
             "budget_reaper",
         }:
             raise ValueError("proactive job identity is invalid")
+        if (effective_job_kind == "candidate_due") != (candidate_id is not None):
+            raise ValueError("proactive job candidate does not match its kind")
         available_time = require_aware(available_at, "available_at")
         created_time = datetime.now(UTC) if now is None else require_aware(now, "now")
-        job_id = uuid5(account_id, f"proactive-job:{job_kind}:{idempotency_key.hex()}")
+        job_id = uuid5(account_id, f"proactive-job:{effective_job_kind}:{idempotency_key.hex()}")
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
             {"lock_key": f"proactive_job:{account_id}:{idempotency_key.hex()}"},
@@ -290,34 +300,47 @@ class ProactiveRepository:
             .mappings()
             .one_or_none()
         )
+        conversation_id: UUID | None = None
+        if candidate_id is not None:
+            candidate = (
+                (
+                    await self._session.execute(
+                        select(
+                            proactive_candidates.c.state,
+                            proactive_candidates.c.conversation_id,
+                        ).where(
+                            proactive_candidates.c.id == candidate_id,
+                            proactive_candidates.c.account_id == account_id,
+                        )
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if candidate is None:
+                raise ValueError("proactive job candidate is outside the requested scope")
+            if candidate["state"] not in RUNNABLE_JOB_CANDIDATE_STATES:
+                raise ValueError("proactive job candidate is already terminal")
+            conversation_id = cast(UUID, candidate["conversation_id"])
         if existing is not None:
             if (
                 existing["id"] != job_id
                 or existing["account_id"] != account_id
                 or existing["candidate_id"] != candidate_id
-                or existing["job_kind"] != job_kind
+                or existing["conversation_id"] != conversation_id
+                or existing["job_kind"] != effective_job_kind
                 or existing["available_at"] != available_time
             ):
                 raise ValueError("proactive job replay does not match durable identity")
             return job_id
-        if candidate_id is not None:
-            candidate_state = await self._session.scalar(
-                select(proactive_candidates.c.state).where(
-                    proactive_candidates.c.id == candidate_id,
-                    proactive_candidates.c.account_id == account_id,
-                )
-            )
-            if candidate_state is None:
-                raise ValueError("proactive job candidate is outside the requested scope")
-            if job_kind == "candidate_due" and candidate_state not in RUNNABLE_JOB_CANDIDATE_STATES:
-                raise ValueError("proactive job candidate is already terminal")
         await self._session.execute(
             postgresql_insert(proactive_jobs)
             .values(
                 id=job_id,
                 account_id=account_id,
                 candidate_id=candidate_id,
-                job_kind=job_kind,
+                conversation_id=conversation_id,
+                job_kind=effective_job_kind,
                 idempotency_key=idempotency_key,
                 available_at=available_time,
                 state="pending",
@@ -728,6 +751,7 @@ class ProactiveRepository:
                         proactive_decisions.c.timezone_name.label("decision_timezone"),
                         proactive_decisions.c.action.label("decision_action"),
                         proactive_decisions.c.state.label("decision_state"),
+                        proactive_decisions.c.defer_until.label("decision_defer_until"),
                         proactive_policies.c.enabled.label("policy_enabled"),
                         proactive_policies.c.timezone_name.label("account_timezone"),
                         proactive_policies.c.account_daily_limit,
@@ -774,8 +798,18 @@ class ProactiveRepository:
             or binding["candidate_policy_id"] is None
             or binding["decision_generation"] != binding["generation"]
             or binding["decision_timezone"] != binding["candidate_timezone"]
-            or binding["candidate_state"] != "send_selected"
-            or binding["decision_action"] != "send_now"
+            or not (
+                (
+                    binding["candidate_state"] == "send_selected"
+                    and binding["decision_action"] == "send_now"
+                )
+                or (
+                    binding["candidate_state"] == "deferred_once"
+                    and binding["decision_action"] == "defer_once"
+                    and binding["decision_defer_until"] is not None
+                    and binding["decision_defer_until"] <= current_time
+                )
+            )
             or binding["decision_state"] != "accepted"
             or not binding["policy_enabled"]
             or binding["account_timezone"] != account_timezone_name
@@ -1153,6 +1187,61 @@ class ProactiveRepository:
             )
         return draft_state in {"ignored", "expired", "invalidated", "failed"}
 
+    async def settle_erased_scope_budget(
+        self, *, account_id: UUID, contact_id: UUID | None, now: datetime
+    ) -> bool:
+        """Caller has quiesced this scope under the account lock. False means retry."""
+        query = select(proactive_budget_reservations).where(
+            proactive_budget_reservations.c.account_id == account_id,
+            proactive_budget_reservations.c.state == "held",
+        )
+        if contact_id is not None:
+            query = query.where(proactive_budget_reservations.c.contact_id == contact_id)
+        rows = (
+            (
+                await self._session.execute(
+                    query.order_by(proactive_budget_reservations.c.id).with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
+        complete = True
+        for row in rows:
+            if await self._budget_side_effect_started(row):
+                # Preserve billing even if delivery is still in flight or only partial.
+                target = ReservationState.SEND_UNKNOWN
+                group_state = await self._session.scalar(
+                    select(outbound_delivery_groups.c.state).where(
+                        outbound_delivery_groups.c.account_id == account_id,
+                        outbound_delivery_groups.c.conversation_id == row["conversation_id"],
+                        outbound_delivery_groups.c.proactive_decision_id == row["decision_id"],
+                        or_(
+                            outbound_delivery_groups.c.id == row["outbound_group_id"]
+                            if row["outbound_group_id"] is not None
+                            else false(),
+                            outbound_delivery_groups.c.copilot_draft_id == row["copilot_draft_id"]
+                            if row["copilot_draft_id"] is not None
+                            else false(),
+                        ),
+                    )
+                )
+                if group_state == "sent":
+                    target = ReservationState.COMMITTED
+            elif await self._budget_target_releasable(row):
+                target = ReservationState.RELEASED
+            else:
+                # No proof of safe release: keep the hold and expose unfinished work.
+                complete = False
+                continue
+            await self.settle_budget(
+                account_id=account_id,
+                reservation_key=row["reservation_key"],
+                target=target,
+                now=now,
+            )
+        return complete
+
     async def settle_budget(
         self,
         *,
@@ -1385,7 +1474,7 @@ class ProactiveRepository:
             now=now,
         )
 
-    async def reap_budget(self, *, now: datetime) -> int:
+    async def reap_budget(self, *, now: datetime, limit: int = 100) -> int:
         current_time = require_aware(now, "now")
         reservations = tuple(
             (
@@ -1393,8 +1482,12 @@ class ProactiveRepository:
                     select(proactive_budget_reservations)
                     .where(
                         proactive_budget_reservations.c.state == "held",
-                        proactive_budget_reservations.c.expires_at <= current_time,
                     )
+                    .order_by(
+                        proactive_budget_reservations.c.expires_at,
+                        proactive_budget_reservations.c.id,
+                    )
+                    .limit(limit)
                     .with_for_update(skip_locked=True)
                 )
             )
@@ -1403,6 +1496,17 @@ class ProactiveRepository:
         )
         changed = 0
         for reservation in reservations:
+            if await self._budget_side_effect_started(reservation):
+                await self.commit_budget(
+                    account_id=reservation["account_id"],
+                    reservation_key=reservation["reservation_key"],
+                    now=current_time,
+                    unknown=True,
+                )
+                changed += 1
+                continue
+            if reservation["expires_at"] > current_time:
+                continue
             if not await self._budget_target_releasable(reservation):
                 continue
             if (
@@ -1620,7 +1724,12 @@ def _reservation(row: Any) -> BudgetReservation:
 
 def _occurrence_matches(row: Any, occurrence: Any) -> bool:
     return all(
-        row.get(column) == value
+        (
+            Decimal(str(row.get(column))).quantize(Decimal("0.0001"))
+            if column == "importance"
+            else row.get(column)
+        )
+        == value
         for column, value in {
             "id": occurrence.id,
             "account_id": occurrence.account_id,
@@ -1634,7 +1743,7 @@ def _occurrence_matches(row: Any, occurrence: Any) -> bool:
             "hard_deadline_at": occurrence.hard_deadline_at,
             "timezone_name": occurrence.timezone_name,
             "local_date": occurrence.local_date,
-            "importance": occurrence.importance,
+            "importance": Decimal(str(occurrence.importance)).quantize(Decimal("0.0001")),
             "source_type": occurrence.source_type,
             "source_id": occurrence.source_id,
             "source_version": occurrence.source_version,
@@ -1739,7 +1848,12 @@ def _decision_matches(
     row: Any, candidate: Candidate, decision: AgentDecision, output_hash: bytes
 ) -> bool:
     return all(
-        row[column] == value
+        (
+            Decimal(str(row[column])).quantize(Decimal("0.0001"))
+            if column == "priority"
+            else row[column]
+        )
+        == value
         for column, value in {
             "id": uuid5(candidate.id, f"proactive-decision:{output_hash.hex()}"),
             "account_id": candidate.account_id,
@@ -1752,7 +1866,7 @@ def _decision_matches(
             "action": decision.action.value,
             "decision_code": decision.decision_code,
             "topic": decision.topic,
-            "priority": decision.priority,
+            "priority": Decimal(str(decision.priority)).quantize(Decimal("0.0001")),
             "defer_until": decision.defer_until,
             "output_hash": output_hash,
             "state": "accepted",

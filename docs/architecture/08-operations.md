@@ -6,7 +6,7 @@
 
 总体设计见`docs/Design.md`；进程、网络、volume和Session所有权见`docs/architecture/01-runtime-topology.md`；消息恢复见`docs/architecture/02-message-lifecycle.md`；数据、retention和erasure模型见`docs/architecture/03-data-model.md`；模式及maintenance/BLOCKED门禁见`docs/architecture/04-conversation-orchestrator.md`；Memory、Context和Proactive后台任务分别见`05-memory-pipeline.md`、`06-context-contract.md`和`07-proactive-pipeline.md`。
 
-当前状态：V1实现前的Operations基线。所有版本、digest、证书、域名、凭据、备份目标和实测容量值必须在部署时写入deployment manifest；本文给出的资源和时限是默认上限或验收目标，不是已经运行验证的结果。
+当前状态：M8 Operations实现工作树基线。当前全链路Alembic head为`0036_worker_complete`，但生产Compose、Ubuntu运行时、backup/restore、升级回滚和soak证据仍为`NOT RUN`。所有版本、digest、证书、域名、凭据、备份目标和实测容量值必须在部署时写入deployment manifest；本文给出的资源和时限是默认上限或验收目标，不是已经运行验证的结果。
 
 ## 2. 已确认决策
 
@@ -64,7 +64,7 @@ V1不提供：
 V1生产验收目标：
 
 ```text
-Ubuntu Server 24.04 LTS
+Ubuntu Server 26.04 LTS
 linux/amd64
 Docker Engine + Compose v2 plugin
 2 vCPU
@@ -94,7 +94,7 @@ Ubuntu 22.04 LTS或`linux/arm64`可以在实现后作为新支持矩阵加入，
 
 ```text
 /opt/telegram-userbot/             reviewed deployment checkout
-/etc/telegram-userbot/config/      root:root 0750, non-secret config
+/etc/telegram-userbot/config/      root:10001 0750, non-secret config; files root:10001 0640
 /etc/telegram-userbot/secrets/     root:root 0700；source file为root:<secret-reader-gid> 0440
 /var/lib/telegram-userbot/         root:root 0750, local ops state only
 /var/log/telegram-userbot-ops/     root:adm 0750, sanitized host runbook logs
@@ -106,7 +106,7 @@ Ubuntu 22.04 LTS或`linux/arm64`可以在实现后作为新支持矩阵加入，
 
 ### 5.1 Deployment manifest
 
-每个部署维护不含secret的`deployment-manifest.yaml`，至少记录：
+每个部署维护不含secret的JSON deployment manifest（`/etc/telegram-userbot/config/deployment.json`），至少记录：
 
 ```text
 deployment_id
@@ -118,7 +118,7 @@ Docker/Compose versions
 public base URL and timezone
 PostgreSQL/pgvector schema compatibility
 active backup/retention policy versions
-resource profile name = v1_2cpu_4g_40g
+resource profile name = v1_2cpu_4g_minimum40_target
 last migration/backup/restore-drill IDs and outcomes
 ```
 
@@ -176,11 +176,10 @@ API key、Bot token、Telegram API hash、数据库密码、Redis密码、S3 sec
 | Image | 用途 |
 |---|---|
 | application image | `app/control/worker/migrate`共享代码，使用不同entrypoint |
+| operations image | `session-backup/session-restore/data-export/ops-monitor`按命令复用，固定同一 `OPS_IMAGE` digest |
 | Caddy image | `https-gateway` |
 | PostgreSQL image | PostgreSQL + pgvector + pgBackRest |
 | Redis image | queue/cache/AOF |
-| session-backup image | one-shot SQLite校验与restic备份，不常驻 |
-| data-export image | one-shot受限数据库导出与age公钥加密，不常驻 |
 
 所有镜像固定完整digest。浮动`latest`、启动时`pip install`、从互联网下载脚本以及容器内自更新均禁止。
 
@@ -207,6 +206,7 @@ PostgreSQL major、pgvector和pgBackRest版本在实现时作为一个经过迁�
 | `app` | 常驻 | `unless-stopped` | 无 |
 | `control` | 常驻 | `unless-stopped` | 无 |
 | `worker` | 常驻 | `unless-stopped` | 无 |
+| `ops-monitor` | 常驻 | `unless-stopped` | 无（仅backend `9090`） |
 | `postgres` | 常驻 | `unless-stopped` | 无 |
 | `redis` | 常驻 | `unless-stopped` | 无 |
 | `migrate` | one-shot | `no` | 无 |
@@ -229,13 +229,19 @@ backup-egress
 | `control` | 是 | 是 | 否 |
 | `app` | 否 | 是 | 否 |
 | `worker` | 否 | 是 | 否 |
-| `postgres` | 否 | 是 | 否 |
+| `ops-monitor` | 否 | 是 | 否 |
+| `postgres` | 否 | 是 | 是 |
 | `redis` | 否 | 是 | 否 |
 | `migrate` | 否 | 是 | 否 |
 | `session-backup` | 否 | 否 | 是 |
 | `data-export` | 否 | 是 | 否 |
 
 Gateway只能解析`control`的Web App端口。`postgres`和`redis`只bind容器网络，不发布host port。Docker network本身不是完整egress firewall；endpoint SSRF和host firewall仍按第14节执行。
+
+恢复流程使用独立的 restore overlay；其中 `postgres-restore`、`session-restore`、
+`restore-gate-close` 和 `restore-gate-open` 都是受 runner 严格编排的 one-shot helper，
+不属于稳态服务清单，也不得由常规 `docker compose up` 启动。它们只在全新、已确认
+为空的恢复项目中运行，并沿用 `BOOTSTRAP_MAINTENANCE=1` 与最小网络/secret 挂载。
 
 ### 7.3 Volumes
 
@@ -245,11 +251,14 @@ Gateway只能解析`control`的Web App端口。`postgres`和`redis`只bind容器
 | `pgbackrest-spool` | postgres读写 | 不单独备份 |
 | `redis-data` | redis读写 | 不作DR事实备份 |
 | `telethon-session` | app读写；受控backup/restore窗口例外 | restic加密备份 |
-| `media-data` | app读写、worker只读 | 默认不备份 |
+| `media-data` | app读写、worker与ops-monitor只读 | 默认不备份 |
+| `ops-state` | postgres/session-backup读写、ops-monitor只读 | host-controlled marker；不作为业务事实备份 |
 | `caddy-data` | gateway读写 | 不备份，可重新签发 |
 | root-only `export-staging` bind | data-export写；host operator读 | 24小时内清理，不进入普通backup |
 
-Session例外必须满足：`app`已停止并释放account lock；one-shot helper只读挂载Session volume；helper退出后立即解除挂载；任何常驻非app服务仍不得挂载该volume。
+Session例外必须满足：`app`已停止并释放account lock，且任何常驻非app服务仍不得挂载该volume。`session-backup`只读挂载
+Session volume；`session-restore`仅可在全新、确认为空的目标volume上短暂写入，完成校验后立即退出并解除挂载。
+两类helper都不得与`app`并行运行。
 
 ### 7.4 Compose secret source
 
@@ -272,8 +281,9 @@ Compose secrets引用`/etc/telegram-userbot/secrets`中的root-controlled files�
 | `migrate` | 256 MiB | maintenance窗口one-shot |
 | `session-backup` | 256 MiB | app停止后的one-shot |
 | `data-export` | 256 MiB | maintenance/低负载one-shot |
+| `ops-monitor` | 128 MiB | backend内网监控与告警投影 |
 
-常驻limit合计约2.75 GiB，剩余空间供Ubuntu、Docker daemon、page cache和短时抖动。Migrate、backup、restore和本机完整监控栈不得与高负载业务任务同时运行。
+常驻limit合计为2,944 MiB（约2.875 GiB，包含`ops-monitor`，不含三个one-shot服务）；所有声明limit合计为3,712 MiB（约3.625 GiB）。剩余空间供Ubuntu、Docker daemon、page cache和短时抖动。Migrate、backup、restore和本机完整监控栈不得与高负载业务任务同时运行。以上是Compose上限而非实测占用，必须由2/4/40 soak验证余量。
 
 ### 8.2 CPU与并发
 
@@ -283,6 +293,7 @@ Compose secrets引用`/etc/telegram-userbot/secrets`中的root-controlled files�
 - 图片下载/完整解码并发1。
 - PostgreSQL migration、backup和ANN index build进入maintenance或低负载窗口。
 - pgBackRest `process-max`默认1；性能证据支持后才能提高。
+- 当前Compose声明的常驻CPU上限约3.45 vCPU（`https-gateway` 0.25、`app` 0.75、`control` 0.35、`worker` 0.75、`postgres` 0.75、`redis` 0.35、`ops-monitor` 0.25），高于2 vCPU；这是可被调度器争用的上限，不是可宣称的吞吐能力。M8-015 soak必须记录CPU throttling、延迟和重启，未测前不得把该profile标为通过。
 
 ### 8.3 Redis
 
@@ -331,6 +342,12 @@ security_opt: [no-new-privileges:true]
 pids_limit: finite
 tmpfs: /tmp with size/noexec/nosuid
 ```
+
+`https-gateway` 使用有限的 `pids_limit: 256`。Caddy、Compose init/reaper 和
+BusyBox `wget` liveness probe 都需要进程/线程槽位；128 在低配主机上可能让健康探针
+或受控 `exec` 无法创建进程。256 仍是有限门禁，且不改变 CPU/内存预算。validation
+overlay 只改 loopback 端口、内部 TLS 和 synthetic 服务命令，继承该 gateway 的
+healthcheck/PID 配置；restore overlays 不声明或启动 gateway。
 
 需要写入的Session、media、database、Redis、Caddy data和spool都使用精确volume。不能使用`privileged`、host PID/network、设备映射或Docker Socket。
 
@@ -412,18 +429,23 @@ M2先以PostgreSQL对每admin执行15分钟最多5次credential请求、对每ad
 
 ## 12. Secret inventory与挂载矩阵
 
-| Secret | app | control | worker | migrate | postgres | gateway | session-backup | data-export |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Telegram API ID/hash | 只读 | 否 | 否 | 否 | 否 | 否 | 否 | 否 |
-| Control Bot token | 否 | 只读 | 否 | 否 | 否 | 否 | 否 | 否 |
-| credential master keyring | 只读 | 只读 | 只读 | 否 | 否 | 否 | 否 | 否 |
-| PostgreSQL role password | app role | control role | worker role | migrator role | server | 否 | 否 | export role |
-| Redis password | 只读 | 只读 | 只读 | 否 | server | 否 | 否 | 否 |
-| pgBackRest repo credential/cipher | 否 | 否 | 否 | 否 | 只读 | 否 | 否 | 否 |
-| restic Session repo credential | 否 | 否 | 否 | 否 | 否 | 否 | 只读 | 否 |
-| TLS private material | 否 | 否 | 否 | 否 | 否 | Caddy data | 否 | 否 |
+| Secret | app | control | worker | ops-monitor | migrate | postgres | gateway | session-backup | data-export |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Telegram API ID/hash | 只读 | 否 | 否 | 否 | 否 | 否 | 否 | 否 | 否 |
+| Control Bot token | 否 | 只读 | 否 | 否 | 否 | 否 | 否 | 否 | 否 |
+| credential master keyring | 只读 | 只读 | 只读 | 否 | 否 | 否 | 否 | 否 | 否 |
+| PostgreSQL role password | app role | control role | worker role | monitor role | migrator role | server | 否 | 否 | export role |
+| Redis password | 只读 | 只读 | 只读 | 否 | 否 | server | 否 | 否 | 否 |
+| pgBackRest repo credential/cipher | 否 | 否 | 否 | 否 | 否 | 只读 | 否 | 否 | 否 |
+| restic Session repo credential | 否 | 否 | 否 | 否 | 否 | 否 | 否 | 只读 | 否 |
+| TLS private material | 否 | 否 | 否 | 否 | 否 | 否 | Caddy data | 否 | 否 |
 
-`migrate`只获得migrator数据库凭据。`data-export`只获得可读取allowlisted export view的数据库角色；age recipient是非秘密配置，private decryption key永不进入服务器。两者均不获得Telegram、Bot、master key、model key、Session或backup secret。不同用途不能共用一个password/key。独立外部告警credential只由host monitor或独立monitoring profile持有，不挂载到上述业务服务。
+`migrate`只获得migrator数据库凭据。`ops-monitor`只获得monitor数据库凭据，不能读取
+模型/Telegram/backup secret；其 `/metrics` 和 `/alerts` 只在backend网络可达。`data-export`
+只获得可读取allowlisted export view的数据库角色；age recipient是非秘密配置，private
+decryption key永不进入服务器。两者均不获得Telegram、Bot、master key、model key、Session
+或backup secret。不同用途不能共用一个password/key。外部告警credential只由host monitor
+或独立monitoring profile持有，不挂载到上述业务服务。
 
 ## 13. API key加密、轮换与恢复
 
@@ -520,7 +542,7 @@ postgres/redis healthy
   -> migrate one-shot acquires global advisory lock
   -> alembic upgrade head
   -> schema/extension inventory check
-  -> app/control/worker allowed to become ready
+  -> app/control/worker/ops-monitor allowed to start
   -> gateway routes credential traffic
 ```
 
@@ -737,7 +759,7 @@ Docker使用`local`日志driver或等价轮换，每container默认`10 MiB x 5 f
 
 ### 19.2 Metrics
 
-Internal `/metrics`只在backend/monitoring网络暴露，至少包括：
+`ops-monitor` 的 Internal `/metrics` 和 `/alerts` 只在backend网络暴露，至少包括：
 
 - ingest/turn/model/job/delivery result与latency histogram；
 - queue depth/oldest age/dead-letter；
@@ -753,10 +775,11 @@ Telegram/contact/conversation/message/memory/run具体ID不作为metric label。
 
 ### 19.3 Monitoring deployment
 
-2/4/40基线不常驻本机Prometheus/Grafana/Loki。支持：
+2/4/40基线常驻一个轻量 `ops-monitor` 容器，提供backend-only的
+`/health`、`/metrics` 和 `/alerts`；不常驻本机Prometheus/Grafana/Loki完整栈。支持：
 
-1. 外部Prometheus通过受限VPN/SSH tunnel或host collector拉取；或
-2. 另行扩容后启用独立`monitoring` Compose profile。
+1. 外部Prometheus通过受限VPN/SSH tunnel或host collector拉取`ops-monitor:9090`；或
+2. 另行扩容后启用独立`monitoring` Compose profile（不得把backend端口直接发布公网）。
 
 启用本机完整监控前必须重新测量memory/disk并修改resource profile；不能挤占PostgreSQL、app或worker保障空间。
 
@@ -765,7 +788,7 @@ Telegram/contact/conversation/message/memory/run具体ID不作为metric label。
 Critical事件可由Control Bot发送不含正文的管理员告警，但还必须配置一个独立于`control`/Telegram的外部uptime或host告警通道。至少告警：
 
 ```text
-app/control/worker down or restart loop
+app/control/worker/ops-monitor down or restart loop
 PostgreSQL/Redis unavailable
 account lock/session unauthorized
 unknown/partial send reconciliation lag
@@ -783,16 +806,28 @@ Alert去重和cooldown默认5分钟；critical恢复也发送一条resolved事�
 
 ### 20.1 Healthcheck参数
 
-常驻服务内部healthcheck默认：
+常驻服务healthcheck预算分为两档：
 
 ```text
-interval 10s
-timeout 3s
-retries 3
-start_period 30s
+Python services (app/control/worker/ops-monitor):
+  interval 10s
+  timeout 10s
+  retries 3
+  start_period 30s
+
+native probes (gateway/PostgreSQL/Redis):
+  interval 10s
+  timeout 3s
+  retries 3
+  start_period 30s
 ```
 
-Application image使用内置Python healthcheck命令，不为此增加curl和shell依赖。PostgreSQL使用`pg_isready`加schema外部readiness；Redis使用authenticated`PING`。Health endpoint不返回异常、config、path或依赖body。
+Python healthcheck使用10秒上限，以覆盖2 vCPU基线下并行冷启动时的解释器启动和snapshot
+读取；这不是业务请求的超时。Application image使用内置Python healthcheck命令，不为此增加curl和shell依赖；
+`ops-monitor`使用内置Python healthcheck访问本地 `/health`。PostgreSQL使用`pg_isready`
+加schema外部readiness；Redis使用authenticated`PING`。Health endpoint不返回异常、config、
+path或依赖body。`ops-monitor` 的 `/health` 只表示监控HTTP进程存活，采集失败必须从
+`/alerts`和metrics判断。
 
 ### 20.2 Semantics
 
@@ -804,7 +839,7 @@ Application image使用内置Python healthcheck命令，不为此增加curl和sh
 
 ### 20.3 Heartbeat与status
 
-Heartbeat保持10秒刷新、30秒过期。`/server_status`聚合heartbeat、直接依赖probe和PostgreSQL重要状态，输出`healthy/degraded/down/unknown`及稳定reason。它增加Operations字段：
+Heartbeat保持10秒刷新、30秒过期。`/server_status`聚合heartbeat、直接依赖probe和PostgreSQL重要状态，输出`healthy/degraded/down/unknown`及稳定reason；`ops-monitor`则提供不含正文的聚合metrics/alerts，供外部collector读取。它增加Operations字段：
 
 ```text
 disk band/media quota
@@ -845,14 +880,14 @@ Repository encryption passphrase、S3 access secret和credential master key互�
 
 ### 21.3 Verification
 
-每月在独立临时主机/volume执行完整restore drill：
-
-1. 恢复最近full/diff/WAL到目标时间。
-2. 运行PostgreSQL启动、schema/extension inventory、约束抽样和row counts。
-3. 应用最新独立erasure ledger overlay。
-4. 以`BOOTSTRAP_MAINTENANCE=1`启动应用只读验证，不连接真实发送路径。
-5. 记录实际RPO/RTO、artifact IDs和失败。
-6. 销毁临时明文volume并保留无正文证据。
+每月在独立临时主机/volume执行完整restore drill。自动化恢复 runner 依次恢复
+PostgreSQL 与 Session、启动 PostgreSQL/空 Redis、运行 forward migration、将持久
+restore gate 置为 `validating`，再由 gate-open helper 完成最新 erasure ledger
+重放、数据库/Session 完整性、凭据解密和副作用对账。只读检查在维护门禁内完成，
+不连接真实 Telegram/provider/send 路径；`app`、`control`、`worker` 和 gateway
+不会被该 runner 启动。最后确认运行服务集合严格只有 `postgres` 与 `redis`，且
+`BOOTSTRAP_MAINTENANCE=1` 仍保持。记录实际RPO/RTO、artifact IDs和失败。
+销毁临时明文volume并保留无正文证据。
 
 没有成功演练时RPO/RTO是目标而不是PASS声明。
 
@@ -902,14 +937,17 @@ Restic使用以[官方文档](https://restic.readthedocs.io/en/stable/)为准的
 2. Checkout并验证目标signed source commit与image digests。
 3. 配置防火墙、加密volume、domain和root-controlled service-readable secrets，保持443未路由业务。
 4. 使用pgBackRest恢复PostgreSQL到最新可用一致点或明确PITR目标。
-5. 应用最新独立erasure ledger，完成所有redaction/cleanup jobs。
-6. 恢复匹配的Session snapshot；若不用快照则走显式重新登录。
-7. 恢复master/erasure keys或计划通过Web App重新输入model keys。
-8. 启动空Redis、运行schema/pgvector compatibility检查和必要forward migration。
-9. 启动control/worker/app但保持bootstrap maintenance；验证Bot、Session、account lock和credential decrypt。
-10. 对账outbox、system_pending、unknown/partial group/intents、expired drafts/takeover和budget reservations。
-11. 运行只读context/memory/proactive integrity抽样和backup restore acceptance。
-12. 维护者通过Control Bot/host双重确认后清除bootstrap gate，再开放Caddy credential API和AUTO。
+5. 恢复匹配的Session snapshot；该 restore helper 在目标为空且 `app` 未运行时短暂写入 Session volume；若不用快照则走显式重新登录。
+6. 恢复master/erasure keys或计划通过Web App重新输入model keys，并准备最新独立erasure ledger。
+7. 启动空Redis；运行schema/pgvector compatibility检查和必要forward migration。
+8. 运行 restore-gate-close，将持久 gate 置为 `validating`；不要启动 `app`、`control`、`worker` 或 gateway。
+9. 运行 restore-gate-open：重放最新 erasure ledger，验证数据库、Session、credential decrypt，并对账outbox、system_pending、unknown/partial group/intents、expired drafts/takeover和budget reservations。
+10. 确认最终运行服务集合严格只有 `postgres` 与 `redis`，`BOOTSTRAP_MAINTENANCE=1` 仍保持；gate-open 通过后仍不自动启动业务服务。
+11. 维护者通过Control Bot/host双重确认后，按 fresh-install 流程逐项启动业务服务、验证 readiness，再清除 bootstrap gate、开放Caddy credential API和AUTO。
+
+当前 pre-0029 ledger replayer 只实现 `memory` scope。包含 `contact` 或 `account`
+scope 的 ledger 会以 `LEDGER_SCOPE_UNSUPPORTED` fail closed；不得删除、跳过或改写
+条目来制造 restore PASS。
 
 ### 23.3 RPO/RTO
 
@@ -929,6 +967,7 @@ PostgreSQL目标RPO 15分钟、整机目标RTO 2小时。Session每日backup意�
 | `worker` | 90秒 |
 | `control` | 30秒 |
 | `https-gateway` | 30秒 |
+| `ops-monitor` | 30秒 |
 | `redis` | 60秒 |
 | `postgres` | 120秒 |
 
@@ -939,6 +978,9 @@ PostgreSQL目标RPO 15分钟、整机目标RTO 2小时。Session每日backup意�
 `worker`：stop claim/scheduler → allow leased jobs within grace → CAS complete或让lease expire → final heartbeat。
 
 `control`：stop newWeb App/Bot sessions → finish committed transaction → invalidate uncommitted launch/input sessions → stop polling/server。
+
+`ops-monitor`：停止接受新的HTTP采集请求 → 结束当前有界数据库/marker读取 → 关闭
+metrics/alerts server。监控退出或采集失败不能修改业务状态，也不能阻塞业务服务停止。
 
 PostgreSQL先拒绝新application work，再fast shutdown/checkpoint；不能作为常规操作使用immediate shutdown。强制kill后启动恢复必须执行Message Lifecycle reconciliation、job lease回收和Session integrity检查。
 
@@ -965,6 +1007,7 @@ docker volume prune
 | app崩溃 | 不创建新发送，unknown RPC保留 | account lock + Session + intent reconciliation |
 | control崩溃 | 无新管理/key写入；既有app模式继续 | Bot/Web App重启，旧session/token按TTL/CAS |
 | worker崩溃 | Memory/Proactive/cleanup延迟，Main AI用已提交memory | lease过期重领与补偿扫描 |
+| `ops-monitor`崩溃 | 指标/告警投影暂时不可用，不改变业务处理 | Compose重启；外部host告警监测其 `/health` |
 | Caddy/证书失败 | Web App不可用，Bot和app内部路径不受影响 | 证书/route修复，不开放通用HTTP |
 | model endpoint失败 | 对应role有限重试后terminal/degraded，不发错误文本 | 配置验证或provider恢复 |
 | master key不可用 | 模型和credential写入blocked，ingest/删除可继续 | 离线key恢复或重新输入keys |
@@ -1028,8 +1071,9 @@ create root-controlled config/secrets with validated reader GIDs from templates
 validate docker compose config without printing secrets
 start postgres + redis
 run migrate one-shot
-start app + control + worker
+start app + control + worker + ops-monitor
 verify internal health and reconciliation
+verify ops-monitor /health and backend-only /metrics /alerts
 start Caddy and verify TLS/key-only routes
 configure/verify off-host DB and Session backups
 run acceptance smoke
@@ -1056,7 +1100,7 @@ Runbook可以使用不含secret的确定命令，例如：
 ```text
 docker compose config --quiet
 docker compose ps
-docker compose run --rm migrate upgrade head
+docker compose run --rm --no-deps --pull never migrate
 docker compose exec -T postgres pgbackrest --stanza=app check
 ```
 
@@ -1084,7 +1128,7 @@ Operations变更不能弱化根`DISCLOSURE`。未来新增外部监控、cloud K
 
 | 场景 | 必须结果 |
 |---|---|
-| 全新Ubuntu 24.04 amd64主机 | 只按文档可启动到maintenance-ready |
+| 全新Ubuntu 26.04 amd64主机 | 只按文档可启动到maintenance-ready |
 | 公网端口扫描 | 只有443和受限SSH；5432/6379/health/metrics不可达 |
 | Compose/image inspection | 无secret env、无Session/image、无Docker Socket、digest固定 |
 | Secret权限/symlink/placeholder错误 | 对应服务not ready且不泄露值 |

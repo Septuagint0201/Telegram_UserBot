@@ -1,0 +1,77 @@
+{
+	admin off
+	auto_https disable_redirects
+	email {$ACME_EMAIL}
+	https_port 8443
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://{$PUBLIC_HOST}:8443 {
+	tls {$TLS_MODE}
+
+	header {
+		defer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'none'; form-action 'self'"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		Cache-Control "no-store"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-X-Powered-By
+		-Server
+	}
+
+	route {
+		@credential_surface path /webapp/* /api/v1/model-keys/*
+		handle @credential_surface {
+			request_body {
+				max_size 16KB
+			}
+			reverse_proxy control:8080
+		}
+
+		handle {
+			respond "Not Found" 404
+		}
+	}
+
+	# Handler failures such as an unreachable control upstream bypass the normal
+	# response chain. Replace Caddy's default error writer so those responses use
+	# the same content-free security boundary and do not expose the server token.
+	handle_errors {
+		header {
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'none'; form-action 'self'"
+			Referrer-Policy "no-referrer"
+			X-Content-Type-Options "nosniff"
+			Cache-Control "no-store"
+			Permissions-Policy "camera=(), microphone=(), geolocation=()"
+			-X-Powered-By
+			-Server
+		}
+		respond "" {err.status_code}
+	}
+
+	# Request access logs are disabled until a content-free field-level formatter is
+	# acceptance tested. Caddy process logs still go to stdout via the container runtime.
+	log {
+		output discard
+	}
+}
+
+# Container-local liveness endpoint. It has a separate internal certificate,
+# binds only loopback, is not published by Compose, and never proxies traffic.
+https://127.0.0.1:9443 {
+	bind 127.0.0.1
+	tls internal
+
+	@alive path /internal/alive
+	respond @alive 204
+	respond "Not Found" 404
+
+	log {
+		output discard
+	}
+}

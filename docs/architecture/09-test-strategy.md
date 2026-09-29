@@ -6,7 +6,7 @@
 
 总体设计见`docs/Design.md`；被验证的详细契约见`docs/architecture/01-runtime-topology.md`至`08-operations.md`。本文不重新定义业务行为；测试与架构冲突时，测试必须暴露冲突并由架构变更或ADR解决，不能静默把现有实现当成规范。
 
-当前状态：V1实现前的测试架构基线。仓库尚无可运行实现，因此本文定义的runtime、integration、restore和soak结果均为`NOT RUN`，不能因文档静态检查通过而升级为`PASS`。
+当前状态：M8实现工作树的测试架构基线。仓库已有M8运行时、Compose和Operations测试代码，但生产Compose、Ubuntu运行时、restore和soak证据仍为`NOT RUN`；不能因文档或静态检查通过而升级为`PASS`。当前全链路Alembic head为`0036_worker_complete`。
 
 ## 2. 已确认决策
 
@@ -35,7 +35,7 @@
 3. PostgreSQL约束、事务、CAS、锁、lease、outbox和erasure在真实数据库上成立。
 4. 重复、乱序、并发、超时、取消、进程退出和结果未知不会产生未经授权的重复消息。
 5. Redis、provider、Telegram、磁盘、证书、backup和进程故障有明确降级与恢复证据。
-6. 生产基线在Ubuntu 24.04 amd64、2 vCPU/4 GiB RAM/40 GiB SSD上有资源与恢复证据。
+6. 生产基线在Ubuntu 26.04 amd64、2 vCPU/4 GiB RAM/40 GiB SSD上有资源与恢复证据。
 7. 任何未执行的外部、平台或长时间测试都被明确标为`NOT RUN`或`BLOCKED`。
 
 ### 3.2 范围
@@ -163,9 +163,9 @@ Unknown marker使collection失败。默认本地命令只运行无secret、非li
 | 普通Linux CI runner | 无secret static/unit/property/contract | 仅对应层级 |
 | 受保护Ubuntu runner | Testcontainers、Compose、migration、recovery | 是，需环境manifest |
 | 隔离Telegram测试主机 | 真实Telegram/Web App smoke | 是，仅外部协议项 |
-| 2/4/40 Ubuntu 24.04 amd64 | restore/resource soak/upgrade | 是，需完整证据 |
+| 2/4/40 Ubuntu 26.04 amd64 | restore/resource soak/upgrade | 是，需完整证据 |
 
-Production support只承认Ubuntu 24.04 amd64。Windows或其他Linux结果用于开发反馈，不能替代生产Compose、signal、filesystem、backup或resource证据。
+Production support只承认Ubuntu 26.04 amd64。Windows或其他Linux结果用于开发反馈，不能替代生产Compose、signal、filesystem、backup或resource证据。
 
 ## 9. 测试数据与隐私
 
@@ -473,7 +473,8 @@ contracted schema + previous app -> BLOCKED
 - secret reader GID应读/不应读矩阵，不输出内容；
 - migrate成功后服务ready，schema不兼容保持not ready；
 - Telethon Session account lock单owner；
-- health 10/3/3、heartbeat 10/30和`/server_status`；
+- healthcheck分层契约：Python服务`interval=10s/timeout=10s/retries=3`，native依赖
+  `interval=10s/timeout=3s/retries=3`；heartbeat 10/30和`/server_status`；
 - SIGTERM grace与SIGKILL后恢复；
 - Redis/PostgreSQL/provider/Caddy重启降级；
 - 日志、metrics和artifact不含sentinel或正文。
@@ -639,7 +640,7 @@ Workload version、seed、rate、payload size分布和provider delay进入manife
 
 ### 36.2 24小时门禁
 
-在Ubuntu 24.04 amd64、2 vCPU、4 GiB RAM、40 GiB SSD、一个worker容器/concurrency 2运行。记录CPU、RSS、OOM、restart、queue age、DB/Redis/media/disk增长、model/send latency、unknown intent和cleanup lag。
+在Ubuntu 26.04 amd64、2 vCPU、4 GiB RAM、40 GiB SSD、一个worker容器/concurrency 2运行。记录CPU、RSS、OOM、restart、queue age、DB/Redis/media/disk增长、model/send latency、unknown intent和cleanup lag。
 
 最低通过条件：
 

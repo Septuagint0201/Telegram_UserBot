@@ -1,7 +1,9 @@
 """Durable Control Bot backend for non-secret model configuration."""
 
+import asyncio
 import hashlib
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol, cast
@@ -20,6 +22,7 @@ from telegram_userbot.adapters.telegram_bot.model_control import (
 )
 from telegram_userbot.adapters.webapp.auth import LaunchTokenCodec
 from telegram_userbot.domain.model_config import (
+    MAX_GENERATION_OUTPUT_TOKENS,
     CanonicalModelConfig,
     LogicalRole,
     ModelCapabilities,
@@ -72,7 +75,7 @@ class PublicEndpointAdmission:
 class DurableModelControlBackend:
     """Implements the Bot command contract inside the caller's database transaction."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - persistence, network, tokens, and boundary are explicit
         self,
         *,
         repository: ModelConfigurationRepository,
@@ -80,6 +83,7 @@ class DurableModelControlBackend:
         capability_probe: ModelCapabilityProbe,
         launch_tokens: LaunchTokenCodec,
         deployment_version: int,
+        commit_boundary: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if deployment_version < 1:
             raise ValueError("deployment version must be positive")
@@ -88,6 +92,7 @@ class DurableModelControlBackend:
         self._capability_probe = capability_probe
         self._launch_tokens = launch_tokens
         self._deployment_version = deployment_version
+        self._commit_boundary = commit_boundary or _no_commit_boundary
 
     async def list_profiles(self) -> tuple[ModelProfileSummary, ...]:
         records = await self._repository.list_control_profiles()
@@ -163,18 +168,32 @@ class DurableModelControlBackend:
         return await self._repository.cancel_control_session(admin_id=admin_id, now=now)
 
     async def validate(self, *, admin_id: int, role: LogicalRole, now: datetime) -> bool:
-        draft = await self._repository.get_latest_draft(
-            admin_id=admin_id,
-            logical_role=role,
-            states=("editing",),
-            now=now,
-        )
-        if draft is None or draft.pending_field is not None:
-            return False
         try:
+            draft = await self._repository.get_latest_draft(
+                admin_id=admin_id,
+                logical_role=role,
+                states=("editing",),
+                now=now,
+            )
+            if draft is None or draft.pending_field is not None:
+                return False
             config = _canonical_config(draft)
+        except ModelConfigurationError, ModelRepositoryError:
+            return False
+
+        # The draft/version pair is the immutable prepare token.  Production
+        # composition commits its read transaction before the provider probe;
+        # final validation then uses a new transaction and the draft-version CAS.
+        await self._commit_boundary()
+        try:
             capabilities = await self._capability_probe.probe(config=config, now=now)
-            snapshot_id = uuid7()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+
+        snapshot_id = uuid7()
+        try:
             await self._repository.record_capabilities(
                 snapshot_id=snapshot_id,
                 endpoint_id=config.endpoint_id,
@@ -277,7 +296,7 @@ class DurableModelControlBackend:
             return {"temperature": temperature}, "max_output_tokens"
         if field == "max_output_tokens":
             limit = int(value)
-            if not 1 <= limit <= 1_000_000:
+            if not 1 <= limit <= MAX_GENERATION_OUTPUT_TOKENS:
                 raise ValueError("invalid output limit")
             return {"max_output_tokens": limit}, "timeout_seconds"
         if field == "timeout_seconds":
@@ -365,3 +384,7 @@ def _prompt(field: str, version: int, role: LogicalRole) -> ControlSessionPrompt
     if field == "protocol_options" and role is LogicalRole.EMBEDDING:
         prompt = "Enter embedding dimensions, or auto."
     return ControlSessionPrompt(field, prompt, version)
+
+
+async def _no_commit_boundary() -> None:
+    """Keep the framework-independent unit adapter usable without a session."""

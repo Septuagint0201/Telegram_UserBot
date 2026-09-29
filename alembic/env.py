@@ -4,7 +4,7 @@ from logging.config import fileConfig
 from os import environ
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import Connection, Engine, engine_from_config, pool
 
 from telegram_userbot.adapters.persistence.schema import metadata
 
@@ -16,6 +16,10 @@ target_metadata = metadata
 
 
 def database_url() -> str:
+    if config.attributes.get("allow_test_database_dsn") is not True:
+        raise RuntimeError(
+            "credential DSN environment input is restricted to explicit test migrations"
+        )
     url = environ.get("TUDT_DATABASE_DSN", "").strip()
     if not url.startswith(("postgresql://", "postgresql+psycopg://")):
         raise RuntimeError("TUDT_DATABASE_DSN must be configured for PostgreSQL")
@@ -37,7 +41,30 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _run_with_connection(connection: Connection) -> None:
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        compare_server_default=True,
+        transaction_per_migration=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 def run_migrations_online() -> None:
+    supplied_connection = config.attributes.get("connection")
+    if supplied_connection is not None:
+        if isinstance(supplied_connection, Connection):
+            _run_with_connection(supplied_connection)
+        elif isinstance(supplied_connection, Engine):
+            with supplied_connection.connect() as connection:
+                _run_with_connection(connection)
+        else:
+            raise RuntimeError("Alembic supplied connection is invalid")
+        return
+
     section = config.get_section(config.config_ini_section, {})
     section["sqlalchemy.url"] = database_url()
     connectable = engine_from_config(
@@ -46,15 +73,7 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-            compare_server_default=True,
-            transaction_per_migration=True,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+        _run_with_connection(connection)
 
 
 if context.is_offline_mode():

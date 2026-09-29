@@ -6,7 +6,7 @@ from hashlib import sha256
 from typing import Any, cast
 from uuid import UUID, uuid7
 
-from sqlalchemy import RowMapping, insert, null, or_, select, update
+from sqlalchemy import RowMapping, func, insert, null, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,8 @@ from telegram_userbot.adapters.persistence.records import (
 )
 from telegram_userbot.adapters.persistence.repositories import DurableJobRepository
 from telegram_userbot.adapters.persistence.schema import (
+    accounts,
+    contacts,
     conversations,
     message_events,
     message_media,
@@ -141,6 +143,53 @@ class TelegramLifecycleRepository:
     ) -> TelegramIngestResult:
         assert event.conversation_id is not None
         assert event.telegram_message_id is not None
+        # Admission can race with a durable scope erasure after peer resolution.
+        # Lock the scope through projection so a late Telegram edit cannot undo
+        # canonical redaction or recreate erased revisions.
+        scope = (
+            (
+                await self._session.execute(
+                    select(
+                        accounts.c.status,
+                        contacts.c.automation_status,
+                        func.scope_metadata_blocked(
+                            "messages",
+                            func.jsonb_build_object(
+                                "account_id",
+                                accounts.c.id,
+                                "conversation_id",
+                                conversations.c.id,
+                            ),
+                        ).label("erasure_blocked"),
+                    )
+                    .select_from(
+                        accounts.join(
+                            conversations, conversations.c.account_id == accounts.c.id
+                        ).join(contacts, contacts.c.id == conversations.c.contact_id)
+                    )
+                    .where(
+                        accounts.c.id == event.account_id,
+                        conversations.c.id == event.conversation_id,
+                        accounts.c.deleted_at.is_(None),
+                        contacts.c.deleted_at.is_(None),
+                        conversations.c.deleted_at.is_(None),
+                    )
+                    .with_for_update(of=(accounts, contacts, conversations), key_share=True)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            scope is None
+            or scope["status"] != "active"
+            or scope["automation_status"] == "deleting"
+            or scope.get("erasure_blocked", False)
+        ):
+            await self._session.execute(
+                update(message_events).where(message_events.c.id == event_id).values(metadata={})
+            )
+            return TelegramIngestResult(event_id, False, True)
         row = (
             (
                 await self._session.execute(
@@ -492,6 +541,15 @@ class TelegramLifecycleRepository:
                 messages.c.account_id == event.account_id,
                 messages.c.conversation_id == event.conversation_id,
                 messages.c.telegram_message_id == event.telegram_message_id,
+                ~func.scope_metadata_blocked(
+                    "messages",
+                    func.jsonb_build_object(
+                        "account_id",
+                        messages.c.account_id,
+                        "conversation_id",
+                        messages.c.conversation_id,
+                    ),
+                ),
             )
         )
         if message_id is None:
@@ -634,6 +692,7 @@ class TelegramLifecycleRepository:
                         outbound_intents.c.id == intent_id,
                         outbound_intents.c.account_id == account_id,
                         outbound_intents.c.state.in_(("pending", "retry_wait")),
+                        outbound_intents.c.scope_erased_at.is_(None),
                         or_(
                             outbound_intents.c.next_attempt_at.is_(None),
                             outbound_intents.c.next_attempt_at <= now,
@@ -750,6 +809,119 @@ class TelegramLifecycleRepository:
         await self._refresh_group(intent.delivery_group_id, completion.finished_at)
         return True
 
+    async def reconcile_outbound_message_id(
+        self,
+        *,
+        account_id: UUID,
+        telegram_random_id: int,
+        telegram_message_id: int,
+        now: datetime,
+    ) -> str:
+        """Apply Telegram's exact ``UpdateMessageID`` mapping idempotently.
+
+        A mapping is stronger evidence than the local attempt classification: it
+        proves that Telegram accepted the stable random id.  Rows not owned by
+        this deployment are ignored, while a conflicting mapping for an already
+        sent intent fails closed instead of guessing which message is canonical.
+        """
+
+        if (
+            account_id.int == 0
+            or isinstance(telegram_random_id, bool)
+            or not isinstance(telegram_random_id, int)
+            or telegram_random_id <= 0
+            or isinstance(telegram_message_id, bool)
+            or not isinstance(telegram_message_id, int)
+            or telegram_message_id <= 0
+            or now.tzinfo is None
+            or now.utcoffset() is None
+        ):
+            raise ValueError("outbound message-id mapping is invalid")
+        row = (
+            (
+                await self._session.execute(
+                    select(outbound_intents)
+                    .where(
+                        outbound_intents.c.account_id == account_id,
+                        outbound_intents.c.telegram_random_id == telegram_random_id,
+                    )
+                    .with_for_update()
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return "unmatched"
+        if row["state"] == OutboundIntentState.SENT:
+            if row["telegram_message_id"] != telegram_message_id:
+                raise RuntimeError("outbound message-id mapping conflict")
+            return "already_reconciled"
+
+        latest_attempt = (
+            (
+                await self._session.execute(
+                    select(outbound_attempts.c.attempt_no, outbound_attempts.c.state)
+                    .where(
+                        outbound_attempts.c.intent_id == row["id"],
+                        outbound_attempts.c.account_id == account_id,
+                    )
+                    .order_by(outbound_attempts.c.attempt_no.desc())
+                    .limit(1)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if latest_attempt is None:
+            raise RuntimeError("outbound message-id mapping has no send attempt")
+
+        intent_update = await self._session.execute(
+            update(outbound_intents)
+            .where(
+                outbound_intents.c.id == row["id"],
+                outbound_intents.c.account_id == account_id,
+                outbound_intents.c.telegram_random_id == telegram_random_id,
+                outbound_intents.c.state != OutboundIntentState.SENT,
+            )
+            .values(
+                state=OutboundIntentState.SENT,
+                telegram_message_id=telegram_message_id,
+                sent_at=now,
+                updated_at=now,
+                unknown_since=None,
+                send_lease_expires_at=None,
+                next_attempt_at=None,
+                last_error_code=None,
+            )
+        )
+        if getattr(intent_update, "rowcount", 1) != 1:
+            raise RuntimeError("outbound message-id mapping lost its intent fence")
+        # Attempt rows are immutable once terminal.  A delayed exact mapping
+        # changes the authoritative intent/group projection, not the historical
+        # classification of an already-finished RPC.  Only an in-flight
+        # ``started`` attempt can be completed by this receipt.
+        if latest_attempt["state"] == "started":
+            attempt_update = await self._session.execute(
+                update(outbound_attempts)
+                .where(
+                    outbound_attempts.c.intent_id == row["id"],
+                    outbound_attempts.c.account_id == account_id,
+                    outbound_attempts.c.attempt_no == latest_attempt["attempt_no"],
+                    outbound_attempts.c.state == "started",
+                )
+                .values(
+                    state=AttemptOutcome.SUCCEEDED,
+                    error_code=None,
+                    retry_after_seconds=None,
+                    finished_at=now,
+                )
+            )
+            if getattr(attempt_update, "rowcount", 1) != 1:
+                raise RuntimeError("outbound message-id mapping lost its attempt fence")
+        await self._refresh_group(cast(UUID, row["delivery_group_id"]), now)
+        return "reconciled"
+
     async def _reconcile_intent(
         self, intent_id: UUID, telegram_message_id: int, now: datetime
     ) -> None:
@@ -845,6 +1017,57 @@ class TelegramLifecycleRepository:
             await self._refresh_group(group_id, now)
         return len(intent_ids)
 
+    async def mark_unresolved_unknown(
+        self,
+        *,
+        account_id: UUID,
+        older_than: datetime,
+        now: datetime,
+        limit: int = 100,
+    ) -> int:
+        """Record that no safe lookup exists after bounded catch-up.
+
+        Telegram history does not expose the original random id.  Matching by
+        text or timestamp would risk a duplicate, so unresolved intents remain
+        ``unknown`` and are never returned to the dispatch queue.
+        """
+
+        if not 1 <= limit <= 1000:
+            raise ValueError("unknown-send reconciliation limit is invalid")
+        candidates = tuple(
+            await self._session.scalars(
+                select(outbound_intents.c.id)
+                .where(
+                    outbound_intents.c.account_id == account_id,
+                    outbound_intents.c.state == OutboundIntentState.UNKNOWN,
+                    outbound_intents.c.unknown_since <= older_than,
+                    or_(
+                        outbound_intents.c.last_error_code.is_(None),
+                        outbound_intents.c.last_error_code
+                        != "telegram_random_id_mapping_unavailable",
+                    ),
+                )
+                .order_by(outbound_intents.c.unknown_since, outbound_intents.c.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        if not candidates:
+            return 0
+        result = await self._session.execute(
+            update(outbound_intents)
+            .where(
+                outbound_intents.c.id.in_(candidates),
+                outbound_intents.c.account_id == account_id,
+                outbound_intents.c.state == OutboundIntentState.UNKNOWN,
+            )
+            .values(
+                last_error_code="telegram_random_id_mapping_unavailable",
+                updated_at=now,
+            )
+        )
+        return int(getattr(result, "rowcount", 0))
+
     async def record_read_high_watermark(
         self,
         *,
@@ -925,6 +1148,7 @@ class TelegramLifecycleRepository:
                     select(outbound_intents).where(
                         outbound_intents.c.id == intent_id,
                         outbound_intents.c.account_id == account_id,
+                        outbound_intents.c.scope_erased_at.is_(None),
                     )
                 )
             )

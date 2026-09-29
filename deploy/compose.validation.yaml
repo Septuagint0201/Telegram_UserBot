@@ -1,0 +1,124 @@
+# VALIDATION ONLY. This override deliberately avoids the host's production 443 listener.
+# A PASS here proves loopback/internal-TLS Compose contracts only; it is never public-443,
+# ACME, firewall, deployment, or production evidence.
+name: telegram-userbot-validation-${VALIDATION_RUN_ID:?set a unique validation run id}
+services:
+  https-gateway:
+    ports: !override
+      - target: 8443
+        published: "${VALIDATION_HTTPS_PORT:-18443}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    environment:
+      PUBLIC_HOST: validation.localhost
+      ACME_EMAIL: validation@example.invalid
+      TLS_MODE: internal
+    labels:
+      org.telegram-userbot.validation-only: "true"
+      org.telegram-userbot.evidence-scope: synthetic-compose-only
+  app:
+    command: !override
+      - -m
+      - telegram_userbot.processes.synthetic_ready
+      - --service
+      - app
+    environment:
+      APP_ENV: validation
+      BOOTSTRAP_MAINTENANCE: "0"
+      TUDT_SYNTHETIC_READY_VALIDATION: ${TUDT_SYNTHETIC_READY_VALIDATION:?explicit validation acknowledgement required}
+    labels:
+      org.telegram-userbot.validation-only: "true"
+      org.telegram-userbot.evidence-scope: synthetic-compose-only
+  control:
+    command: !override
+      - -m
+      - telegram_userbot.processes.synthetic_ready
+      - --service
+      - control
+    environment:
+      APP_ENV: validation
+      BOOTSTRAP_MAINTENANCE: "0"
+      TUDT_SYNTHETIC_READY_VALIDATION: ${TUDT_SYNTHETIC_READY_VALIDATION:?explicit validation acknowledgement required}
+    labels:
+      org.telegram-userbot.validation-only: "true"
+      org.telegram-userbot.evidence-scope: synthetic-compose-only
+  worker:
+    command: !override
+      - -m
+      - telegram_userbot.processes.synthetic_ready
+      - --service
+      - worker
+    environment:
+      APP_ENV: validation
+      BOOTSTRAP_MAINTENANCE: "0"
+      TUDT_SYNTHETIC_READY_VALIDATION: ${TUDT_SYNTHETIC_READY_VALIDATION:?explicit validation acknowledgement required}
+    labels:
+      org.telegram-userbot.validation-only: "true"
+      org.telegram-userbot.evidence-scope: synthetic-compose-only
+  postgres:
+    # Validation has no initialized pgBackRest stanza or off-host repository.  Keep
+    # this synthetic database bootable without changing production WAL settings.
+    command: !override
+      - postgres
+      - -c
+      - archive_mode=off
+    environment:
+      PGBACKREST_REPO_TYPE: posix
+      TUDT_LOCAL_BACKUP_VALIDATION: explicit-local-synthetic-only
+    volumes: !override
+      - type: volume
+        source: postgres-data
+        target: /var/lib/postgresql/data
+      - type: volume
+        source: pgbackrest-spool
+        target: /var/spool/pgbackrest
+      - type: bind
+        source: ${OPS_STATE_DIR:?set the isolated validation operations state directory}
+        target: /ops-state
+        bind:
+          create_host_path: false
+      - type: volume
+        source: pgbackrest-validation-repository
+        target: /backup-repository
+      # !override replaces the production volume list, so retain the explicit
+      # fresh-cluster bootstrap mount required by compose.bootstrap.yaml.
+      - type: bind
+        source: ./postgres/bootstrap
+        target: /docker-entrypoint-initdb.d
+        read_only: true
+        bind:
+          create_host_path: false
+    labels:
+      org.telegram-userbot.validation-only: "true"
+      org.telegram-userbot.evidence-scope: synthetic-compose-only
+  session-backup:
+    environment:
+      RESTIC_REPOSITORY: /local-restic-repository
+      TUDT_LOCAL_BACKUP_VALIDATION: explicit-local-synthetic-only
+    volumes: !override
+      - type: volume
+        source: telethon-session
+        target: /session
+        read_only: true
+      - type: bind
+        source: ${OPS_STATE_DIR:?set the isolated validation operations state directory}
+        target: /ops-state
+        bind:
+          create_host_path: false
+      - type: volume
+        source: restic-validation-repository
+        target: /local-restic-repository
+    labels:
+      org.telegram-userbot.validation-only: "true"
+      org.telegram-userbot.evidence-scope: synthetic-compose-only
+  data-export:
+    labels:
+      org.telegram-userbot.validation-only: "true"
+      org.telegram-userbot.evidence-scope: synthetic-compose-only
+  ops-monitor:
+    labels:
+      org.telegram-userbot.validation-only: "true"
+      org.telegram-userbot.evidence-scope: synthetic-compose-only
+volumes:
+  pgbackrest-validation-repository: {}
+  restic-validation-repository: {}

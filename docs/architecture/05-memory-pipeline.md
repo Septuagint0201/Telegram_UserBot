@@ -8,6 +8,15 @@
 
 当前状态：V1 架构基线。
 
+2026-09-29 实现补充：已有 pending embedding 分块的实际消费者已接入 Worker，
+使用数据库租约、固定 provider 快照、返回后的来源/删除检查和向量校验。
+Memory Agent 文本与图片输入、提案/摘要提交、水位及自动分块生产现已接入。含图请求的提案
+保守地全部进入审核候选；纯图片证据保留视觉标记。日/周周期调度已接入，按 Telegram 创建时间
+切片、固定 IANA 时区与 UTC 边界；周期覆盖独立于 rolling watermark，迟到输入使依赖周摘要递归失效。
+影子空间重建/覆盖验收/切换/回退、大积压分块和显式历史时区重切现已接入并完成隔离初验，操作与限制见 [Worker 运行说明](../runbooks/worker-runtime.md)。
+见 [Memory runtime](../runbooks/memory-runtime.md) 与
+[embedding runbook](../runbooks/embedding-runtime.md)。下文是管线目标契约；完整 Compose 与真实服务全链路仍待后续验证。
+
 ## 2. 已确认决策
 
 | 主题 | V1 决策 |

@@ -30,6 +30,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
+from telegram_userbot.adapters.persistence.metadata_erasure_rules import METADATA_ERASURE_V1
+from telegram_userbot.adapters.persistence.retention_erasure_rules import RETENTION_ERASURE_V1
+from telegram_userbot.adapters.persistence.scope_erasure_rules import PAYLOAD_ERASURE_V1
+from telegram_userbot.platform.compatibility import EXPECTED_SCHEMA_REVISION
+
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",
@@ -189,7 +194,9 @@ message_events = Table(
         ForeignKey("accounts.id", name="fk_message_events_account_id_accounts"),
         nullable=False,
     ),
-    Column("conversation_id", UUID_TYPE),
+    # Unsupported peers are retained as content-free event envelopes. They do
+    # not belong to a conversation, while account scope remains mandatory.
+    Column("conversation_id", UUID_TYPE, nullable=True),
     Column("event_kind", Text, nullable=False),
     Column("telegram_message_id", BigInteger),
     Column("grouped_id", BigInteger),
@@ -389,6 +396,7 @@ media_objects = Table(
     Column("width", Integer),
     Column("height", Integer),
     Column("parent_object_id", UUID_TYPE),
+    Column("source_revision_id", UUID_TYPE),
     Column("validation_error_code", Text),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     Column("ready_at", UTC_TIMESTAMP),
@@ -408,6 +416,11 @@ media_objects = Table(
         ["parent_object_id", "account_id"],
         ["media_objects.id", "media_objects.account_id"],
         name="fk_media_objects_parent_scope",
+    ),
+    ForeignKeyConstraint(
+        ["source_revision_id", "account_id"],
+        ["message_revisions.id", "message_revisions.account_id"],
+        name="fk_media_objects_source_scope",
     ),
     UniqueConstraint("id", "account_id", name="uq_media_objects_id_account"),
     CheckConstraint("object_kind IN ('original','provider_copy')", name="object_kind_values"),
@@ -1706,6 +1719,9 @@ model_runs = Table(
     Column("account_id", UUID_TYPE, nullable=False),
     Column("conversation_id", UUID_TYPE),
     Column("turn_id", UUID_TYPE),
+    Column("memory_job_id", UUID_TYPE),
+    Column("proactive_job_id", UUID_TYPE),
+    Column("delivery_turn_id", UUID_TYPE),
     Column("logical_role", Text, nullable=False),
     Column("model_profile_id", UUID_TYPE, nullable=False),
     Column("purpose", Text, nullable=False),
@@ -1718,9 +1734,11 @@ model_runs = Table(
     Column("credential_version_id", UUID_TYPE, nullable=False),
     Column("context_manifest_id", UUID_TYPE),
     Column("memory_input_manifest_id", UUID_TYPE),
+    Column("proactive_input_manifest_id", UUID_TYPE),
     Column("prompt_version", Text, nullable=False),
     Column("prompt_bundle_sha256", LargeBinary, nullable=False),
     Column("capability_snapshot_sha256", LargeBinary, nullable=False),
+    Column("orchestration_claim_fingerprint", LargeBinary, nullable=False),
     Column("input_fingerprint", LargeBinary, nullable=False),
     Column("output_fingerprint", LargeBinary),
     Column("adapter_version", Text, nullable=False),
@@ -1768,8 +1786,48 @@ model_runs = Table(
         name="fk_model_runs_credential_version",
     ),
     CheckConstraint(
-        "logical_role IN ('main_ai','memory_agent','proactive_agent','embedding')",
+        "logical_role IN ('main_ai','memory_agent','proactive_agent')",
         name="logical_role_values",
+    ),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "delivery_turn_id",
+        "logical_role",
+        name="uq_model_runs_delivery_scope",
+    ),
+    ForeignKeyConstraint(
+        ["delivery_turn_id", "account_id", "conversation_id"],
+        [
+            "conversation_turns.id",
+            "conversation_turns.account_id",
+            "conversation_turns.conversation_id",
+        ],
+        name="fk_model_runs_delivery_turn",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+    CheckConstraint(
+        "(turn_id IS NOT NULL)::integer + (memory_job_id IS NOT NULL)::integer + "
+        "(proactive_job_id IS NOT NULL)::integer = 1",
+        name="owner_exactly_one",
+    ),
+    CheckConstraint(
+        "(turn_id IS NOT NULL AND logical_role = 'main_ai' AND "
+        "purpose IN ('conversation_reply','copilot_reactive_draft') AND "
+        "memory_input_manifest_id IS NULL AND proactive_input_manifest_id IS NULL) OR "
+        "(memory_job_id IS NOT NULL AND logical_role = 'memory_agent' AND "
+        "purpose IN ('memory_episode','memory_rolling_summary','memory_consolidation',"
+        "'memory_reconciliation') AND turn_id IS NULL AND "
+        "context_manifest_id IS NULL AND memory_input_manifest_id IS NOT NULL AND "
+        "proactive_input_manifest_id IS NULL) OR "
+        "(proactive_job_id IS NOT NULL AND turn_id IS NULL AND memory_job_id IS NULL AND "
+        "context_manifest_id IS NULL AND memory_input_manifest_id IS NULL AND "
+        "proactive_input_manifest_id IS NOT NULL AND "
+        "((logical_role = 'proactive_agent' AND purpose = 'proactive_decision') OR "
+        "(logical_role = 'main_ai' AND purpose = 'proactive_final')))",
+        name="owner_role_purpose_match",
     ),
     CheckConstraint(
         "state IN ('created','running','output_ready','succeeded','retry_wait','superseded',"
@@ -1783,6 +1841,10 @@ model_runs = Table(
         "octet_length(input_fingerprint) = 32 AND "
         "(output_fingerprint IS NULL OR octet_length(output_fingerprint) = 32)",
         name="fingerprints_32_bytes",
+    ),
+    CheckConstraint(
+        "octet_length(orchestration_claim_fingerprint) = 32",
+        name="orchestration_claim_fingerprint_32_bytes",
     ),
     CheckConstraint("input_tokens IS NULL OR input_tokens >= 0", name="input_tokens_nonnegative"),
     CheckConstraint(
@@ -1801,6 +1863,24 @@ model_runs = Table(
         name="uq_model_runs_turn_role_scope",
     ),
     UniqueConstraint("id", "account_id", "logical_role", name="uq_model_runs_id_account_role"),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "memory_job_id",
+        "logical_role",
+        "purpose",
+        name="uq_model_runs_memory_owner_scope",
+    ),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "proactive_job_id",
+        "logical_role",
+        "purpose",
+        name="uq_model_runs_proactive_owner_scope",
+    ),
 )
 Index(
     "uq_model_runs_turn_generation",
@@ -1809,6 +1889,23 @@ Index(
     model_runs.c.generation_no,
     unique=True,
     postgresql_where=model_runs.c.turn_id.is_not(None),
+)
+Index(
+    "uq_model_runs_memory_generation",
+    model_runs.c.memory_job_id,
+    model_runs.c.logical_role,
+    model_runs.c.generation_no,
+    unique=True,
+    postgresql_where=model_runs.c.memory_job_id.is_not(None),
+)
+Index(
+    "uq_model_runs_proactive_purpose_generation",
+    model_runs.c.proactive_job_id,
+    model_runs.c.logical_role,
+    model_runs.c.purpose,
+    model_runs.c.generation_no,
+    unique=True,
+    postgresql_where=model_runs.c.proactive_job_id.is_not(None),
 )
 
 model_run_attempts = Table(
@@ -1961,7 +2058,7 @@ copilot_drafts = Table(
             "model_runs.id",
             "model_runs.account_id",
             "model_runs.conversation_id",
-            "model_runs.turn_id",
+            "model_runs.delivery_turn_id",
             "model_runs.logical_role",
         ],
         name="fk_copilot_drafts_model_run_scope",
@@ -2840,6 +2937,9 @@ memory_jobs = Table(
     UniqueConstraint("account_id", "idempotency_key", name="uq_memory_jobs_idempotency"),
     UniqueConstraint("conversation_id", "job_kind", "generation", name="uq_memory_jobs_generation"),
     UniqueConstraint("id", "account_id", name="uq_memory_jobs_id_account"),
+    UniqueConstraint(
+        "id", "account_id", "conversation_id", name="uq_memory_jobs_conversation_scope"
+    ),
 )
 Index(
     "ix_memory_jobs_pending_due",
@@ -2867,6 +2967,8 @@ memory_input_manifests = Table(
     Column("memory_job_id", UUID_TYPE, nullable=False),
     Column("generation", Integer, nullable=False),
     Column("manifest_kind", Text, nullable=False),
+    Column("logical_role", Text, nullable=False, server_default=text("'memory_agent'")),
+    Column("purpose", Text, nullable=False),
     Column("range_start_event_id", BigInteger, nullable=False),
     Column("range_end_event_id", BigInteger, nullable=False),
     Column("pipeline_version", Text, nullable=False),
@@ -2877,6 +2979,8 @@ memory_input_manifests = Table(
     Column("model_config_version_id", UUID_TYPE),
     Column("credential_version_id", UUID_TYPE),
     Column("timezone_snapshot", Text),
+    Column("prompt_bundle_sha256", LargeBinary),
+    Column("capability_snapshot_sha256", LargeBinary),
     Column("input_token_estimate", Integer, nullable=False),
     Column("image_count", Integer, nullable=False),
     Column("manifest_sha256", LargeBinary, nullable=False),
@@ -2888,8 +2992,8 @@ memory_input_manifests = Table(
         name="fk_memory_input_manifests_conversation_scope",
     ),
     ForeignKeyConstraint(
-        ["memory_job_id", "account_id"],
-        ["memory_jobs.id", "memory_jobs.account_id"],
+        ["memory_job_id", "account_id", "conversation_id"],
+        ["memory_jobs.id", "memory_jobs.account_id", "memory_jobs.conversation_id"],
         name="fk_memory_input_manifests_job_scope",
     ),
     ForeignKeyConstraint(
@@ -2907,6 +3011,21 @@ memory_input_manifests = Table(
         name="manifest_kind_values",
     ),
     CheckConstraint(
+        "logical_role = 'memory_agent'",
+        name="logical_role_memory_agent",
+    ),
+    CheckConstraint(
+        "(manifest_kind = 'episode' AND purpose = 'memory_episode' AND "
+        "output_schema_version = 1) OR "
+        "(manifest_kind = 'rolling_summary' AND purpose = 'memory_rolling_summary' AND "
+        "output_schema_version = 2) OR "
+        "(manifest_kind = 'consolidation' AND purpose = 'memory_consolidation' AND "
+        "output_schema_version IN (2, 3)) OR "
+        "(manifest_kind = 'reconciliation' AND purpose = 'memory_reconciliation' AND "
+        "output_schema_version = 1)",
+        name="kind_purpose_match",
+    ),
+    CheckConstraint(
         "generation > 0 AND range_end_event_id >= range_start_event_id", name="range_values"
     ),
     CheckConstraint(
@@ -2915,8 +3034,45 @@ memory_input_manifests = Table(
         name="manifest_estimates_valid",
     ),
     CheckConstraint("octet_length(manifest_sha256) = 32", name="manifest_hash_32_bytes"),
+    CheckConstraint(
+        "prompt_bundle_sha256 IS NULL OR octet_length(prompt_bundle_sha256) = 32",
+        name="prompt_hash_32_bytes",
+    ),
+    CheckConstraint(
+        "capability_snapshot_sha256 IS NULL OR octet_length(capability_snapshot_sha256) = 32",
+        name="capability_hash_32_bytes",
+    ),
+    CheckConstraint(
+        "(model_config_version_id IS NULL AND credential_version_id IS NULL AND "
+        "prompt_bundle_sha256 IS NULL AND capability_snapshot_sha256 IS NULL) OR "
+        "(model_config_version_id IS NOT NULL AND credential_version_id IS NOT NULL AND "
+        "prompt_bundle_sha256 IS NOT NULL AND capability_snapshot_sha256 IS NOT NULL)",
+        name="generation_provenance_complete",
+    ),
     UniqueConstraint("memory_job_id", "generation", name="uq_memory_input_manifests_generation"),
     UniqueConstraint("id", "account_id", name="uq_memory_input_manifests_id_account"),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "memory_job_id",
+        name="uq_memory_input_manifests_owner_scope",
+    ),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "memory_job_id",
+        "logical_role",
+        "purpose",
+        "model_config_version_id",
+        "credential_version_id",
+        "prompt_version",
+        "prompt_bundle_sha256",
+        "capability_snapshot_sha256",
+        "output_schema_version",
+        name="uq_memory_input_manifests_run_provenance",
+    ),
     UniqueConstraint(
         "account_id",
         "manifest_sha256",
@@ -2952,6 +3108,9 @@ memory_input_manifest_items = Table(
     Column("inclusion_role", Text, nullable=False),
     Column("trust_class", Text, nullable=False),
     Column("source_content_sha256", LargeBinary, nullable=False),
+    Column("source_revision", Text),
+    Column("source_redacted", Boolean),
+    Column("source_visual_only", Boolean),
     Column("selection_reason_code", Text, nullable=False),
     ForeignKeyConstraint(
         ["manifest_id", "account_id"],
@@ -2996,6 +3155,12 @@ memory_input_manifest_items = Table(
         name="typed_source_matches",
     ),
     CheckConstraint("octet_length(source_content_sha256) = 32", name="source_hash_32_bytes"),
+    CheckConstraint(
+        "(source_revision IS NULL AND source_redacted IS NULL AND source_visual_only IS NULL) OR "
+        "(source_revision IS NOT NULL AND source_redacted IS NOT NULL AND "
+        "source_visual_only IS NOT NULL)",
+        name="source_snapshot_complete",
+    ),
     UniqueConstraint("manifest_id", "ordinal", name="uq_memory_manifest_items_ordinal"),
 )
 Index(
@@ -3365,6 +3530,7 @@ Index("ix_memory_proposal_evidence_revision", memory_proposal_evidence.c.message
 memory_evidence = Table(
     "memory_evidence",
     metadata,
+    Column("id", UUID_TYPE, primary_key=True, server_default=text("gen_random_uuid()")),
     Column("memory_version_id", UUID_TYPE, nullable=False),
     Column("account_id", UUID_TYPE, nullable=False),
     Column("message_revision_id", UUID_TYPE),
@@ -3375,8 +3541,11 @@ memory_evidence = Table(
     Column("trust_class", Text, nullable=False),
     Column("source_content_sha256", LargeBinary, nullable=False),
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
-    PrimaryKeyConstraint(
-        "memory_version_id", "evidence_role", "source_content_sha256", name="pk_memory_evidence"
+    UniqueConstraint(
+        "memory_version_id",
+        "evidence_role",
+        "source_content_sha256",
+        name="uq_memory_evidence_source",
     ),
     ForeignKeyConstraint(
         ["memory_version_id", "account_id"],
@@ -4017,16 +4186,16 @@ proactive_occurrences = Table(
     CheckConstraint(
         "window_start_at < window_end_at AND hard_deadline_at >= window_start_at "
         "AND hard_deadline_at <= window_end_at",
-        name="ck_proactive_occurrences_window_values",
+        name="window_values",
     ),
     CheckConstraint("importance >= 0 AND importance <= 1", name="importance_bounded"),
     CheckConstraint(
         "contact_setting_version IS NULL OR contact_setting_version > 0",
-        name="ck_proactive_occurrences_contact_setting_version_positive",
+        name="contact_setting_version_positive",
     ),
     CheckConstraint(
         "relationship_state_version IS NULL OR relationship_state_version > 0",
-        name="ck_proactive_occurrences_relationship_state_version_positive",
+        name="relationship_state_version_positive",
     ),
     UniqueConstraint("occurrence_key", name="uq_proactive_occurrences_key"),
     UniqueConstraint("id", "account_id", name="uq_proactive_occurrences_id_account"),
@@ -4060,6 +4229,12 @@ proactive_occurrence_evidence = Table(
     CheckConstraint("octet_length(source_hash) = 32", name="source_hash_32_bytes"),
     CheckConstraint("length(summary) BETWEEN 1 AND 500", name="summary_length"),
     PrimaryKeyConstraint("occurrence_id", "ordinal", name="pk_proactive_occurrence_evidence"),
+    UniqueConstraint(
+        "occurrence_id",
+        "account_id",
+        "ordinal",
+        name="uq_proactive_occurrence_evidence_scope",
+    ),
 )
 
 proactive_candidates = Table(
@@ -4108,11 +4283,11 @@ proactive_candidates = Table(
     ),
     CheckConstraint(
         "contact_setting_version IS NULL OR contact_setting_version > 0",
-        name="ck_proactive_candidates_contact_setting_version_positive",
+        name="contact_setting_version_positive",
     ),
     CheckConstraint(
         "relationship_state_version IS NULL OR relationship_state_version > 0",
-        name="ck_proactive_candidates_relationship_state_version_positive",
+        name="relationship_state_version_positive",
     ),
     CheckConstraint(
         "state IN ('open','evaluating','send_selected','deferred_once',"
@@ -4124,6 +4299,9 @@ proactive_candidates = Table(
     ),
     UniqueConstraint("candidate_key", name="uq_proactive_candidates_key"),
     UniqueConstraint("id", "account_id", name="uq_proactive_candidates_id_account"),
+    UniqueConstraint(
+        "id", "account_id", "conversation_id", name="uq_proactive_candidates_conversation_scope"
+    ),
 )
 Index("ix_proactive_candidates_due", proactive_candidates.c.state, proactive_candidates.c.due_at)
 
@@ -4160,6 +4338,7 @@ proactive_jobs = Table(
     Column("id", UUID_TYPE, primary_key=True),
     Column("account_id", UUID_TYPE, nullable=False),
     Column("candidate_id", UUID_TYPE),
+    Column("conversation_id", UUID_TYPE),
     Column("job_kind", Text, nullable=False),
     Column("idempotency_key", LargeBinary, nullable=False),
     Column("available_at", UTC_TIMESTAMP, nullable=False),
@@ -4172,13 +4351,28 @@ proactive_jobs = Table(
     Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
     ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_proactive_jobs_account"),
     ForeignKeyConstraint(
-        ["candidate_id", "account_id"],
-        ["proactive_candidates.id", "proactive_candidates.account_id"],
+        ["candidate_id", "account_id", "conversation_id"],
+        [
+            "proactive_candidates.id",
+            "proactive_candidates.account_id",
+            "proactive_candidates.conversation_id",
+        ],
         name="fk_proactive_jobs_candidate_scope",
+    ),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_proactive_jobs_conversation_scope",
     ),
     CheckConstraint("octet_length(idempotency_key) = 32", name="idempotency_key_32_bytes"),
     CheckConstraint(
         "job_kind IN ('candidate_due','compensation_scan','budget_reaper')", name="job_kind_values"
+    ),
+    CheckConstraint(
+        "(job_kind = 'candidate_due' AND candidate_id IS NOT NULL AND "
+        "conversation_id IS NOT NULL) OR (job_kind IN ('compensation_scan','budget_reaper') "
+        "AND candidate_id IS NULL AND conversation_id IS NULL)",
+        name="candidate_scope_matches_kind",
     ),
     CheckConstraint(
         "state IN ('pending','leased','retry_wait','succeeded','expired','dead_letter')",
@@ -4192,6 +4386,9 @@ proactive_jobs = Table(
         name="lease_fields_match",
     ),
     UniqueConstraint("account_id", "idempotency_key", name="uq_proactive_jobs_account_idempotency"),
+    UniqueConstraint(
+        "id", "account_id", "conversation_id", name="uq_proactive_jobs_conversation_scope"
+    ),
 )
 Index("ix_proactive_jobs_due", proactive_jobs.c.state, proactive_jobs.c.available_at)
 
@@ -4393,8 +4590,12 @@ proactive_decisions = Table(
         name="fk_proactive_decisions_conversation_scope",
     ),
     ForeignKeyConstraint(
-        ["candidate_id", "account_id"],
-        ["proactive_candidates.id", "proactive_candidates.account_id"],
+        ["candidate_id", "account_id", "conversation_id"],
+        [
+            "proactive_candidates.id",
+            "proactive_candidates.account_id",
+            "proactive_candidates.conversation_id",
+        ],
         name="fk_proactive_decisions_candidate_scope",
     ),
     ForeignKeyConstraint(
@@ -4419,6 +4620,13 @@ proactive_decisions = Table(
     ),
     UniqueConstraint(
         "id", "account_id", "candidate_id", name="uq_proactive_decisions_candidate_scope"
+    ),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "candidate_id",
+        name="uq_proactive_decisions_owner_scope",
     ),
 )
 
@@ -4510,3 +4718,712 @@ M7_TABLES = (
     "proactive_state_transitions",
     "proactive_scan_cursors",
 )
+
+
+# M8 freezes each proactive provider request independently.  A candidate-due
+# job owns two different manifests: the Proactive Agent decision input and,
+# only after an accepted decision exists, the Main AI final-message input.
+# Their role/purpose/config/credential provenance cannot be interchanged.
+proactive_input_manifests = Table(
+    "proactive_input_manifests",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("conversation_id", UUID_TYPE, nullable=False),
+    Column("proactive_job_id", UUID_TYPE, nullable=False),
+    Column("candidate_id", UUID_TYPE, nullable=False),
+    Column("proactive_decision_id", UUID_TYPE),
+    Column("logical_role", Text, nullable=False),
+    Column("purpose", Text, nullable=False),
+    Column("job_fencing_token", BigInteger, nullable=False),
+    Column("candidate_generation", Integer, nullable=False),
+    Column("candidate_key", LargeBinary, nullable=False),
+    Column("candidate_membership_hash", LargeBinary, nullable=False),
+    Column("decision_snapshot", JSONB),
+    Column("decision_snapshot_sha256", LargeBinary),
+    Column("mode_version", BigInteger, nullable=False),
+    Column("content_revision", BigInteger, nullable=False),
+    Column("activity_revision", BigInteger, nullable=False),
+    Column("policy_version_id", UUID_TYPE, nullable=False),
+    Column("policy_version_no", Integer, nullable=False),
+    Column("policy_snapshot", JSONB, nullable=False),
+    Column("policy_snapshot_sha256", LargeBinary, nullable=False),
+    Column("timezone_snapshot", Text, nullable=False),
+    Column("context_contract_version", Text, nullable=False),
+    Column("prompt_version_id", UUID_TYPE, nullable=False),
+    Column("prompt_version", Text, nullable=False),
+    Column("prompt_bundle_sha256", LargeBinary, nullable=False),
+    Column("model_config_version_id", UUID_TYPE, nullable=False),
+    Column("credential_version_id", UUID_TYPE, nullable=False),
+    Column("capability_snapshot_sha256", LargeBinary, nullable=False),
+    Column("input_schema_version", SmallInteger, nullable=False),
+    Column("output_schema_version", SmallInteger, nullable=False),
+    Column("input_token_estimate", Integer, nullable=False),
+    Column("occurrence_count", Integer, nullable=False),
+    Column("manifest_sha256", LargeBinary),
+    Column("sealed_at", UTC_TIMESTAMP),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["account_id"], ["accounts.id"], name="fk_proactive_input_manifests_account"
+    ),
+    ForeignKeyConstraint(
+        ["conversation_id", "account_id"],
+        ["conversations.id", "conversations.account_id"],
+        name="fk_proactive_input_manifests_conversation_scope",
+    ),
+    ForeignKeyConstraint(
+        ["proactive_job_id", "account_id", "conversation_id"],
+        ["proactive_jobs.id", "proactive_jobs.account_id", "proactive_jobs.conversation_id"],
+        name="fk_proactive_input_manifests_job_scope",
+    ),
+    ForeignKeyConstraint(
+        ["candidate_id", "account_id", "conversation_id"],
+        [
+            "proactive_candidates.id",
+            "proactive_candidates.account_id",
+            "proactive_candidates.conversation_id",
+        ],
+        name="fk_proactive_input_manifests_candidate_scope",
+    ),
+    ForeignKeyConstraint(
+        ["proactive_decision_id", "account_id", "conversation_id", "candidate_id"],
+        [
+            "proactive_decisions.id",
+            "proactive_decisions.account_id",
+            "proactive_decisions.conversation_id",
+            "proactive_decisions.candidate_id",
+        ],
+        name="fk_proactive_input_manifests_decision_scope",
+    ),
+    ForeignKeyConstraint(
+        ["policy_version_id", "account_id"],
+        ["proactive_policies.id", "proactive_policies.account_id"],
+        name="fk_proactive_input_manifests_policy_scope",
+    ),
+    ForeignKeyConstraint(
+        ["prompt_version_id"],
+        ["prompt_versions.id"],
+        name="fk_proactive_input_manifests_prompt",
+    ),
+    ForeignKeyConstraint(
+        ["model_config_version_id"],
+        ["model_config_versions.id"],
+        name="fk_proactive_input_manifests_config",
+    ),
+    ForeignKeyConstraint(
+        ["credential_version_id"],
+        ["model_credential_versions.id"],
+        name="fk_proactive_input_manifests_credential",
+    ),
+    CheckConstraint(
+        "(logical_role = 'proactive_agent' AND purpose = 'proactive_decision' AND "
+        "proactive_decision_id IS NULL AND decision_snapshot IS NULL AND "
+        "decision_snapshot_sha256 IS NULL AND output_schema_version = 1) OR "
+        "(logical_role = 'main_ai' AND "
+        "purpose = 'proactive_final' AND proactive_decision_id IS NOT NULL AND "
+        "decision_snapshot IS NOT NULL AND decision_snapshot_sha256 IS NOT NULL AND "
+        "output_schema_version = 2)",
+        name="role_purpose_decision_match",
+    ),
+    CheckConstraint(
+        "job_fencing_token > 0 AND candidate_generation > 0 AND policy_version_no > 0 AND "
+        "mode_version > 0 AND content_revision >= 0 AND activity_revision >= 0",
+        name="version_snapshots_valid",
+    ),
+    CheckConstraint(
+        "input_schema_version > 0 AND output_schema_version > 0 AND "
+        "input_token_estimate >= 0 AND occurrence_count > 0",
+        name="input_estimates_valid",
+    ),
+    CheckConstraint(
+        "octet_length(candidate_key) = 32 AND octet_length(candidate_membership_hash) = 32 "
+        "AND octet_length(policy_snapshot_sha256) = 32 AND "
+        "(decision_snapshot_sha256 IS NULL OR octet_length(decision_snapshot_sha256) = 32) AND "
+        "octet_length(prompt_bundle_sha256) = 32 AND "
+        "octet_length(capability_snapshot_sha256) = 32 AND "
+        "(manifest_sha256 IS NULL OR octet_length(manifest_sha256) = 32)",
+        name="hashes_32_bytes",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(policy_snapshot) = 'object' AND "
+        "(decision_snapshot IS NULL OR jsonb_typeof(decision_snapshot) = 'object')",
+        name="policy_snapshot_object",
+    ),
+    CheckConstraint(
+        "(sealed_at IS NULL AND manifest_sha256 IS NULL) OR "
+        "(sealed_at IS NOT NULL AND manifest_sha256 IS NOT NULL)",
+        name="seal_hash_match",
+    ),
+    UniqueConstraint(
+        "proactive_job_id", "purpose", name="uq_proactive_input_manifests_job_purpose"
+    ),
+    UniqueConstraint("id", "account_id", name="uq_proactive_input_manifests_id_account"),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "proactive_job_id",
+        "logical_role",
+        "purpose",
+        name="uq_proactive_input_manifests_run_scope",
+    ),
+    UniqueConstraint(
+        "id",
+        "account_id",
+        "conversation_id",
+        "proactive_job_id",
+        "logical_role",
+        "purpose",
+        "model_config_version_id",
+        "credential_version_id",
+        "prompt_version",
+        "prompt_bundle_sha256",
+        "capability_snapshot_sha256",
+        "output_schema_version",
+        name="uq_proactive_input_manifests_run_provenance",
+    ),
+)
+
+proactive_input_manifest_items = Table(
+    "proactive_input_manifest_items",
+    metadata,
+    Column("manifest_id", UUID_TYPE, nullable=False),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("occurrence_id", UUID_TYPE, nullable=False),
+    Column("occurrence_ordinal", Integer, nullable=False),
+    Column("occurrence_generation", Integer, nullable=False),
+    Column("occurrence_key", LargeBinary, nullable=False),
+    Column("evidence_ordinal", Integer, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("source_id", UUID_TYPE, nullable=False),
+    Column("source_version", Text, nullable=False),
+    Column("source_hash", LargeBinary, nullable=False),
+    Column("summary", Text, nullable=False),
+    ForeignKeyConstraint(
+        ["manifest_id", "account_id"],
+        ["proactive_input_manifests.id", "proactive_input_manifests.account_id"],
+        name="fk_proactive_input_manifest_items_manifest_scope",
+    ),
+    ForeignKeyConstraint(
+        ["occurrence_id", "account_id", "evidence_ordinal"],
+        [
+            "proactive_occurrence_evidence.occurrence_id",
+            "proactive_occurrence_evidence.account_id",
+            "proactive_occurrence_evidence.ordinal",
+        ],
+        name="fk_proactive_input_manifest_items_evidence_scope",
+    ),
+    CheckConstraint(
+        "ordinal > 0 AND occurrence_ordinal > 0 AND occurrence_generation > 0 AND "
+        "evidence_ordinal > 0",
+        name="ordinals_positive",
+    ),
+    CheckConstraint(
+        "source_type IN ('life_event','intention','relationship','message_revision','rule')",
+        name="source_type_values",
+    ),
+    CheckConstraint(
+        "octet_length(occurrence_key) = 32 AND octet_length(source_hash) = 32",
+        name="hashes_32_bytes",
+    ),
+    CheckConstraint("length(summary) BETWEEN 1 AND 500", name="summary_length"),
+    PrimaryKeyConstraint("manifest_id", "ordinal", name="pk_proactive_input_manifest_items"),
+    UniqueConstraint(
+        "manifest_id",
+        "occurrence_ordinal",
+        "evidence_ordinal",
+        name="uq_proactive_input_manifest_items_membership",
+    ),
+)
+
+M8_MODEL_TABLES = (
+    "proactive_input_manifests",
+    "proactive_input_manifest_items",
+)
+
+
+# M8 production runtime status. Heartbeats update only the current projection;
+# ``service_status_events`` is reserved for meaningful state transitions.
+service_instances = Table(
+    "service_instances",
+    metadata,
+    Column("instance_id", UUID_TYPE, primary_key=True),
+    Column("service_name", Text, nullable=False),
+    Column("started_at", UTC_TIMESTAMP, nullable=False),
+    Column("last_heartbeat_at", UTC_TIMESTAMP, nullable=False),
+    Column("readiness", Text, nullable=False),
+    Column("status_code", Text, nullable=False),
+    Column("schema_revision", Text, nullable=False),
+    Column("last_successful_operation_at", UTC_TIMESTAMP),
+    Column("metadata_schema_version", SmallInteger, nullable=False, server_default=text("1")),
+    Column("metadata", JSONB, nullable=False, server_default=EMPTY_JSON),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    UniqueConstraint("service_name", "instance_id", name="uq_service_instances_service_instance"),
+    CheckConstraint("service_name IN ('app','control','worker')", name="service_name_values"),
+    CheckConstraint(
+        f"schema_revision = '{EXPECTED_SCHEMA_REVISION}'", name="schema_revision_current"
+    ),
+    CheckConstraint(
+        "readiness IN ('starting','ready','degraded','not_ready','draining','stopped')",
+        name="readiness_values",
+    ),
+    CheckConstraint(
+        "status_code IN ("
+        "'STARTING','READY','DEGRADED','STOPPED','PROCESS_LOOP_FAILED',"
+        "'HEARTBEAT_STALE','HEARTBEAT_INVALID','MAINTENANCE_ACTIVE','DRAINING',"
+        "'REQUIRED_CONFIG_NOT_READY','DISK_SAFETY_NOT_READY','DATABASE_UNAVAILABLE',"
+        "'REDIS_UNAVAILABLE','SCHEMA_NOT_READY','RESTORE_GATE_CLOSED',"
+        "'ACCOUNT_NOT_READY','SESSION_NOT_OWNED','TELEGRAM_NOT_READY',"
+        "'CONTROL_BOT_NOT_READY','WEB_API_NOT_READY','CONSUMER_NOT_READY')",
+        name="status_code_values",
+    ),
+    CheckConstraint(
+        "((readiness = 'starting' AND status_code = 'STARTING') OR "
+        "(readiness = 'ready' AND status_code = 'READY') OR "
+        "(readiness = 'draining' AND status_code = 'DRAINING') OR "
+        "(readiness = 'stopped' AND status_code = 'STOPPED') OR "
+        "(readiness = 'degraded' AND status_code NOT IN "
+        "('STARTING','READY','DRAINING','STOPPED')) OR "
+        "(readiness = 'not_ready' AND status_code NOT IN "
+        "('STARTING','READY','DEGRADED','DRAINING','STOPPED')))",
+        name="readiness_status_match",
+    ),
+    CheckConstraint(
+        "started_at <= last_heartbeat_at AND "
+        "(last_successful_operation_at IS NULL OR "
+        "(last_successful_operation_at >= started_at AND "
+        "last_successful_operation_at <= last_heartbeat_at))",
+        name="time_order",
+    ),
+    CheckConstraint("version > 0", name="version_positive"),
+    CheckConstraint("metadata_schema_version = 1", name="metadata_schema_version_v1"),
+    CheckConstraint(
+        "jsonb_typeof(metadata) = 'object' AND "
+        "metadata ? 'deployment_id' AND "
+        "jsonb_typeof(metadata -> 'deployment_id') = 'string' AND "
+        "metadata ->> 'deployment_id' ~ '^[a-z][a-z0-9-]{2,62}$' AND "
+        "metadata - ARRAY['deployment_id','source_commit_prefix','image_digest_prefix',"
+        "'resource_profile','restart_count','queue_lag_band','disk_band',"
+        "'backup_age_band'] = '{}'::jsonb",
+        name="metadata_allowlist",
+    ),
+)
+Index(
+    "ix_service_instances_service_readiness",
+    service_instances.c.service_name,
+    service_instances.c.readiness,
+)
+Index("ix_service_instances_heartbeat", service_instances.c.last_heartbeat_at)
+
+service_status_events = Table(
+    "service_status_events",
+    metadata,
+    Column("id", BigInteger, Identity(), primary_key=True),
+    Column("instance_id", UUID_TYPE, nullable=False),
+    Column("service_name", Text, nullable=False),
+    Column("event_kind", Text, nullable=False),
+    Column("previous_readiness", Text),
+    Column("readiness", Text, nullable=False),
+    Column("previous_status_code", Text),
+    Column("status_code", Text, nullable=False),
+    Column("schema_revision", Text, nullable=False),
+    Column("occurred_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("metadata_schema_version", SmallInteger, nullable=False, server_default=text("1")),
+    Column("metadata", JSONB, nullable=False, server_default=EMPTY_JSON),
+    ForeignKeyConstraint(
+        ["service_name", "instance_id"],
+        ["service_instances.service_name", "service_instances.instance_id"],
+        name="fk_service_status_events_instance_scope",
+    ),
+    CheckConstraint("service_name IN ('app','control','worker')", name="service_name_values"),
+    CheckConstraint(
+        "schema_revision IN ('0025_m8_service_status','0026_m8_data_export',"
+        "'0027_m8_model_run_claim','0028_m8_background_model_runtime',"
+        "'0029_unsupported_peer_events','0030_scope_derived_erasure','0031_scope_export_budget',"
+        "'0032_scope_metadata_erasure','0033_media_upload_erasure','0034_scope_erasure_completion',"
+        "'0035_memory_period_summaries',"
+        f"'{EXPECTED_SCHEMA_REVISION}')",
+        name="schema_revision_current",
+    ),
+    CheckConstraint(
+        "event_kind IN ('started','status_changed','stopped')", name="event_kind_values"
+    ),
+    CheckConstraint(
+        "readiness IN ('starting','ready','degraded','not_ready','draining','stopped') AND "
+        "(previous_readiness IS NULL OR previous_readiness IN "
+        "('starting','ready','degraded','not_ready','draining','stopped'))",
+        name="readiness_values",
+    ),
+    CheckConstraint(
+        "((event_kind = 'started' AND previous_readiness IS NULL AND "
+        "previous_status_code IS NULL) OR (event_kind <> 'started' AND "
+        "previous_readiness IS NOT NULL AND previous_status_code IS NOT NULL))",
+        name="previous_state_match",
+    ),
+    CheckConstraint("event_kind <> 'stopped' OR readiness = 'stopped'", name="stopped_state_match"),
+    CheckConstraint(
+        "status_code IN ("
+        "'STARTING','READY','DEGRADED','STOPPED','PROCESS_LOOP_FAILED',"
+        "'HEARTBEAT_STALE','HEARTBEAT_INVALID','MAINTENANCE_ACTIVE','DRAINING',"
+        "'REQUIRED_CONFIG_NOT_READY','DISK_SAFETY_NOT_READY','DATABASE_UNAVAILABLE',"
+        "'REDIS_UNAVAILABLE','SCHEMA_NOT_READY','RESTORE_GATE_CLOSED',"
+        "'ACCOUNT_NOT_READY','SESSION_NOT_OWNED','TELEGRAM_NOT_READY',"
+        "'CONTROL_BOT_NOT_READY','WEB_API_NOT_READY','CONSUMER_NOT_READY') AND "
+        "(previous_status_code IS NULL OR previous_status_code IN ("
+        "'STARTING','READY','DEGRADED','STOPPED','PROCESS_LOOP_FAILED',"
+        "'HEARTBEAT_STALE','HEARTBEAT_INVALID','MAINTENANCE_ACTIVE','DRAINING',"
+        "'REQUIRED_CONFIG_NOT_READY','DISK_SAFETY_NOT_READY','DATABASE_UNAVAILABLE',"
+        "'REDIS_UNAVAILABLE','SCHEMA_NOT_READY','RESTORE_GATE_CLOSED',"
+        "'ACCOUNT_NOT_READY','SESSION_NOT_OWNED','TELEGRAM_NOT_READY',"
+        "'CONTROL_BOT_NOT_READY','WEB_API_NOT_READY','CONSUMER_NOT_READY'))",
+        name="status_code_values",
+    ),
+    CheckConstraint(
+        "((readiness = 'starting' AND status_code = 'STARTING') OR "
+        "(readiness = 'ready' AND status_code = 'READY') OR "
+        "(readiness = 'draining' AND status_code = 'DRAINING') OR "
+        "(readiness = 'stopped' AND status_code = 'STOPPED') OR "
+        "(readiness = 'degraded' AND status_code NOT IN "
+        "('STARTING','READY','DRAINING','STOPPED')) OR "
+        "(readiness = 'not_ready' AND status_code NOT IN "
+        "('STARTING','READY','DEGRADED','DRAINING','STOPPED')))",
+        name="readiness_status_match",
+    ),
+    CheckConstraint("metadata_schema_version = 1", name="metadata_schema_version_v1"),
+    CheckConstraint(
+        "jsonb_typeof(metadata) = 'object' AND "
+        "metadata ? 'deployment_id' AND "
+        "jsonb_typeof(metadata -> 'deployment_id') = 'string' AND "
+        "metadata ->> 'deployment_id' ~ '^[a-z][a-z0-9-]{2,62}$' AND "
+        "metadata - ARRAY['deployment_id','source_commit_prefix','image_digest_prefix',"
+        "'resource_profile','restart_count','queue_lag_band','disk_band',"
+        "'backup_age_band'] = '{}'::jsonb",
+        name="metadata_allowlist",
+    ),
+)
+Index(
+    "ix_service_status_events_service_occurred",
+    service_status_events.c.service_name,
+    service_status_events.c.occurred_at,
+)
+Index(
+    "ix_service_status_events_instance_occurred",
+    service_status_events.c.instance_id,
+    service_status_events.c.occurred_at,
+)
+
+# The Bot API offset is only advanced after a durable update receipt reaches a
+# terminal result.  Payloads, command text, and credentials deliberately do not
+# cross this boundary.
+control_bot_cursors = Table(
+    "control_bot_cursors",
+    metadata,
+    Column("deployment_id", Text, primary_key=True),
+    Column("bot_user_id", BigInteger, primary_key=True),
+    Column("next_offset", BigInteger, nullable=False, server_default=text("0")),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    CheckConstraint("deployment_id ~ '^[a-z][a-z0-9-]{2,62}$'", name="deployment_id_format"),
+    CheckConstraint("bot_user_id > 0", name="bot_user_id_positive"),
+    CheckConstraint("next_offset >= 0", name="next_offset_nonnegative"),
+    CheckConstraint("version > 0", name="version_positive"),
+)
+
+control_bot_update_receipts = Table(
+    "control_bot_update_receipts",
+    metadata,
+    Column("deployment_id", Text, primary_key=True),
+    Column("bot_user_id", BigInteger, primary_key=True),
+    Column("update_id", BigInteger, primary_key=True),
+    Column("state", Text, nullable=False),
+    Column("disposition", Text),
+    Column("send_state", Text, nullable=False, server_default=text("'not_required'")),
+    Column("owner_instance_id", UUID_TYPE, nullable=False),
+    Column("claimed_at", UTC_TIMESTAMP, nullable=False),
+    Column("lease_expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("attempt_count", Integer, nullable=False, server_default=text("1")),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    ForeignKeyConstraint(
+        ["deployment_id", "bot_user_id"],
+        ["control_bot_cursors.deployment_id", "control_bot_cursors.bot_user_id"],
+        name="fk_control_bot_update_receipts_cursor",
+    ),
+    CheckConstraint("bot_user_id > 0", name="bot_user_id_positive"),
+    CheckConstraint("update_id >= 0", name="update_id_nonnegative"),
+    CheckConstraint(
+        "owner_instance_id <> '00000000-0000-0000-0000-000000000000'::uuid",
+        name="owner_instance_id_non_nil",
+    ),
+    CheckConstraint("state IN ('claimed','completed')", name="state_values"),
+    CheckConstraint(
+        "disposition IS NULL OR disposition IN ('handled','ignored','rejected')",
+        name="disposition_values",
+    ),
+    CheckConstraint(
+        "send_state IN ('not_required','pending','sent','not_sent','unknown')",
+        name="send_state_values",
+    ),
+    CheckConstraint("claimed_at <= lease_expires_at", name="lease_time_order"),
+    CheckConstraint(
+        "((state = 'claimed' AND disposition IS NULL AND completed_at IS NULL AND "
+        "send_state = 'not_required') OR (state = 'completed' AND disposition IS NOT NULL "
+        "AND completed_at IS NOT NULL AND completed_at >= claimed_at))",
+        name="terminal_fields_match",
+    ),
+    CheckConstraint("attempt_count > 0 AND version > 0", name="versions_positive"),
+)
+Index(
+    "ix_control_bot_update_receipts_claimed_lease",
+    control_bot_update_receipts.c.lease_expires_at,
+    postgresql_where=control_bot_update_receipts.c.state == "claimed",
+)
+# Telethon remains the sole producer.  This watermark is recorded in the same
+# PostgreSQL transaction as durable ingestion and is never replaced by Redis.
+telegram_ingest_watermarks = Table(
+    "telegram_ingest_watermarks",
+    metadata,
+    Column("account_id", UUID_TYPE, primary_key=True),
+    Column("scope", Text, primary_key=True),
+    Column("pts", BigInteger, nullable=False),
+    Column("pts_count", Integer, nullable=False),
+    Column("update_identity", Text, nullable=False),
+    Column("durable_ingested_at", UTC_TIMESTAMP, nullable=False),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["account_id"], ["accounts.id"], name="fk_telegram_ingest_watermarks_account"
+    ),
+    CheckConstraint(
+        "scope = 'account' OR scope ~ '^channel:[1-9][0-9]{0,18}$'", name="scope_format"
+    ),
+    CheckConstraint("pts >= 0 AND pts_count >= 0", name="pts_nonnegative"),
+    CheckConstraint(
+        "update_identity ~ '^[A-Za-z][A-Za-z0-9_.:-]{0,127}$'",
+        name="update_identity_format",
+    ),
+    CheckConstraint("version > 0", name="version_positive"),
+)
+Index("ix_telegram_ingest_watermarks_updated", telegram_ingest_watermarks.c.updated_at)
+
+deployment_restore_state = Table(
+    "deployment_restore_state",
+    metadata,
+    Column("deployment_id", Text, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("gate_state", Text, nullable=False, server_default=text("'closed'")),
+    Column("restore_generation", BigInteger, nullable=False, server_default=text("1")),
+    Column("erasure_replay_verified", Boolean, nullable=False, server_default=text("false")),
+    Column("unknown_send_reconciled", Boolean, nullable=False, server_default=text("false")),
+    Column("credentials_verified", Boolean, nullable=False, server_default=text("false")),
+    Column("session_verified", Boolean, nullable=False, server_default=text("false")),
+    Column("verified_at", UTC_TIMESTAMP),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    Column("updated_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    ForeignKeyConstraint(
+        ["account_id"], ["accounts.id"], name="fk_deployment_restore_state_account"
+    ),
+    CheckConstraint("deployment_id ~ '^[a-z][a-z0-9-]{2,62}$'", name="deployment_id_format"),
+    CheckConstraint("gate_state IN ('closed','validating','open')", name="gate_state_values"),
+    CheckConstraint("restore_generation > 0 AND version > 0", name="versions_positive"),
+    CheckConstraint(
+        "gate_state <> 'open' OR (erasure_replay_verified AND "
+        "unknown_send_reconciled AND credentials_verified AND session_verified AND "
+        "verified_at IS NOT NULL)",
+        name="open_requires_verification",
+    ),
+    UniqueConstraint(
+        "deployment_id", "account_id", name="uq_deployment_restore_state_deployment_account"
+    ),
+)
+
+erasure_media_checks = Table(
+    "erasure_media_checks",
+    metadata,
+    Column("request_id", UUID_TYPE, ForeignKey("data_erasure_requests.id"), primary_key=True),
+    Column("checked_at", UTC_TIMESTAMP, nullable=False),
+)
+
+erasure_restore_replays = Table(
+    "erasure_restore_replays",
+    metadata,
+    Column(
+        "deployment_id",
+        Text,
+        ForeignKey("deployment_restore_state.deployment_id"),
+        primary_key=True,
+    ),
+    Column("restore_generation", BigInteger, primary_key=True),
+    Column("request_id", UUID_TYPE, ForeignKey("data_erasure_requests.id"), primary_key=True),
+)
+
+# Data-export requests are a durable, content-free operator queue.  Artifact
+# paths, age recipients, database content, and decrypted material never enter
+# this table.
+data_export_requests = Table(
+    "data_export_requests",
+    metadata,
+    Column("id", UUID_TYPE, primary_key=True),
+    Column("account_id", UUID_TYPE, nullable=False),
+    Column("contact_id", UUID_TYPE),
+    Column("state", Text, nullable=False, server_default=text("'requested'")),
+    Column("requested_by", Text, nullable=False),
+    Column("format_version", SmallInteger, nullable=False, server_default=text("1")),
+    Column("created_at", UTC_TIMESTAMP, nullable=False, server_default=NOW),
+    Column("expires_at", UTC_TIMESTAMP, nullable=False),
+    Column("owner_instance_id", UUID_TYPE),
+    Column("lease_expires_at", UTC_TIMESTAMP),
+    Column("completed_at", UTC_TIMESTAMP),
+    Column("artifact_sha256", LargeBinary),
+    Column("artifact_deleted_at", UTC_TIMESTAMP),
+    Column("erasure_requested_at", UTC_TIMESTAMP),
+    Column("erasure_cleaned_at", UTC_TIMESTAMP),
+    Column("last_error_code", Text),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("version", BigInteger, nullable=False, server_default=text("1")),
+    ForeignKeyConstraint(["account_id"], ["accounts.id"], name="fk_data_export_requests_account"),
+    ForeignKeyConstraint(
+        ["contact_id", "account_id"],
+        ["contacts.id", "contacts.account_id"],
+        name="fk_data_export_requests_contact_scope",
+    ),
+    CheckConstraint(
+        "state IN ('requested','claimed','completed','failed','expired')",
+        name="state_values",
+    ),
+    CheckConstraint(
+        "requested_by ~ '^actor:hmac-sha256:[0-9a-f]{64}$'",
+        name="requested_by_format",
+    ),
+    CheckConstraint("format_version = 1", name="format_version_current"),
+    CheckConstraint("created_at < expires_at", name="expiry_after_creation"),
+    CheckConstraint(
+        "owner_instance_id IS NULL OR owner_instance_id <> "
+        "'00000000-0000-0000-0000-000000000000'::uuid",
+        name="owner_non_nil",
+    ),
+    CheckConstraint(
+        "artifact_sha256 IS NULL OR octet_length(artifact_sha256) = 32",
+        name="artifact_sha256_size",
+    ),
+    CheckConstraint(
+        "last_error_code IS NULL OR last_error_code ~ '^[A-Z][A-Z0-9_]{0,63}$'",
+        name="last_error_code_format",
+    ),
+    CheckConstraint("attempt_count >= 0 AND version > 0", name="counters_valid"),
+    CheckConstraint(
+        "erasure_cleaned_at IS NULL OR (erasure_requested_at IS NOT NULL "
+        "AND erasure_cleaned_at >= erasure_requested_at)",
+        name="erasure_cleanup_order",
+    ),
+    CheckConstraint(
+        "(state = 'requested' AND owner_instance_id IS NULL AND lease_expires_at IS NULL "
+        "AND completed_at IS NULL AND artifact_sha256 IS NULL AND artifact_deleted_at IS NULL "
+        "AND last_error_code IS NULL AND attempt_count = 0) OR "
+        "(state = 'claimed' AND owner_instance_id IS NOT NULL AND lease_expires_at IS NOT NULL "
+        "AND completed_at IS NULL AND artifact_sha256 IS NULL AND artifact_deleted_at IS NULL "
+        "AND last_error_code IS NULL AND attempt_count > 0) OR "
+        "(state = 'completed' AND owner_instance_id IS NULL AND lease_expires_at IS NULL "
+        "AND completed_at IS NOT NULL AND artifact_sha256 IS NOT NULL "
+        "AND last_error_code IS NULL AND attempt_count > 0 "
+        "AND (artifact_deleted_at IS NULL OR artifact_deleted_at >= completed_at)) OR "
+        "(state IN ('failed','expired') AND owner_instance_id IS NULL "
+        "AND lease_expires_at IS NULL AND completed_at IS NOT NULL "
+        "AND artifact_sha256 IS NULL AND artifact_deleted_at IS NULL "
+        "AND last_error_code IS NOT NULL)",
+        name="state_fields_match",
+    ),
+)
+Index(
+    "ix_data_export_requests_claimable",
+    data_export_requests.c.created_at,
+    postgresql_where=data_export_requests.c.state.in_(("requested", "claimed")),
+)
+Index(
+    "ix_data_export_requests_artifact_expiry",
+    data_export_requests.c.expires_at,
+    postgresql_where=and_(
+        data_export_requests.c.state == "completed",
+        data_export_requests.c.artifact_deleted_at.is_(None),
+    ),
+)
+
+M8_TABLES = (
+    "service_instances",
+    "service_status_events",
+    "control_bot_cursors",
+    "control_bot_update_receipts",
+    "telegram_ingest_watermarks",
+    "deployment_restore_state",
+)
+
+M8_EXPORT_TABLES = ("data_export_requests",)
+
+# 0030 preserves normal required payloads while allowing an explicit empty tombstone.
+for _name, _rule in PAYLOAD_ERASURE_V1.items():
+    _table = metadata.tables[_name]
+    _table.append_column(Column("scope_erased_at", UTC_TIMESTAMP))
+    for _column in _rule.originally_required:
+        _table.c[_column].nullable = True
+    _empty = [f"{column} IS NULL" for column in _rule.null_columns]
+    _empty += [f"{column} = '{{}}'::jsonb" for column in _rule.empty_objects]
+    _table.append_constraint(
+        CheckConstraint(
+            "scope_erased_at IS NULL OR (" + " AND ".join(_empty) + ")",
+            name="scope_erased_payload_empty",
+        )
+    )
+    if _rule.originally_required:
+        _table.append_constraint(
+            CheckConstraint(
+                "scope_erased_at IS NOT NULL OR ("
+                + " AND ".join(f"{column} IS NOT NULL" for column in _rule.originally_required)
+                + ")",
+                name="scope_live_payload_required",
+            )
+        )
+
+for _name, _metadata_rule in (METADATA_ERASURE_V1 | RETENTION_ERASURE_V1).items():
+    _table = metadata.tables[_name]
+    _table.append_column(Column("metadata_erased_at", UTC_TIMESTAMP))
+    for _column in _metadata_rule.originally_required:
+        _table.c[_column].nullable = True
+    _empty = [f"{column} IS NULL" for column in _metadata_rule.null_columns]
+    _empty += [f"{column} = '{{}}'::jsonb" for column in _metadata_rule.empty_objects]
+    _empty += [f"{column} = false" for column in _metadata_rule.false_columns]
+    _table.append_constraint(
+        CheckConstraint(
+            "metadata_erased_at IS NULL OR (" + " AND ".join(_empty) + ")",
+            name="metadata_erased_empty",
+        )
+    )
+    if _metadata_rule.originally_required:
+        _table.append_constraint(
+            CheckConstraint(
+                "metadata_erased_at IS NOT NULL OR ("
+                + " AND ".join(
+                    f"{column} IS NOT NULL" for column in _metadata_rule.originally_required
+                )
+                + ")",
+                name="metadata_live_required",
+            )
+        )
+
+for _constraint in proactive_input_manifests.constraints:
+    if not isinstance(_constraint, CheckConstraint):
+        continue
+    if _constraint.name == "ck_proactive_input_manifests_seal_hash_match":
+        _constraint.sqltext = text(
+            "(scope_erased_at IS NOT NULL AND manifest_sha256 IS NULL) OR ("
+            + str(_constraint.sqltext)
+            + ")"
+        )
+    elif _constraint.name == "ck_proactive_input_manifests_role_purpose_decision_match":
+        _constraint.sqltext = text(
+            str(_constraint.sqltext).replace(
+                "decision_snapshot IS NOT NULL AND decision_snapshot_sha256 IS NOT NULL",
+                "(scope_erased_at IS NOT NULL OR (decision_snapshot IS NOT NULL "
+                "AND decision_snapshot_sha256 IS NOT NULL))",
+            )
+        )

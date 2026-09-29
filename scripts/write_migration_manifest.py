@@ -10,10 +10,16 @@ from typing import cast
 import psycopg
 import redis
 
+from telegram_userbot.platform.compatibility import (
+    EXPECTED_PGVECTOR_VERSION,
+    EXPECTED_SCHEMA_REVISION,
+)
+
 EXPECTED_POSTGRES_MAJOR = "17"
-EXPECTED_VECTOR_VERSION = "0.8.6"
+EXPECTED_VECTOR_VERSION = EXPECTED_PGVECTOR_VERSION
 EXPECTED_REDIS_VERSION = "8.2.8"
-EXPECTED_REVISION = "0024_runtime_fencing_provenance"
+EXPECTED_REVISION = EXPECTED_SCHEMA_REVISION
+HEAD_MIGRATION = EXPECTED_REVISION
 
 
 def _hash(path: Path) -> str:
@@ -66,9 +72,7 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
     return {
         "schema_version": 3,
         "revision": EXPECTED_REVISION,
-        "migration_sha256": _hash(
-            root / "alembic" / "versions" / "0024_runtime_fencing_provenance.py"
-        ),
+        "migration_sha256": _hash(root / "alembic" / "versions" / f"{HEAD_MIGRATION}.py"),
         "migration_chain_sha256": {
             "0001_m1_durable_state": _hash(
                 root / "alembic" / "versions" / "0001_m1_durable_state.py"
@@ -142,8 +146,19 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
             "0024_runtime_fencing_provenance": _hash(
                 root / "alembic" / "versions" / "0024_runtime_fencing_provenance.py"
             ),
+            "0025_m8_service_status": _hash(
+                root / "alembic" / "versions" / "0025_m8_service_status.py"
+            ),
+            "0026_m8_data_export": _hash(root / "alembic" / "versions" / "0026_m8_data_export.py"),
+            "0027_m8_model_run_claim": _hash(
+                root / "alembic" / "versions" / "0027_m8_model_run_claim.py"
+            ),
+            "0028_m8_background_model_runtime": _hash(
+                root / "alembic" / "versions" / "0028_m8_background_model_runtime.py"
+            ),
+            HEAD_MIGRATION: _hash(root / "alembic" / "versions" / f"{HEAD_MIGRATION}.py"),
         },
-        "roles_sha256": _hash(root / "deploy" / "postgres" / "m7_roles.sql"),
+        "roles_sha256": _hash(root / "deploy" / "postgres" / "m8_roles.sql"),
         "role_chain_sha256": {
             "m1": _hash(root / "deploy" / "postgres" / "m1_roles.sql"),
             "m2": _hash(root / "deploy" / "postgres" / "m2_roles.sql"),
@@ -152,6 +167,7 @@ def build_manifest(root: Path, database_dsn: str, redis_url: str) -> dict[str, o
             "m5": _hash(root / "deploy" / "postgres" / "m5_roles.sql"),
             "m6": _hash(root / "deploy" / "postgres" / "m6_roles.sql"),
             "m7": _hash(root / "deploy" / "postgres" / "m7_roles.sql"),
+            "m8": _hash(root / "deploy" / "postgres" / "m8_roles.sql"),
         },
         "table_count": len(tables),
         "tables": [row[0] for row in tables],

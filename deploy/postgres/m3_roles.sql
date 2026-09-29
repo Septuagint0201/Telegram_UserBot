@@ -41,7 +41,7 @@ GRANT SELECT ON
   telegram_operations
 TO telegram_userbot_worker_runtime;
 
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO
+GRANT USAGE ON SEQUENCE outbound_attempts_id_seq TO
   telegram_userbot_app_runtime,
   telegram_userbot_maintenance;
 

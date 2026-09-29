@@ -78,6 +78,16 @@ def deny_external_network(
         raise AssertionError("tests must not access external network addresses")
 
     def guarded_connect(sock: socket.socket, address: Any) -> None:
+        # Local Docker/Testcontainers uses an AF_UNIX control socket. It cannot reach an
+        # external network address and is required by explicit integration tests.
+        unix_family = getattr(socket, "AF_UNIX", None)
+        if (
+            unix_family is not None
+            and sock.family == unix_family
+            and isinstance(address, (str, bytes))
+        ):
+            original_connect(sock, address)
+            return
         if _is_allowed_address(address, allowed):
             original_connect(sock, address)
             return

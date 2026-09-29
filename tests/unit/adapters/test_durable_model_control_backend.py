@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -164,6 +165,8 @@ class RepositoryFake:
 
 def backend(
     repository: RepositoryFake,
+    *,
+    commit_boundary: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[DurableModelControlBackend, EndpointAdmissionFake, CapabilityProbeFake]:
     endpoint = EndpointAdmissionFake()
     probe = CapabilityProbeFake()
@@ -174,6 +177,7 @@ def backend(
             capability_probe=probe,
             launch_tokens=LaunchTokenCodec(SensitiveValue(b"p" * 32)),
             deployment_version=3,
+            commit_boundary=commit_boundary,
         ),
         endpoint,
         probe,
@@ -207,6 +211,65 @@ async def test_durable_backend_completes_controlled_generation_draft_and_activat
     assert await service.activate(admin_id=42, role=LogicalRole.MAIN_AI, now=NOW)
     assert repository.validated
     assert repository.activated
+
+
+@pytest.mark.unit
+async def test_validation_commits_prepare_before_probe_and_finalizes_afterwards() -> None:
+    events: list[str] = []
+
+    class OrderedRepository(RepositoryFake):
+        async def record_capabilities(self, **values: Any) -> None:
+            assert values
+            events.append("record")
+
+        async def validate_draft(self, **values: Any) -> bool:
+            assert values["expected_draft_version"] == 1
+            events.append("finalize")
+            return True
+
+    class OrderedProbe(CapabilityProbeFake):
+        async def probe(self, *, config: CanonicalModelConfig, now: datetime) -> ModelCapabilities:
+            assert events == ["prepare_commit"]
+            events.append("probe")
+            return await super().probe(config=config, now=now)
+
+    async def commit_boundary() -> None:
+        events.append("prepare_commit")
+
+    repository = OrderedRepository()
+    repository.draft = ModelControlDraftRecord(
+        uuid7(),
+        uuid7(),
+        repository.profile_id,
+        LogicalRole.MAIN_AI.value,
+        ProfileKind.GENERATION.value,
+        repository.credential_id,
+        1,
+        1,
+        "editing",
+        None,
+        uuid7(),
+        ModelProtocol.ANTHROPIC_MESSAGES.value,
+        "synthetic-model",
+        0.2,
+        512,
+        30,
+        True,
+        {"auth_scheme": "x_api_key"},
+        None,
+        NOW + timedelta(minutes=5),
+    )
+    service = DurableModelControlBackend(
+        repository=cast(ModelConfigurationRepository, repository),
+        endpoint_admission=EndpointAdmissionFake(),
+        capability_probe=OrderedProbe(),
+        launch_tokens=LaunchTokenCodec(SensitiveValue(b"p" * 32)),
+        deployment_version=3,
+        commit_boundary=commit_boundary,
+    )
+
+    assert await service.validate(admin_id=42, role=LogicalRole.MAIN_AI, now=NOW)
+    assert events == ["prepare_commit", "probe", "record", "finalize"]
 
 
 @pytest.mark.unit
@@ -302,7 +365,7 @@ async def test_durable_backend_rejects_invalid_wizard_values_without_advancing()
         ("embedding", "openai_responses", "protocol"),
         ("bad\x01name", "synthetic-model", "model_name"),
         ("3", "default", "temperature"),
-        ("0", "512", "max_output_tokens"),
+        ("8193", "512", "max_output_tokens"),
         ("0", "30", "timeout_seconds"),
         ("maybe", "yes", "enabled"),
         ("ultra", "high", "protocol_options"),

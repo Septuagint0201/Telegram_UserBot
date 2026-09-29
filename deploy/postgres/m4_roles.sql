@@ -91,11 +91,14 @@ GRANT SELECT ON
   control_commands
 TO telegram_userbot_worker_runtime;
 
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO
-  telegram_userbot_app_runtime,
-  telegram_userbot_control_runtime,
-  telegram_userbot_worker_runtime,
-  telegram_userbot_maintenance;
+GRANT USAGE ON SEQUENCE
+  conversation_mode_history_id_seq,
+  account_control_history_id_seq,
+  model_run_attempts_id_seq
+TO telegram_userbot_app_runtime;
+GRANT USAGE ON SEQUENCE
+  model_run_attempts_id_seq
+TO telegram_userbot_maintenance;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO telegram_userbot_backup;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public

@@ -1,0 +1,518 @@
+{
+  "name": "${COMPOSE_PROJECT_NAME:?set a stable deployment project name}",
+  "services": {
+    "https-gateway": {
+      "image": "${GATEWAY_IMAGE:?set an immutable gateway image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "1000:1000",
+      "ports": [
+        {"target": 8443, "published": "443", "protocol": "tcp"}
+      ],
+      "networks": ["edge"],
+      "volumes": [
+        {"type": "bind", "source": "./caddy/Caddyfile", "target": "/etc/caddy/Caddyfile", "read_only": true, "bind": {"create_host_path": false}},
+        {"type": "volume", "source": "caddy-data", "target": "/data"}
+      ],
+      "environment": {
+        "PUBLIC_HOST": "${PUBLIC_HOST:?set the canonical public DNS name}",
+        "ACME_EMAIL": "${ACME_EMAIL:?set the non-secret ACME contact}",
+        "TLS_MODE": ""
+      },
+      "read_only": true,
+      "init": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 256,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=16m,uid=1000,gid=1000", "/config:rw,noexec,nosuid,size=16m,uid=1000,gid=1000"],
+      "healthcheck": {
+        "test": ["CMD", "wget", "-q", "-T", "2", "--spider", "--no-check-certificate", "https://127.0.0.1:9443/internal/alive"],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 3,
+        "start_period": "30s"
+      },
+      "restart": "unless-stopped",
+      "stop_grace_period": "30s",
+      "mem_limit": "128m",
+      "cpus": 0.25,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}},
+      "depends_on": {"control": {"condition": "service_started"}}
+    },
+    "app": {
+      "image": "${APP_IMAGE:?set an immutable application image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "command": ["-m", "telegram_userbot.processes.app"],
+      "networks": ["backend"],
+      "volumes": [
+        {"type": "bind", "source": "${DEPLOYMENT_CONFIG_DIR:?set the reviewed non-secret deployment config directory}", "target": "/etc/telegram-userbot/config", "read_only": true, "bind": {"create_host_path": false}},
+        {"type": "volume", "source": "telethon-session", "target": "/var/lib/telegram-userbot/session"},
+        {"type": "volume", "source": "media-data", "target": "/var/lib/telegram-userbot/media"}
+      ],
+      "secrets": ["telegram_api_id", "telegram_api_hash", "credential_master_keyring", "app_database_password", "redis_password", "erasure_hmac_key"],
+      "group_add": ["21001", "21003", "21004", "21009", "21010"],
+      "environment": {
+        "APP_ENV": "production",
+        "DEPLOYMENT_ID": "${DEPLOYMENT_ID:?}",
+        "SOURCE_COMMIT": "${SOURCE_COMMIT:?set the exact 40-character source commit}",
+        "PUBLIC_HOST": "${PUBLIC_HOST:?set the canonical public DNS name}",
+        "TZ": "${TZ:-UTC}",
+        "BOOTSTRAP_MAINTENANCE": "${BOOTSTRAP_MAINTENANCE:-1}",
+        "CONFIG_FILE": "/etc/telegram-userbot/config/deployment.json",
+        "DATABASE_HOST": "postgres",
+        "DATABASE_PORT": "5432",
+        "DATABASE_NAME": "telegram_userbot",
+        "DATABASE_USER": "telegram_userbot_app_login",
+        "DATABASE_RUNTIME_ROLE": "telegram_userbot_app_runtime",
+        "DATABASE_PASSWORD_FILE": "/run/secrets/app_database_password",
+        "REDIS_HOST": "redis",
+        "REDIS_PORT": "6379",
+        "REDIS_PASSWORD_FILE": "/run/secrets/redis_password",
+        "TELEGRAM_API_ID_FILE": "/run/secrets/telegram_api_id",
+        "TELEGRAM_API_HASH_FILE": "/run/secrets/telegram_api_hash",
+        "CREDENTIAL_KEYRING_FILE": "/run/secrets/credential_master_keyring",
+        "ERASURE_HMAC_KEY_FILE": "/run/secrets/erasure_hmac_key"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 256,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=128m,uid=10001,gid=10001", "/var/lib/telegram-userbot/runtime:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"],
+      "healthcheck": {
+        "test": ["CMD", "/opt/venv/bin/python", "-m", "telegram_userbot.processes.healthcheck", "--service", "app"],
+        "interval": "10s",
+        "timeout": "10s",
+        "retries": 3,
+        "start_period": "30s"
+      },
+      "restart": "unless-stopped",
+      "stop_grace_period": "90s",
+      "mem_limit": "640m",
+      "cpus": 0.75,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}},
+      "depends_on": {
+        "migrate": {"condition": "service_completed_successfully"},
+        "postgres": {"condition": "service_healthy"},
+        "redis": {"condition": "service_healthy"}
+      }
+    },
+    "control": {
+      "image": "${APP_IMAGE:?set an immutable application image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "command": ["-m", "telegram_userbot.processes.control"],
+      "networks": ["edge", "backend"],
+      "expose": ["8080"],
+      "volumes": [
+        {"type": "bind", "source": "${DEPLOYMENT_CONFIG_DIR:?set the reviewed non-secret deployment config directory}", "target": "/etc/telegram-userbot/config", "read_only": true, "bind": {"create_host_path": false}}
+      ],
+      "secrets": ["control_bot_token", "credential_master_keyring", "control_database_password", "redis_password", "export_actor_hmac_key"],
+      "group_add": ["21002", "21003", "21005", "21009", "21012"],
+      "environment": {
+        "APP_ENV": "production",
+        "DEPLOYMENT_ID": "${DEPLOYMENT_ID:?}",
+        "SOURCE_COMMIT": "${SOURCE_COMMIT:?set the exact 40-character source commit}",
+        "PUBLIC_HOST": "${PUBLIC_HOST:?set the canonical public DNS name}",
+        "TZ": "${TZ:-UTC}",
+        "BOOTSTRAP_MAINTENANCE": "${BOOTSTRAP_MAINTENANCE:-1}",
+        "PUBLIC_BASE_URL": "https://${PUBLIC_HOST:?set the canonical public DNS name}",
+        "CONFIG_FILE": "/etc/telegram-userbot/config/deployment.json",
+        "DATABASE_HOST": "postgres",
+        "DATABASE_PORT": "5432",
+        "DATABASE_NAME": "telegram_userbot",
+        "DATABASE_USER": "telegram_userbot_control_login",
+        "DATABASE_RUNTIME_ROLE": "telegram_userbot_control_runtime",
+        "DATABASE_PASSWORD_FILE": "/run/secrets/control_database_password",
+        "REDIS_HOST": "redis",
+        "REDIS_PORT": "6379",
+        "REDIS_PASSWORD_FILE": "/run/secrets/redis_password",
+        "CONTROL_BOT_TOKEN_FILE": "/run/secrets/control_bot_token",
+        "CREDENTIAL_KEYRING_FILE": "/run/secrets/credential_master_keyring",
+        "EXPORT_ACTOR_HMAC_KEY_FILE": "/run/secrets/export_actor_hmac_key"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 192,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001", "/var/lib/telegram-userbot/runtime:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"],
+      "healthcheck": {
+        "test": ["CMD", "/opt/venv/bin/python", "-m", "telegram_userbot.processes.healthcheck", "--service", "control"],
+        "interval": "10s",
+        "timeout": "10s",
+        "retries": 3,
+        "start_period": "30s"
+      },
+      "restart": "unless-stopped",
+      "stop_grace_period": "30s",
+      "mem_limit": "256m",
+      "cpus": 0.35,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}},
+      "depends_on": {
+        "migrate": {"condition": "service_completed_successfully"},
+        "postgres": {"condition": "service_healthy"},
+        "redis": {"condition": "service_healthy"}
+      }
+    },
+    "worker": {
+      "image": "${APP_IMAGE:?set an immutable application image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "command": ["-m", "telegram_userbot.processes.worker"],
+      "networks": ["backend"],
+      "volumes": [
+        {"type": "bind", "source": "${DEPLOYMENT_CONFIG_DIR:?set the reviewed non-secret deployment config directory}", "target": "/etc/telegram-userbot/config", "read_only": true, "bind": {"create_host_path": false}},
+        {"type": "volume", "source": "media-data", "target": "/var/lib/telegram-userbot/media", "read_only": true}
+      ],
+      "secrets": ["credential_master_keyring", "worker_database_password", "redis_password", "erasure_hmac_key"],
+      "group_add": ["21003", "21006", "21009", "21010"],
+      "environment": {
+        "APP_ENV": "production",
+        "DEPLOYMENT_ID": "${DEPLOYMENT_ID:?}",
+        "SOURCE_COMMIT": "${SOURCE_COMMIT:?set the exact 40-character source commit}",
+        "PUBLIC_HOST": "${PUBLIC_HOST:?set the canonical public DNS name}",
+        "TZ": "${TZ:-UTC}",
+        "BOOTSTRAP_MAINTENANCE": "${BOOTSTRAP_MAINTENANCE:-1}",
+        "CONFIG_FILE": "/etc/telegram-userbot/config/deployment.json",
+        "DATABASE_HOST": "postgres",
+        "DATABASE_PORT": "5432",
+        "DATABASE_NAME": "telegram_userbot",
+        "DATABASE_USER": "telegram_userbot_worker_login",
+        "DATABASE_RUNTIME_ROLE": "telegram_userbot_worker_runtime",
+        "DATABASE_PASSWORD_FILE": "/run/secrets/worker_database_password",
+        "REDIS_HOST": "redis",
+        "REDIS_PORT": "6379",
+        "REDIS_PASSWORD_FILE": "/run/secrets/redis_password",
+        "CREDENTIAL_KEYRING_FILE": "/run/secrets/credential_master_keyring",
+        "ERASURE_HMAC_KEY_FILE": "/run/secrets/erasure_hmac_key",
+        "WORKER_CONCURRENCY": "2",
+        "IMAGE_STAGE_CONCURRENCY": "1"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 256,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=128m,uid=10001,gid=10001", "/var/lib/telegram-userbot/runtime:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"],
+      "healthcheck": {
+        "test": ["CMD", "/opt/venv/bin/python", "-m", "telegram_userbot.processes.healthcheck", "--service", "worker"],
+        "interval": "10s",
+        "timeout": "10s",
+        "retries": 3,
+        "start_period": "30s"
+      },
+      "restart": "unless-stopped",
+      "stop_grace_period": "90s",
+      "mem_limit": "768m",
+      "cpus": 0.75,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}},
+      "depends_on": {
+        "migrate": {"condition": "service_completed_successfully"},
+        "postgres": {"condition": "service_healthy"},
+        "redis": {"condition": "service_healthy"}
+      }
+    },
+    "postgres": {
+      "image": "${DATABASE_IMAGE:?set an immutable PostgreSQL/pgvector/pgBackRest image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "999:999",
+      "command": [
+        "postgres",
+        "-c", "archive_mode=on",
+        "-c", "archive_timeout=300s",
+        "-c", "archive_command=pgbackrest --config=/run/pgbackrest/pgbackrest.conf --stanza=telegram-userbot archive-push %p"
+      ],
+      "networks": ["backend", "backup-egress"],
+      "volumes": [
+        {"type": "volume", "source": "postgres-data", "target": "/var/lib/postgresql/data"},
+        {"type": "volume", "source": "pgbackrest-spool", "target": "/var/spool/pgbackrest"},
+        {"type": "bind", "source": "${OPS_STATE_DIR:?set the root-owned operations state directory}", "target": "/ops-state", "bind": {"create_host_path": false}}
+      ],
+      "secrets": ["pgbackrest_s3_access_key", "pgbackrest_s3_secret_key", "pgbackrest_repo_cipher_pass"],
+      "group_add": ["21013", "21016"],
+      "environment": {
+        "POSTGRES_DB": "telegram_userbot",
+        "POSTGRES_USER": "postgres",
+        "PGDATA": "/var/lib/postgresql/data/pgdata",
+        "DEPLOYMENT_ID": "${DEPLOYMENT_ID:?}",
+        "PGBACKREST_REPO_TYPE": "s3",
+        "PGBACKREST_S3_ENDPOINT": "${PGBACKREST_S3_ENDPOINT:?set the reviewed S3-compatible endpoint host}",
+        "PGBACKREST_S3_BUCKET": "${PGBACKREST_S3_BUCKET:?set the dedicated backup bucket}",
+        "PGBACKREST_S3_REGION": "${PGBACKREST_S3_REGION:?set the backup region}",
+        "PGBACKREST_S3_URI_STYLE": "${PGBACKREST_S3_URI_STYLE:-host}"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 256,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=64m,uid=999,gid=999", "/var/run/postgresql:rw,noexec,nosuid,size=16m,uid=999,gid=999", "/run/pgbackrest:rw,noexec,nosuid,size=4m,uid=999,gid=999"],
+      "healthcheck": {
+        "test": ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "telegram_userbot"],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 3,
+        "start_period": "30s"
+      },
+      "restart": "unless-stopped",
+      "stop_grace_period": "120s",
+      "mem_limit": "768m",
+      "cpus": 0.75,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}}
+    },
+    "redis": {
+      "image": "redis:8.2.8-bookworm@sha256:d9f0312a780ed4ad4c22c05790c20b3902498b563ba01f3f1134678b9bd2f311",
+      "platform": "linux/amd64",
+      "user": "999:999",
+      "command": ["sh", "-ec", "umask 077; { cat /etc/redis/redis.conf; printf '\nrequirepass '; cat /run/secrets/redis_password; printf '\n'; } > /run/redis/runtime.conf; exec redis-server /run/redis/runtime.conf"],
+      "networks": ["backend"],
+      "volumes": [
+        {"type": "bind", "source": "./redis/redis.conf", "target": "/etc/redis/redis.conf", "read_only": true, "bind": {"create_host_path": false}},
+        {"type": "volume", "source": "redis-data", "target": "/data"}
+      ],
+      "secrets": ["redis_password"],
+      "group_add": ["21009"],
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 128,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=16m,uid=999,gid=999", "/run/redis:rw,noexec,nosuid,size=4m,uid=999,gid=999"],
+      "healthcheck": {
+        "test": ["CMD-SHELL", "REDISCLI_AUTH=$$(cat /run/secrets/redis_password) redis-cli --no-auth-warning ping | grep -qx PONG"],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 3,
+        "start_period": "30s"
+      },
+      "restart": "unless-stopped",
+      "stop_grace_period": "60s",
+      "mem_limit": "256m",
+      "cpus": 0.35,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}}
+    },
+    "migrate": {
+      "image": "${APP_IMAGE:?set an immutable application image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "command": ["-m", "telegram_userbot.processes.migrate", "upgrade", "head"],
+      "networks": ["backend"],
+      "volumes": [
+        {"type": "bind", "source": "${DEPLOYMENT_CONFIG_DIR:?set the reviewed non-secret deployment config directory}", "target": "/etc/telegram-userbot/config", "read_only": true, "bind": {"create_host_path": false}}
+      ],
+      "secrets": ["migrator_database_password"],
+      "group_add": ["21007"],
+      "environment": {
+        "APP_ENV": "production",
+        "DEPLOYMENT_ID": "${DEPLOYMENT_ID:?}",
+        "SOURCE_COMMIT": "${SOURCE_COMMIT:?set the exact 40-character source commit}",
+        "PUBLIC_HOST": "${PUBLIC_HOST:?set the canonical public DNS name}",
+        "TZ": "${TZ:-UTC}",
+        "BOOTSTRAP_MAINTENANCE": "1",
+        "CONFIG_FILE": "/etc/telegram-userbot/config/deployment.json",
+        "DATABASE_HOST": "postgres",
+        "DATABASE_PORT": "5432",
+        "DATABASE_NAME": "telegram_userbot",
+        "DATABASE_USER": "telegram_userbot_migrator_login",
+        "DATABASE_RUNTIME_ROLE": "telegram_userbot_migrator",
+        "DATABASE_PASSWORD_FILE": "/run/secrets/migrator_database_password"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 128,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001", "/var/lib/telegram-userbot/runtime:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"],
+      "restart": "no",
+      "stop_grace_period": "30s",
+      "mem_limit": "256m",
+      "cpus": 0.5,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}},
+      "depends_on": {"postgres": {"condition": "service_healthy"}}
+    },
+    "session-backup": {
+      "profiles": ["ops"],
+      "image": "${OPS_IMAGE:?set an immutable one-shot operations image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "command": ["/opt/ops/session_backup.py"],
+      "networks": ["backup-egress"],
+      "volumes": [
+        {"type": "volume", "source": "telethon-session", "target": "/session", "read_only": true},
+        {"type": "bind", "source": "${OPS_STATE_DIR:?set the root-owned operations state directory}", "target": "/ops-state", "bind": {"create_host_path": false}}
+      ],
+      "secrets": ["session_restic_password", "session_s3_access_key", "session_s3_secret_key"],
+      "group_add": ["21014", "21016"],
+      "environment": {
+        "RESTIC_REPOSITORY": "${SESSION_RESTIC_REPOSITORY:?set the dedicated off-host restic repository}"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 64,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001"],
+      "restart": "no",
+      "stop_grace_period": "30s",
+      "mem_limit": "256m",
+      "cpus": 0.25,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}}
+    },
+    "data-export": {
+      "profiles": ["ops"],
+      "image": "${OPS_IMAGE:?set an immutable one-shot operations image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "command": ["/opt/ops/data_export.py", "--maintenance"],
+      "networks": ["backend"],
+      "volumes": [
+        {"type": "bind", "source": "${DEPLOYMENT_CONFIG_DIR:?set the reviewed non-secret deployment config directory}", "target": "/etc/telegram-userbot/config", "read_only": true, "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "${EXPORT_STAGING_DIR:?set the root-only export staging directory}", "target": "/export-staging", "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "${AGE_RECIPIENT_FILE:?set the reviewed age public recipient file}", "target": "/etc/telegram-userbot/export/age-recipient", "read_only": true, "bind": {"create_host_path": false}}
+      ],
+      "secrets": ["export_database_password"],
+      "group_add": ["21011", "21015"],
+      "environment": {
+        "DEPLOYMENT_ID": "${DEPLOYMENT_ID:?}",
+        "DATABASE_HOST": "postgres",
+        "DATABASE_PORT": "5432",
+        "DATABASE_NAME": "telegram_userbot",
+        "DATABASE_USER": "telegram_userbot_exporter_login",
+        "DATABASE_RUNTIME_ROLE": "telegram_userbot_export_runtime",
+        "DATABASE_PASSWORD_FILE": "/run/secrets/export_database_password",
+        "AGE_RECIPIENT_FILE": "/etc/telegram-userbot/export/age-recipient",
+        "EXPORT_STAGING_DIR": "/export-staging"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 64,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=128m,uid=10001,gid=10001"],
+      "restart": "no",
+      "stop_grace_period": "60s",
+      "mem_limit": "256m",
+      "cpus": 0.5,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}},
+      "depends_on": {
+        "migrate": {"condition": "service_completed_successfully"},
+        "postgres": {"condition": "service_healthy"}
+      }
+    },
+    "erasure-ledger-export": {
+      "profiles": ["ops"],
+      "image": "${OPS_IMAGE:?set an immutable one-shot operations image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "command": ["/opt/ops/erasure_replica.py", "--backup"],
+      "networks": ["backend", "backup-egress"],
+      "volumes": [
+        {"type": "bind", "source": "${DEPLOYMENT_CONFIG_DIR:?set the reviewed non-secret deployment config directory}", "target": "/etc/telegram-userbot/config", "read_only": true, "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "/var/lib/telegram-userbot/erasure-ledger", "target": "/erasure-ledger", "bind": {"create_host_path": false}},
+        {"type": "bind", "source": "${OPS_STATE_DIR:?set the root-owned operations state directory}", "target": "/ops-state", "bind": {"create_host_path": false}}
+      ],
+      "secrets": ["export_database_password", "erasure_hmac_key", "erasure_restic_password", "erasure_s3_access_key", "erasure_s3_secret_key"],
+      "group_add": ["21010", "21011", "21015", "21016", "21018"],
+      "environment": {
+        "ERASURE_RESTIC_REPOSITORY": "${ERASURE_RESTIC_REPOSITORY:?set the dedicated off-host erasure ledger repository}",
+        "DATABASE_HOST": "postgres",
+        "DATABASE_PORT": "5432",
+        "DATABASE_NAME": "telegram_userbot",
+        "DATABASE_USER": "telegram_userbot_exporter_login",
+        "DATABASE_RUNTIME_ROLE": "telegram_userbot_export_runtime",
+        "DATABASE_PASSWORD_FILE": "/run/secrets/export_database_password"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 64,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001"],
+      "restart": "no",
+      "stop_grace_period": "30s",
+      "mem_limit": "256m",
+      "cpus": 0.25,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}},
+      "depends_on": {
+        "migrate": {"condition": "service_completed_successfully"},
+        "postgres": {"condition": "service_healthy"}
+      }
+    },
+    "ops-monitor": {
+      "image": "${OPS_IMAGE:?set an immutable one-shot operations image name@sha256 digest}",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "command": ["/opt/ops/monitor.py"],
+      "networks": ["backend"],
+      "expose": ["9090"],
+      "volumes": [
+        {"type": "bind", "source": "${OPS_STATE_DIR:?set the root-owned operations state directory}", "target": "/ops-state", "read_only": true, "bind": {"create_host_path": false}},
+        {"type": "volume", "source": "media-data", "target": "/media", "read_only": true}
+      ],
+      "secrets": ["monitor_database_password"],
+      "group_add": ["21016", "21017"],
+      "environment": {
+        "DEPLOYMENT_ID": "${DEPLOYMENT_ID:?}",
+        "DATABASE_HOST": "postgres",
+        "DATABASE_PORT": "5432",
+        "DATABASE_NAME": "telegram_userbot",
+        "DATABASE_USER": "telegram_userbot_monitor_login",
+        "DATABASE_RUNTIME_ROLE": "telegram_userbot_monitor_runtime",
+        "DATABASE_PASSWORD_FILE": "/run/secrets/monitor_database_password",
+        "OPS_STATE_DIR": "/ops-state",
+        "MEDIA_DATA_DIR": "/media"
+      },
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "pids_limit": 64,
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=16m,uid=10001,gid=10001"],
+      "healthcheck": {
+        "test": ["CMD", "/opt/venv/bin/python", "/opt/ops/monitor.py", "--healthcheck"],
+        "interval": "10s",
+        "timeout": "10s",
+        "retries": 3,
+        "start_period": "30s"
+      },
+      "restart": "unless-stopped",
+      "stop_grace_period": "30s",
+      "mem_limit": "128m",
+      "cpus": 0.25,
+      "logging": {"driver": "local", "options": {"max-size": "10m", "max-file": "5"}},
+      "depends_on": {
+        "migrate": {"condition": "service_completed_successfully"},
+        "postgres": {"condition": "service_healthy"}
+      }
+    }
+  },
+  "networks": {
+    "edge": {"driver": "bridge"},
+    "backend": {"driver": "bridge"},
+    "backup-egress": {"driver": "bridge"}
+  },
+  "volumes": {
+    "postgres-data": {},
+    "pgbackrest-spool": {},
+    "redis-data": {},
+    "telethon-session": {},
+    "media-data": {},
+    "caddy-data": {}
+  },
+  "secrets": {
+    "telegram_api_id": {"file": "${SECRET_ROOT:?}/telegram_api_id"},
+    "telegram_api_hash": {"file": "${SECRET_ROOT:?}/telegram_api_hash"},
+    "control_bot_token": {"file": "${SECRET_ROOT:?}/control_bot_token"},
+    "credential_master_keyring": {"file": "${SECRET_ROOT:?}/credential_master_keyring"},
+    "app_database_password": {"file": "${SECRET_ROOT:?}/app_database_password"},
+    "control_database_password": {"file": "${SECRET_ROOT:?}/control_database_password"},
+    "worker_database_password": {"file": "${SECRET_ROOT:?}/worker_database_password"},
+    "migrator_database_password": {"file": "${SECRET_ROOT:?}/migrator_database_password"},
+    "postgres_database_password": {"file": "${SECRET_ROOT:?}/postgres_database_password"},
+    "redis_password": {"file": "${SECRET_ROOT:?}/redis_password"},
+    "erasure_hmac_key": {"file": "${SECRET_ROOT:?}/erasure_hmac_key"},
+    "export_database_password": {"file": "${SECRET_ROOT:?}/export_database_password"},
+    "export_actor_hmac_key": {"file": "${SECRET_ROOT:?}/export_actor_hmac_key"},
+    "pgbackrest_s3_access_key": {"file": "${SECRET_ROOT:?}/pgbackrest_s3_access_key"},
+    "pgbackrest_s3_secret_key": {"file": "${SECRET_ROOT:?}/pgbackrest_s3_secret_key"},
+    "pgbackrest_repo_cipher_pass": {"file": "${SECRET_ROOT:?}/pgbackrest_repo_cipher_pass"},
+    "session_restic_password": {"file": "${SECRET_ROOT:?}/session_restic_password"},
+    "session_s3_access_key": {"file": "${SECRET_ROOT:?}/session_s3_access_key"},
+    "session_s3_secret_key": {"file": "${SECRET_ROOT:?}/session_s3_secret_key"},
+    "monitor_database_password": {"file": "${SECRET_ROOT:?}/monitor_database_password"},
+    "erasure_restic_password": {"file": "${SECRET_ROOT:?}/erasure_restic_password"},
+    "erasure_s3_access_key": {"file": "${SECRET_ROOT:?}/erasure_s3_access_key"},
+    "erasure_s3_secret_key": {"file": "${SECRET_ROOT:?}/erasure_s3_secret_key"}
+  }
+}

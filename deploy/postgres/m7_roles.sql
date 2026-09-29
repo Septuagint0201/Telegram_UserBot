@@ -140,8 +140,3 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   proactive_state_transitions,
   proactive_scan_cursors
 TO telegram_userbot_maintenance;
-
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO
-  telegram_userbot_worker_runtime,
-  telegram_userbot_control_runtime,
-  telegram_userbot_maintenance;

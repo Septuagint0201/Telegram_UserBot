@@ -31,6 +31,7 @@ def test_runtime_dependencies_and_python_are_pinned() -> None:
         "alembic==1.19.1",
         "arq==0.28.0",
         "cryptography==50.0.0",
+        "httpcore==1.0.9",
         "httpx==0.28.1",
         "Pillow==12.3.0",
         "psycopg[binary]==3.3.4",
@@ -56,3 +57,10 @@ def test_session_scoped_integration_engine_has_matching_test_loops() -> None:
     for path in sorted((ROOT / "tests" / "integration").glob("test_*.py")):
         source = path.read_text(encoding="utf-8")
         assert 'pytestmark = pytest.mark.asyncio(loop_scope="session")' in source
+
+
+@pytest.mark.unit
+def test_no_network_guard_allows_local_docker_socket_portably() -> None:
+    conftest = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    assert 'getattr(socket, "AF_UNIX", None)' in conftest
+    assert "unix_family is not None" in conftest

@@ -113,7 +113,6 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   memory_review_actions
 TO telegram_userbot_maintenance;
 
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO
+GRANT USAGE ON SEQUENCE memory_input_manifest_items_id_seq TO
   telegram_userbot_worker_runtime,
-  telegram_userbot_control_runtime,
   telegram_userbot_maintenance;

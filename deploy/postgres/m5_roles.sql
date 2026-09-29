@@ -60,11 +60,17 @@ GRANT SELECT ON
   context_manifest_omissions
 TO telegram_userbot_worker_runtime;
 
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO
-  telegram_userbot_app_runtime,
-  telegram_userbot_control_runtime,
-  telegram_userbot_worker_runtime,
-  telegram_userbot_maintenance;
+GRANT USAGE ON SEQUENCE
+  context_manifest_items_id_seq,
+  context_manifest_omissions_id_seq
+TO telegram_userbot_app_runtime;
+GRANT USAGE ON SEQUENCE context_preview_deliveries_id_seq
+TO telegram_userbot_control_runtime;
+GRANT USAGE ON SEQUENCE
+  context_manifest_items_id_seq,
+  context_manifest_omissions_id_seq,
+  context_preview_deliveries_id_seq
+TO telegram_userbot_maintenance;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO telegram_userbot_backup;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public

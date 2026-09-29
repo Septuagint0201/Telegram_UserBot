@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "deployable": false,
+  "deployment_id": "example-not-deployable",
+  "source_commit": "0000000000000000000000000000000000000000",
+  "target": {
+    "ubuntu": "26.04",
+    "os": "linux",
+    "architecture": "amd64",
+    "vcpu": 2,
+    "memory_gib": 4,
+    "minimum_disk_gib": 40,
+    "validation_disk_gib": 64
+  },
+  "database_compatibility": {
+    "schema_revision": "0036_worker_complete",
+    "pgvector_version": "0.8.6"
+  },
+  "runtime_identity": {
+    "account_id": "01900000-0000-7000-8000-000000000001",
+    "telegram_user_id": 1000000001,
+    "control_bot_user_id": 1000000002,
+    "control_bot_username": "ExampleControlBot",
+    "control_admin_user_ids": [1000000001]
+  },
+  "startup_policy": {
+    "session_provisioning": "preprovisioned_one_shot",
+    "restore_gate_required": true
+  },
+  "images": {
+    "application": {
+      "status": "NOT_BUILT",
+      "reference": "registry.invalid/telegram-userbot-app@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "database": {
+      "status": "NOT_BUILT",
+      "reference": "registry.invalid/telegram-userbot-db@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "gateway": {
+      "status": "NOT_BUILT",
+      "reference": "registry.invalid/telegram-userbot-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "redis": {
+      "status": "NOT_BUILT",
+      "reference": "registry.invalid/telegram-userbot-redis@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "session-backup": {
+      "status": "NOT_BUILT",
+      "reference": "registry.invalid/telegram-userbot-ops@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "data-export": {
+      "status": "NOT_BUILT",
+      "reference": "registry.invalid/telegram-userbot-ops@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "public_host": "webapp.example.invalid",
+  "timezone": "UTC",
+  "resource_profile": "v1_2cpu_4g_minimum40_target",
+  "secret_manifest": "secret-files.json"
+}

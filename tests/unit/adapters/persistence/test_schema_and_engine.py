@@ -5,11 +5,20 @@ from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 import pytest
-from sqlalchemy import ForeignKeyConstraint, PrimaryKeyConstraint, Table, UniqueConstraint, text
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKeyConstraint,
+    PrimaryKeyConstraint,
+    Table,
+    UniqueConstraint,
+    text,
+)
 
 from telegram_userbot.adapters.persistence.engine import (
+    DatabaseReadinessPolicy,
     DurableStateConfigurationError,
     DurableStateSettings,
+    PostgresConnectionSettings,
     create_postgres_engine,
     schema_is_ready,
 )
@@ -17,7 +26,10 @@ from telegram_userbot.adapters.persistence.schema import (
     M1_TABLES,
     M5_TABLES,
     M6_TABLES,
+    M8_TABLES,
     context_preview_deliveries,
+    control_bot_cursors,
+    control_bot_update_receipts,
     copilot_drafts,
     memories,
     memory_proposals,
@@ -27,15 +39,20 @@ from telegram_userbot.adapters.persistence.schema import (
     outbound_delivery_groups,
     proactive_budget_reservations,
     proactive_decisions,
+    service_instances,
+    service_status_events,
     summaries,
+    telegram_ingest_watermarks,
 )
+from telegram_userbot.domain.shared.redaction import SensitiveValue
+from telegram_userbot.platform.compatibility import EXPECTED_SCHEMA_REVISION
 
 
 class FakeConnection:
     def __init__(self, values: list[object]) -> None:
         self.values = values
 
-    async def scalar(self, statement: object) -> object:
+    async def scalar(self, statement: object, parameters: object | None = None) -> object:
         return self.values.pop(0)
 
 
@@ -104,6 +121,14 @@ def test_m1_schema_inventory_and_constraint_names() -> None:
     for table in metadata.tables.values():
         assert all(constraint.name for constraint in table.constraints)
         assert all(index.name for index in table.indexes)
+        assert all(
+            not (
+                isinstance(constraint, CheckConstraint)
+                and isinstance(constraint.name, str)
+                and constraint.name.startswith(f"ck_{table.name}_ck_")
+            )
+            for constraint in table.constraints
+        ), f"{table.name} has a convention-prefixed check-constraint name"
 
     # The actual database constraint is added by 0006. Attaching it to the
     # shared MetaData would contaminate the historical 0004 partial create.
@@ -195,6 +220,27 @@ def test_m6_model_run_manifest_column_replay_is_idempotent() -> None:
     )
     assert "op.add_column" not in migration
     assert '"fk_model_runs_memory_input_manifest"' in migration
+
+
+@pytest.mark.unit
+def test_m8_model_run_claim_is_distinct_bounded_and_reversible() -> None:
+    claim_column = model_runs.c.orchestration_claim_fingerprint
+    claim_check = next(
+        constraint
+        for constraint in model_runs.constraints
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name == "ck_model_runs_orchestration_claim_fingerprint_32_bytes"
+    )
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0027_m8_model_run_claim.py"
+    ).read_text(encoding="utf-8")
+
+    assert claim_column.nullable is False
+    assert str(claim_check.sqltext) == "octet_length(orchestration_claim_fingerprint) = 32"
+    assert 'down_revision: str | Sequence[str] | None = "0026_m8_data_export"' in migration
+    assert "ADD COLUMN IF NOT EXISTS" in migration
+    assert "_backfill_orchestration_claims()" in migration
+    assert 'op.drop_column("model_runs", "orchestration_claim_fingerprint")' in migration
 
 
 @pytest.mark.unit
@@ -558,6 +604,74 @@ def test_runtime_fencing_backfill_does_not_create_implicit_bind_parameter() -> N
 
 
 @pytest.mark.unit
+def test_m8_service_status_migration_and_constraints_are_recoverable() -> None:
+    assert set(M8_TABLES) == {
+        "service_instances",
+        "service_status_events",
+        "control_bot_cursors",
+        "control_bot_update_receipts",
+        "telegram_ingest_watermarks",
+        "deployment_restore_state",
+    }
+    instance_checks = {
+        item.name for item in service_instances.constraints if isinstance(item, CheckConstraint)
+    }
+    event_checks = {
+        item.name for item in service_status_events.constraints if isinstance(item, CheckConstraint)
+    }
+    assert {
+        "ck_service_instances_schema_revision_current",
+        "ck_service_instances_status_code_values",
+        "ck_service_instances_readiness_status_match",
+        "ck_service_instances_time_order",
+        "ck_service_instances_metadata_allowlist",
+    } <= instance_checks
+    assert {
+        "ck_service_status_events_status_code_values",
+        "ck_service_status_events_previous_state_match",
+        "ck_service_status_events_metadata_allowlist",
+    } <= event_checks
+    cursor_checks = {
+        item.name for item in control_bot_cursors.constraints if isinstance(item, CheckConstraint)
+    }
+    receipt_checks = {
+        item.name
+        for item in control_bot_update_receipts.constraints
+        if isinstance(item, CheckConstraint)
+    }
+    watermark_checks = {
+        item.name
+        for item in telegram_ingest_watermarks.constraints
+        if isinstance(item, CheckConstraint)
+    }
+    assert {
+        "ck_control_bot_cursors_next_offset_nonnegative",
+        "ck_control_bot_cursors_bot_user_id_positive",
+    } <= cursor_checks
+    assert {
+        "ck_control_bot_update_receipts_terminal_fields_match",
+        "ck_control_bot_update_receipts_send_state_values",
+        "ck_control_bot_update_receipts_owner_instance_id_non_nil",
+    } <= receipt_checks
+    assert {
+        "ck_telegram_ingest_watermarks_scope_format",
+        "ck_telegram_ingest_watermarks_update_identity_format",
+        "ck_telegram_ingest_watermarks_pts_nonnegative",
+    } <= watermark_checks
+
+    migration = (
+        Path(__file__).resolve().parents[4] / "alembic" / "versions" / "0025_m8_service_status.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "0025_m8_service_status"' in migration
+    assert 'down_revision: str | Sequence[str] | None = "0024_runtime_fencing_provenance"' in (
+        migration
+    )
+    assert "ENABLE ROW LEVEL SECURITY" in migration
+    assert "FORCE ROW LEVEL SECURITY" in migration
+    assert "def downgrade() -> None:" in migration
+
+
+@pytest.mark.unit
 def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> None:
     assert not memory_review_actions.c.conversation_id.nullable
     assert not memory_proposals.c.review_version.nullable
@@ -594,10 +708,13 @@ def test_m5_m7_consistency_constraints_bind_review_and_decision_identity() -> No
 
 @pytest.mark.unit
 def test_durable_settings_are_strict_and_safe() -> None:
+    private_value = "SYNTHETIC_DATABASE_PASSWORD"
+    private_redis_value = "SYNTHETIC_REDIS_PASSWORD"
     settings = DurableStateSettings.from_mapping(
         {
-            "TUDT_DATABASE_DSN": "postgresql://user:password@db/app",
-            "TUDT_REDIS_URL": "redis://redis:6379/0",
+            "TUDT_ENVIRONMENT": "test",
+            "TUDT_DATABASE_DSN": f"postgresql://user:{private_value}@db/app",
+            "TUDT_REDIS_URL": f"redis://default:{private_redis_value}@redis:6379/0",
             "TUDT_SCHEMA_REVISION": "0001_m1_durable_state",
         }
     )
@@ -606,21 +723,35 @@ def test_durable_settings_are_strict_and_safe() -> None:
         "redis": "configured",
         "schema": "0001_m1_durable_state",
     }
-    assert "password" not in repr(settings.safe_log_fields())
+    assert private_value not in repr(settings)
+    assert private_redis_value not in repr(settings)
+    assert private_value not in repr(settings.safe_log_fields())
+
+    with pytest.raises(DurableStateConfigurationError) as production_error:
+        DurableStateSettings.from_mapping(
+            {
+                "TUDT_ENVIRONMENT": "production",
+                "TUDT_DATABASE_DSN": f"postgresql://user:{private_value}@db/app",
+            }
+        )
+    assert private_value not in str(production_error.value)
 
     invalid: tuple[Mapping[str, str], ...] = (
         {
+            "TUDT_ENVIRONMENT": "test",
             "TUDT_DATABASE_DSN": "sqlite:///bad",
             "TUDT_REDIS_URL": "redis://redis",
             "TUDT_SCHEMA_REVISION": "head",
         },
         {
-            "TUDT_DATABASE_DSN": "postgresql://db/app",
+            "TUDT_ENVIRONMENT": "test",
+            "TUDT_DATABASE_DSN": "postgresql://user:password@db/app",
             "TUDT_REDIS_URL": "http://redis",
             "TUDT_SCHEMA_REVISION": "head",
         },
         {
-            "TUDT_DATABASE_DSN": "postgresql://db/app",
+            "TUDT_ENVIRONMENT": "test",
+            "TUDT_DATABASE_DSN": "postgresql://user:password@db/app",
             "TUDT_REDIS_URL": "redis://redis",
             "TUDT_SCHEMA_REVISION": "not valid",
         },
@@ -631,29 +762,149 @@ def test_durable_settings_are_strict_and_safe() -> None:
 
 
 @pytest.mark.unit
+def test_component_database_settings_build_a_redacted_sqlalchemy_url() -> None:
+    private_value = "SYNTHETIC_MOUNTED_SECRET"
+    database = PostgresConnectionSettings(
+        host="postgres",
+        port=5432,
+        database="telegram_userbot",
+        login_role="telegram_userbot_app_login",
+        password=SensitiveValue(private_value),
+        runtime_role="telegram_userbot_app_runtime",
+        sslmode="disable",
+        application_name="telegram_userbot_app",
+    )
+
+    url = database.sqlalchemy_url()
+    assert url.drivername == "postgresql+psycopg"
+    assert url.host == "postgres"
+    assert url.username == "telegram_userbot_app_login"
+    assert url.query == {
+        "application_name": "telegram_userbot_app",
+        "sslmode": "disable",
+    }
+    assert private_value not in repr(database)
+    assert private_value not in str(url)
+
+    with pytest.raises(DurableStateConfigurationError) as error:
+        PostgresConnectionSettings(
+            host="postgres",
+            port=5432,
+            database="telegram_userbot",
+            login_role="telegram_userbot_app_login",
+            password=SensitiveValue("bad\nsecret"),
+        )
+    assert "bad" not in str(error.value)
+
+    with pytest.raises(DurableStateConfigurationError) as parse_error:
+        PostgresConnectionSettings.from_test_dsn(
+            "postgresql://user:SYNTHETIC_PARSE_SECRET@db:not-a-port/app"
+        )
+    assert parse_error.value.__cause__ is None
+    assert "SYNTHETIC_PARSE_SECRET" not in str(parse_error.value)
+
+
+@pytest.mark.unit
 async def test_engine_normalizes_driver_and_readiness_fails_closed() -> None:
-    settings = DurableStateSettings("postgresql://db/app", "redis://redis", "0001_m1_durable_state")
+    database = PostgresConnectionSettings.from_test_dsn("postgresql://user:password@db/app")
+    settings = DurableStateSettings(database, "redis://redis", "0001_m1_durable_state")
     engine = create_postgres_engine(settings)
     assert engine.url.drivername == "postgresql+psycopg"
+    assert engine.url.render_as_string(hide_password=True).count("***") == 1
     await engine.dispose()
     direct = create_postgres_engine(
-        DurableStateSettings(
-            "postgresql+psycopg://db/app", "redis://redis", "0001_m1_durable_state"
-        )
+        PostgresConnectionSettings.from_test_dsn("postgresql+psycopg://user:password@db/app")
     )
     assert direct.url.drivername == "postgresql+psycopg"
     await direct.dispose()
 
-    ready_engine = FakeEngine(["0001_m1_durable_state", "0.8.6"])
+    policy = DatabaseReadinessPolicy.for_production_process("app")
+    ready_engine = FakeEngine(
+        [
+            "0001_m1_durable_state",
+            "0.8.6",
+            "telegram_userbot_app_runtime",
+            "telegram_userbot_app_login",
+            0,
+        ]
+    )
     assert await schema_is_ready(
         ready_engine,  # type: ignore[arg-type]
         "0001_m1_durable_state",
+        policy=policy,
     )
     assert not await schema_is_ready(
         FakeEngine(["old", "0.8.6"]),  # type: ignore[arg-type]
         "0001_m1_durable_state",
+        policy=policy,
     )
     assert not await schema_is_ready(
         FakeEngine([], RuntimeError("offline")),  # type: ignore[arg-type]
         "0001_m1_durable_state",
+        policy=policy,
+    )
+
+
+@pytest.mark.unit
+def test_production_readiness_policies_are_closed_and_role_exact() -> None:
+    expected = {
+        "app": ("telegram_userbot_app_login", "telegram_userbot_app_runtime"),
+        "control": ("telegram_userbot_control_login", "telegram_userbot_control_runtime"),
+        "worker": ("telegram_userbot_worker_login", "telegram_userbot_worker_runtime"),
+        "migrate": ("telegram_userbot_migrator_login", "telegram_userbot_migrator"),
+    }
+    for process, (login_role, runtime_role) in expected.items():
+        policy = DatabaseReadinessPolicy.for_production_process(process)  # type: ignore[arg-type]
+        assert policy == DatabaseReadinessPolicy(
+            expected_runtime_role=runtime_role,
+            expected_login_role=login_role,
+            expected_table_owner="telegram_userbot_migrator",
+            expected_vector_version="0.8.6",
+        )
+
+    with pytest.raises(DurableStateConfigurationError):
+        DatabaseReadinessPolicy.for_production_process("unknown")  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+async def test_database_readiness_is_exact_and_role_bound() -> None:
+    policy = DatabaseReadinessPolicy(
+        expected_vector_version="0.8.6",
+        expected_runtime_role="telegram_userbot_app_runtime",
+        expected_login_role="telegram_userbot_app_login",
+        expected_table_owner="telegram_userbot_migrator",
+    )
+    assert await schema_is_ready(
+        FakeEngine(
+            [
+                EXPECTED_SCHEMA_REVISION,
+                "0.8.6",
+                "telegram_userbot_app_runtime",
+                "telegram_userbot_app_login",
+                0,
+            ]
+        ),  # type: ignore[arg-type]
+        EXPECTED_SCHEMA_REVISION,
+        policy=policy,
+    )
+    assert not await schema_is_ready(
+        FakeEngine(
+            [
+                EXPECTED_SCHEMA_REVISION,
+                "0.8.7",
+            ]
+        ),  # type: ignore[arg-type]
+        EXPECTED_SCHEMA_REVISION,
+        policy=policy,
+    )
+    assert not await schema_is_ready(
+        FakeEngine(
+            [
+                EXPECTED_SCHEMA_REVISION,
+                "0.8.6",
+                "telegram_userbot_worker_runtime",
+            ]
+        ),  # type: ignore[arg-type]
+        EXPECTED_SCHEMA_REVISION,
+        policy=policy,
     )

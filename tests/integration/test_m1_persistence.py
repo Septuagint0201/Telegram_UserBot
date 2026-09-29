@@ -179,7 +179,7 @@ async def test_repository_cas_and_composite_scope(db_session: AsyncSession) -> N
             status="active",
         )
     )
-    with pytest.raises(IntegrityError):
+    with pytest.raises(DBAPIError, match="ERASURE_METADATA_OWNER_IMMUTABLE"):
         async with db_session.begin_nested():
             await db_session.execute(
                 update(conversations)

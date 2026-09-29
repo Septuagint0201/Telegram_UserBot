@@ -1,7 +1,10 @@
+import asyncio
 from collections import deque
 from dataclasses import replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import ClassVar, cast
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -23,7 +26,7 @@ from telegram_userbot.adapters.telegram_user import (
     RawTelegramUpdate,
     normalize_update,
 )
-from telegram_userbot.application.ports.model import ModelResponse
+from telegram_userbot.application.ports.model import ModelGatewayError, ModelRequest, ModelResponse
 from telegram_userbot.application.ports.telegram import TelegramReadReceipt, TelegramReadRequest
 from telegram_userbot.domain.conversation import (
     AccountControl,
@@ -34,6 +37,7 @@ from telegram_userbot.domain.conversation import (
     resolve_mode,
 )
 from telegram_userbot.domain.messaging import (
+    AttemptOutcome,
     Direction,
     EventKind,
     NormalizedTelegramEvent,
@@ -95,6 +99,7 @@ def claim(*, auto: bool = True) -> GenerationClaim:
         UUID(int=4),
         UUID(int=5),
         UUID(int=6),
+        b"o" * 32,
         b"i" * 32,
         NOW,
         snapshot,
@@ -176,6 +181,7 @@ class FakeLifecycle:
     read_records = 0
     typing_records = 0
     attempts = 0
+    last_completion: AttemptCompletionRecord | None = None
 
     def __init__(self, session: object, *, new_uuid: object) -> None:
         pass
@@ -192,6 +198,7 @@ class FakeLifecycle:
 
     async def finish_attempt(self, **kwargs: object) -> bool:
         type(self).attempts += 1
+        type(self).last_completion = cast(AttemptCompletionRecord, kwargs["completion"])
         return True
 
     async def recover_stale_sending(self, **kwargs: object) -> int:
@@ -200,11 +207,13 @@ class FakeLifecycle:
 
 class FakeDelivery:
     outcome = "succeeded"
+    calls = 0
 
     def __init__(self, gateway: object) -> None:
         pass
 
     async def send_prepared(self, **kwargs: object) -> AttemptCompletionRecord:
+        type(self).calls += 1
         return AttemptCompletionRecord(
             self.outcome,
             NOW,
@@ -214,8 +223,12 @@ class FakeDelivery:
 
 
 class GoodModel:
+    requests: ClassVar[list[object]] = []
+
     async def generate(self, request: object) -> ModelResponse:
-        return ModelResponse(SensitiveValue("synthetic answer"), "0" * 64)
+        type(self).requests.append(request)
+        text = "synthetic answer"
+        return ModelResponse(SensitiveValue(text), sha256(text.encode()).hexdigest())
 
 
 class BadModel:
@@ -229,8 +242,26 @@ class RetryModel:
     async def generate(self, request: object) -> ModelResponse:
         type(self).calls += 1
         if self.calls == 1:
-            raise ConnectionError("synthetic transient failure")
-        return ModelResponse(SensitiveValue("retried answer"), "1" * 64)
+            raise ModelGatewayError(
+                "PROVIDER_TRANSIENT",
+                retryable=True,
+                http_status=503,
+                request_may_have_been_sent=False,
+            )
+        text = "retried answer"
+        return ModelResponse(SensitiveValue(text), sha256(text.encode()).hexdigest())
+
+
+class AmbiguousRetryModel:
+    calls = 0
+
+    async def generate(self, request: object) -> ModelResponse:
+        type(self).calls += 1
+        raise ModelGatewayError(
+            "PROVIDER_RESULT_UNKNOWN",
+            retryable=True,
+            request_may_have_been_sent=True,
+        )
 
 
 class FeedbackErrorTelegram(FakeTelegramGateway):
@@ -260,6 +291,7 @@ async def test_runtime_auto_success_and_provider_failure(monkeypatch: pytest.Mon
     monkeypatch.setattr(runtime_module, "TelegramLifecycleRepository", FakeLifecycle)
     monkeypatch.setattr(runtime_module, "TelegramDeliveryService", FakeDelivery)
     telegram = FakeTelegramGateway()
+    GoodModel.requests = []
     service = runtime_module.ConversationRuntimeService(
         cast(async_sessionmaker[AsyncSession], SessionFactory()),
         model=GoodModel(),
@@ -275,6 +307,7 @@ async def test_runtime_auto_success_and_provider_failure(monkeypatch: pytest.Mon
     assert FakeLifecycle.read_records == 1
     assert FakeLifecycle.typing_records == 2
     assert FakeLifecycle.attempts == 2
+    assert cast(ModelRequest, GoodModel.requests[0]).input_hash == (b"o" * 32).hex()
 
     FakeRepository.failed = False
     failing = runtime_module.ConversationRuntimeService(
@@ -322,6 +355,32 @@ async def test_runtime_retries_only_bounded_transient_model_failures(
     result = await service.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
     assert result.reason == "COPILOT_DRAFT_READY"
     assert RetryModel.calls == 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_runtime_never_retries_an_ambiguous_provider_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "ConversationOrchestratorRepository", FakeRepository)
+    monkeypatch.setattr(runtime_module, "TelegramLifecycleRepository", FakeLifecycle)
+    FakeRepository.claim_value = claim(auto=False)
+    FakeRepository.failed = False
+    AmbiguousRetryModel.calls = 0
+    service = runtime_module.ConversationRuntimeService(
+        cast(async_sessionmaker[AsyncSession], SessionFactory()),
+        model=AmbiguousRetryModel(),
+        telegram=FakeTelegramGateway(),
+        new_uuid=IDS.popleft,
+        now=lambda: NOW,
+        max_model_attempts=3,
+    )
+
+    result = await service.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
+
+    assert result.reason == "PROVIDER_RESULT_UNKNOWN"
+    assert AmbiguousRetryModel.calls == 1
+    assert FakeRepository.failed
 
 
 @pytest.mark.unit
@@ -440,3 +499,122 @@ async def test_runtime_recovery_only_changes_durable_state(monkeypatch: pytest.M
 
     assert report.expired_generations == 2
     assert report.stale_outbound_intents == 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_runtime_rechecks_operation_gate_before_provider_and_final_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "ConversationOrchestratorRepository", FakeRepository)
+    monkeypatch.setattr(runtime_module, "TelegramLifecycleRepository", FakeLifecycle)
+    monkeypatch.setattr(runtime_module, "TelegramDeliveryService", FakeDelivery)
+    FakeRepository.claim_value = claim(auto=False)
+    FakeRepository.preflight_allowed = True
+    FakeRepository.failed = False
+    FakeDelivery.calls = 0
+    FakeLifecycle.last_completion = None
+
+    provider_blocked = runtime_module.ConversationRuntimeService(
+        cast(async_sessionmaker[AsyncSession], SessionFactory()),
+        model=GoodModel(),
+        telegram=FakeTelegramGateway(),
+        new_uuid=IDS.popleft,
+        now=lambda: NOW,
+        operation_admission=AsyncMock(side_effect=(True, False)),
+    )
+    result = await provider_blocked.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
+    assert result.reason == runtime_module.OperationAdmissionError.code
+    assert FakeRepository.failed
+
+    final_send_blocked = runtime_module.ConversationRuntimeService(
+        cast(async_sessionmaker[AsyncSession], SessionFactory()),
+        model=GoodModel(),
+        telegram=FakeTelegramGateway(),
+        new_uuid=IDS.popleft,
+        now=lambda: NOW,
+        operation_admission=AsyncMock(side_effect=(True, False)),
+    )
+    sent = await final_send_blocked.dispatch_group(group_id=UUID(int=30), owner=UUID(int=8))
+    assert sent == 0
+    assert FakeDelivery.calls == 0
+    assert FakeLifecycle.last_completion is not None
+    assert FakeLifecycle.last_completion.outcome == AttemptOutcome.TRANSIENT  # type: ignore[unreachable]
+    assert FakeLifecycle.last_completion.error_code == runtime_module.OperationAdmissionError.code
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_runtime_cancels_inflight_provider_when_operation_gate_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_sleep = asyncio.sleep
+    cancelled = asyncio.Event()
+
+    class BlockingModel:
+        async def generate(self, _request: ModelRequest) -> ModelResponse:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+            return ModelResponse(SensitiveValue(""), "")
+
+    class RecordingRepository(FakeRepository):
+        failure_code: ClassVar[str | None] = None
+        completions: ClassVar[int] = 0
+
+        async def complete_generation(self, **kwargs: object) -> RunResult:
+            del kwargs
+            type(self).completions += 1
+            return self.result_value
+
+        async def fail_generation(self, **kwargs: object) -> None:
+            type(self).failure_code = cast(str, kwargs["error_code"])
+
+    async def yield_immediately(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(runtime_module, "ConversationOrchestratorRepository", RecordingRepository)
+    monkeypatch.setattr(runtime_module.asyncio, "sleep", yield_immediately)  # type: ignore[attr-defined]
+    RecordingRepository.claim_value = claim(auto=False)
+    admission = AsyncMock(side_effect=(True, True, False))
+    service = runtime_module.ConversationRuntimeService(
+        cast(async_sessionmaker[AsyncSession], SessionFactory()),
+        model=BlockingModel(),
+        telegram=FakeTelegramGateway(),
+        new_uuid=IDS.popleft,
+        now=lambda: NOW,
+        operation_admission=admission,
+    )
+
+    result = await service.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
+
+    assert cancelled.is_set()
+    assert result.reason == runtime_module.OperationAdmissionError.code
+    assert RecordingRepository.failure_code == runtime_module.OperationAdmissionError.code
+    assert RecordingRepository.completions == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_runtime_does_not_stop_typing_when_start_was_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_module, "ConversationOrchestratorRepository", FakeRepository)
+    monkeypatch.setattr(runtime_module, "TelegramLifecycleRepository", FakeLifecycle)
+    FakeRepository.claim_value = claim(auto=True)
+    FakeRepository.failed = False
+    telegram = FakeTelegramGateway()
+    service = runtime_module.ConversationRuntimeService(
+        cast(async_sessionmaker[AsyncSession], SessionFactory()),
+        model=GoodModel(),
+        telegram=telegram,
+        new_uuid=IDS.popleft,
+        now=lambda: NOW,
+        operation_admission=AsyncMock(side_effect=(True, True, False, False)),
+    )
+
+    result = await service.run_due_turn(turn_id=UUID(int=3), owner=UUID(int=8))
+
+    assert result.reason == runtime_module.OperationAdmissionError.code
+    assert telegram.typing_requests == []

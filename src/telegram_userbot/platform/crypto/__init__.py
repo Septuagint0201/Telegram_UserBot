@@ -6,6 +6,7 @@ from telegram_userbot.platform.crypto.credentials import (
     CredentialCryptoError,
     CredentialEnvelope,
     CredentialKeyring,
+    parse_credential_keyring,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "CredentialCryptoError",
     "CredentialEnvelope",
     "CredentialKeyring",
+    "parse_credential_keyring",
 ]

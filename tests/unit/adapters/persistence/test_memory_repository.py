@@ -391,7 +391,7 @@ async def test_record_proposal_binds_job_run_manifest_and_evidence_scope() -> No
     job_id, model_run_id = uuid4(), uuid4()
     repo._require_message_revision_scope = AsyncMock()  # type: ignore[method-assign]
     session.scalar.side_effect = [job_id, model_run_id]
-    session.execute.return_value = _Result(rowcount=1)
+    session.execute.return_value = _Result(rowcount=1, scalar=UUID(int=1))
     recorded_id = await repo.record_proposal(
         validated,
         job_id=job_id,
@@ -513,7 +513,7 @@ async def test_record_proposal_binds_job_run_manifest_and_evidence_scope() -> No
     )
     session.scalar.side_effect = [job_id, model_run_id]
     session.execute.side_effect = None
-    session.execute.return_value = _Result(rowcount=1)
+    session.execute.return_value = _Result(rowcount=1, scalar=UUID(int=1))
     with pytest.raises(ValueError, match="canonical message root"):
         await repo.record_proposal(
             mismatched,
@@ -1316,13 +1316,24 @@ async def test_forget_and_erasure_are_account_scoped_and_idempotently_shaped() -
     session.execute.side_effect = [_Result()]
     assert not await repo.forget_memory(account_id=account_id, memory_id=memory_id, now=NOW)
 
-    session.execute.side_effect = [_Result({"id": memory_id}), _Result(), _Result(), _Result()]
+    session.execute.side_effect = [
+        _Result({"id": memory_id}),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+    ]
     assert await repo.forget_memory(account_id=account_id, memory_id=memory_id, now=NOW)
 
     session.execute.reset_mock()
-    session.execute.side_effect = [_Result({"id": memory_id, "status": "forgotten"})]
+    session.execute.side_effect = [
+        _Result({"id": memory_id, "status": "forgotten"}),
+        _Result(),
+        _Result(),
+        _Result(),
+    ]
     assert await repo.forget_memory(account_id=account_id, memory_id=memory_id, now=NOW)
-    assert session.execute.await_count == 1
+    assert session.execute.await_count == 4
 
     repo._require_erasure_derived_scope = AsyncMock()  # type: ignore[method-assign]
     repo.forget_memory = AsyncMock(return_value=True)  # type: ignore[method-assign]

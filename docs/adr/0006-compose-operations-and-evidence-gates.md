@@ -9,7 +9,7 @@
 
 ## Decision
 
-- Ubuntu Server 24.04 LTS amd64上的Docker Compose是唯一一等生产方式；原生Python只用于开发/排障。
+- Ubuntu Server 26.04 LTS amd64上的Docker Compose是唯一一等生产方式；原生Python只用于开发/排障。
 - V1资源profile为2 vCPU、4 GiB RAM、40 GiB SSD，一个worker容器、worker concurrency 2。
 - Caddy只公开TCP 443 key-only Web App；PostgreSQL、Redis、health、metrics和media不公开。
 - PostgreSQL使用pgBackRest/WAL，Session使用app停止后的restic快照，恢复必须叠加独立erasure ledger并保持bootstrap maintenance。

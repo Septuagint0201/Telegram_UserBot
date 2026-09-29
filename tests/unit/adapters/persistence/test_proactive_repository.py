@@ -1534,7 +1534,15 @@ async def test_budget_reaper_releases_expired_holds_without_tracked_side_effect(
     reservation_key = b"z" * 32
     session = AsyncMock()
     session.execute.return_value = _Result(
-        rows=[{"account_id": account_id, "reservation_key": reservation_key}]
+        rows=[
+            {
+                "account_id": account_id,
+                "reservation_key": reservation_key,
+                "expires_at": NOW - timedelta(seconds=1),
+                "target": "auto_send",
+                "outbound_group_id": None,
+            }
+        ]
     )
     repo = ProactiveRepository(cast(AsyncSession, session))
     repo._budget_target_releasable = AsyncMock(return_value=True)  # type: ignore[method-assign]

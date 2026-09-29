@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/telegram-userbot/image-lock.schema.json",
+  "title": "Telegram UserBot immutable base image lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_platform",
+    "verified_at",
+    "verification_method",
+    "base_images",
+    "production_artifacts"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "target_platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture"],
+      "properties": {
+        "os": {"const": "linux"},
+        "architecture": {"const": "amd64"}
+      }
+    },
+    "verified_at": {"type": "string", "format": "date"},
+    "verification_method": {"type": "string", "minLength": 1},
+    "base_images": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/image"}
+    },
+    "production_artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "images", "sbom_status", "license_status"],
+      "properties": {
+        "status": {"enum": ["NOT_BUILT", "BUILT"]},
+        "images": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/image"}
+        },
+        "sbom_status": {"enum": ["NOT_GENERATED", "GENERATED"]},
+        "license_status": {"enum": ["NOT_GENERATED", "REVIEW_REQUIRED", "PASS"]}
+      }
+    }
+  },
+  "$defs": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "purpose", "reference", "index_digest", "platform_digest"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"},
+        "purpose": {"type": "string", "minLength": 1},
+        "reference": {
+          "type": "string",
+          "pattern": "^[^\\s@]+@sha256:[0-9a-f]{64}$"
+        },
+        "index_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "platform_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

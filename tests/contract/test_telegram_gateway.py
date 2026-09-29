@@ -1,8 +1,10 @@
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 from telethon import functions, types  # type: ignore[import-untyped]
+from telethon.tl import custom  # type: ignore[import-untyped]
 
 from telegram_userbot.adapters.telegram_user.telethon import (
     TelethonTelegramGateway,
@@ -12,7 +14,6 @@ from telegram_userbot.application.ports.telegram import (
     TelegramReadRequest,
     TelegramSendUnknownError,
     TelegramTextRequest,
-    TelegramTransientError,
     TelegramTypingAction,
     TelegramTypingRequest,
 )
@@ -21,15 +22,17 @@ from telegram_userbot.domain.shared.redaction import SensitiveValue
 
 
 @dataclass(slots=True)
-class Response:
-    id: int
-
-
-@dataclass(slots=True)
 class InjectedClient:
     requests: list[object] = field(default_factory=list)
     failure: BaseException | None = None
-    send_response: object = field(default_factory=lambda: Response(700))
+    send_response: object = field(
+        default_factory=lambda: types.UpdateShortSentMessage(
+            id=700,
+            pts=1,
+            pts_count=1,
+            date=datetime(2026, 8, 24, tzinfo=UTC),
+        )
+    )
 
     async def __call__(self, request: object) -> object:
         self.requests.append(request)
@@ -104,9 +107,99 @@ async def test_telethon_send_transport_failure_is_unknown_not_retryable() -> Non
 
 @pytest.mark.contract
 @pytest.mark.asyncio
-async def test_telethon_send_requires_message_id_in_response() -> None:
+async def test_telethon_send_requires_unambiguous_message_id_in_response() -> None:
     gateway = TelethonTelegramGateway(InjectedClient(send_response=object()), resolve_peer)
-    with pytest.raises(TelegramTransientError, match="missing_message_id"):
+    with pytest.raises(TelegramSendUnknownError, match="missing_message_id"):
+        await gateway.send_text(
+            TelegramTextRequest(
+                AccountId(UUID(int=1)),
+                ConversationId(UUID(int=2)),
+                RunId(UUID(int=3)),
+                123,
+                SensitiveValue("synthetic output"),
+            )
+        )
+
+
+@pytest.mark.contract
+@pytest.mark.asyncio
+@pytest.mark.parametrize("combined", [False, True])
+async def test_telethon_send_matches_random_id_in_updates(combined: bool) -> None:
+    updates = [
+        types.UpdateMessageID(id=900, random_id=999),
+        types.UpdateMessageID(id=701, random_id=123),
+    ]
+    response: object
+    if combined:
+        response = types.UpdatesCombined(updates, [], [], None, seq_start=1, seq=2)
+    else:
+        response = types.Updates(updates, [], [], None, seq=2)
+    gateway = TelethonTelegramGateway(InjectedClient(send_response=response), resolve_peer)
+
+    receipt = await gateway.send_text(
+        TelegramTextRequest(
+            AccountId(UUID(int=1)),
+            ConversationId(UUID(int=2)),
+            RunId(UUID(int=3)),
+            123,
+            SensitiveValue("synthetic output"),
+        )
+    )
+
+    assert receipt.telegram_message_id == 701
+
+
+@pytest.mark.contract
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        message_type(
+            id=702,
+            peer_id=types.PeerUser(42),
+            date=datetime(2026, 8, 24, tzinfo=UTC),
+            message="accepted",
+        )
+        for message_type in (types.Message, custom.Message)
+    ],
+)
+async def test_telethon_send_accepts_direct_message_response(response: object) -> None:
+    gateway = TelethonTelegramGateway(InjectedClient(send_response=response), resolve_peer)
+
+    receipt = await gateway.send_text(
+        TelegramTextRequest(
+            AccountId(UUID(int=1)),
+            ConversationId(UUID(int=2)),
+            RunId(UUID(int=3)),
+            123,
+            SensitiveValue("synthetic output"),
+        )
+    )
+
+    assert receipt.telegram_message_id == 702
+
+
+@pytest.mark.contract
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("updates", "code"),
+    [
+        ([types.UpdateMessageID(id=700, random_id=999)], "random_id_mismatch"),
+        (
+            [
+                types.UpdateMessageID(id=700, random_id=123),
+                types.UpdateMessageID(id=701, random_id=123),
+            ],
+            "message_id_ambiguous",
+        ),
+    ],
+)
+async def test_telethon_send_rejects_wrong_or_ambiguous_random_id(
+    updates: list[object], code: str
+) -> None:
+    response = types.Updates(updates, [], [], None, seq=1)
+    gateway = TelethonTelegramGateway(InjectedClient(send_response=response), resolve_peer)
+    with pytest.raises(TelegramSendUnknownError, match=code):
         await gateway.send_text(
             TelegramTextRequest(
                 AccountId(UUID(int=1)),

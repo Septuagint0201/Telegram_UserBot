@@ -1,0 +1,11 @@
+[Unit]
+Description=Telegram UserBot low-load encrypted data export
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Unit=tudt-ops@data-export.service
+Persistent=false
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

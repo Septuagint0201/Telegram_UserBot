@@ -6,6 +6,8 @@ from urllib.parse import urlencode
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
+from starlette.types import Message, Scope
 
 from telegram_userbot.adapters.telegram_bot import (
     ControlBotModelController,
@@ -14,6 +16,8 @@ from telegram_userbot.adapters.telegram_bot import (
     ModelProfileSummary,
 )
 from telegram_userbot.adapters.webapp import (
+    DirectPeerClientResolver,
+    FixedWindowClientRateLimiter,
     LaunchTokenCodec,
     TelegramInitDataVerifier,
     WebAppAuthenticationError,
@@ -124,6 +128,12 @@ async def test_key_only_web_app_accepts_write_without_echo_or_config_api() -> No
         assert page.headers["cache-control"].startswith("no-store")
         assert "default-src 'none'" in page.headers["content-security-policy"]
         assert "endpoint" not in page.text.lower()
+        assert 'href="/webapp/model-key.css"' in page.text
+        assert 'src="/webapp/model-key.js"' in page.text
+        assert (await client.get("/webapp/model-key.css")).status_code == 200
+        assert (await client.get("/webapp/model-key.js")).status_code == 200
+        assert (await client.get("/model-key.css")).status_code == 404
+        assert (await client.get("/model-key.js")).status_code == 404
         assert (await client.get("/api/v1/models")).status_code == 404
         response = await client.post(
             "/api/v1/model-keys/main_ai",
@@ -174,6 +184,150 @@ async def test_key_web_app_rejects_origin_shape_auth_and_backend_without_echo() 
         )
         assert response.status_code == 400
         assert response.json() == {"ok": False, "code": "REQUEST_REJECTED"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://user@keys.example.invalid",
+        "https://user:password@keys.example.invalid",
+        "https://",
+        "https://keys.example.invalid:444",
+        "https://keys.example.invalid:443",
+        "https://KEYS.example.invalid",
+        "https://keys.example.invalid/path",
+    ],
+)
+def test_key_web_app_rejects_noncanonical_public_origins(origin: str) -> None:
+    with pytest.raises(ValueError, match="canonical HTTPS"):
+        create_key_web_app(
+            verifier=TelegramInitDataVerifier(
+                bot_token=SensitiveValue(BOT_TOKEN),
+                allowed_admin_ids=frozenset({ADMIN_ID}),
+            ),
+            mutation_port=MutationFake(),
+            public_origin=origin,
+        )
+
+
+@pytest.mark.unit
+async def test_key_web_app_rejects_content_length_mismatch_before_authentication() -> None:
+    mutation = MutationFake()
+    app = create_key_web_app(
+        verifier=TelegramInitDataVerifier(
+            bot_token=SensitiveValue(BOT_TOKEN), allowed_admin_ids=frozenset({ADMIN_ID})
+        ),
+        mutation_port=mutation,
+        public_origin=ORIGIN,
+    )
+    body = b'{"action":"delete"}'
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        response = await client.post(
+            "/api/v1/model-keys/main_ai",
+            headers={
+                "origin": ORIGIN,
+                "content-type": "application/json",
+                "content-length": str(len(body) + 1),
+                "x-telegram-init-data": "must-not-be-read",
+                "x-model-key-launch": "L" * 43,
+            },
+            content=body,
+        )
+
+    assert response.status_code == 400
+    assert mutation.calls == []
+
+
+@pytest.mark.unit
+async def test_key_web_app_rejects_duplicate_security_headers_and_control_key() -> None:
+    mutation = MutationFake()
+    app = create_key_web_app(
+        verifier=TelegramInitDataVerifier(
+            bot_token=SensitiveValue(BOT_TOKEN), allowed_admin_ids=frozenset({ADMIN_ID})
+        ),
+        mutation_port=mutation,
+        public_origin=ORIGIN,
+    )
+    now = datetime.now(UTC)
+    body = b'{"action":"set","api_key":"SYNTHETIC"}'
+    common = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+        (b"x-telegram-init-data", signed_init_data(now).encode()),
+        (b"x-model-key-launch", ("L" * 43).encode()),
+    ]
+    duplicate_origin_scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/api/v1/model-keys/main_ai",
+        "raw_path": b"/api/v1/model-keys/main_ai",
+        "query_string": b"",
+        "headers": [
+            (b"origin", ORIGIN.encode()),
+            (b"origin", ORIGIN.encode()),
+            *common,
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("control", 8080),
+    }
+    messages: list[Message] = [
+        {"type": "http.request", "body": body, "more_body": False},
+        {"type": "http.disconnect"},
+    ]
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return messages.pop(0)
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await app(duplicate_origin_scope, receive, send)
+    assert sent[0]["status"] == 400
+    assert mutation.calls == []
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        response = await client.post(
+            "/api/v1/model-keys/main_ai",
+            headers={
+                "origin": ORIGIN,
+                "x-telegram-init-data": signed_init_data(now),
+                "x-model-key-launch": "L" * 43,
+            },
+            json={"action": "set", "api_key": "bad\nkey"},
+        )
+    assert response.status_code == 400
+    assert mutation.calls == []
+
+
+@pytest.mark.unit
+async def test_direct_peer_limiter_ignores_forwarded_client_claims() -> None:
+    resolver = DirectPeerClientResolver()
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "https",
+            "path": "/",
+            "raw_path": b"/",
+            "query_string": b"",
+            "headers": [(b"x-forwarded-for", b"203.0.113.5")],
+            "client": ("127.0.0.1", 1234),
+            "server": ("control", 8080),
+        }
+    )
+    identity = resolver.resolve(request)
+    assert identity is not None
+    assert identity.reveal_for_use() == "127.0.0.1"
+
+    limiter = FixedWindowClientRateLimiter(limit=1, window_seconds=60)
+    now = datetime.now(UTC)
+    assert await limiter.allow(client=identity, now=now)
+    assert not await limiter.allow(client=identity, now=now)
 
 
 class BotBackendFake:

@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 
 from telegram_userbot.adapters.persistence.records import OutboxRecord
-from telegram_userbot.adapters.queue.redis import DurableJobNotifier
+from telegram_userbot.adapters.queue.redis import DurableJobNotifier, RedisRuntimeError
 
 
 class FakeArqRedis:
@@ -13,6 +13,12 @@ class FakeArqRedis:
     async def enqueue_job(self, function: str, *args: object, **kwargs: object) -> object:
         self.calls.append((function, args, kwargs))
         return object()
+
+
+class FailingArqRedis:
+    async def enqueue_job(self, function: str, *args: object, **kwargs: object) -> object:
+        del function, args, kwargs
+        raise RuntimeError("SYNTHETIC_REDIS_PASSWORD")
 
 
 def record(payload: dict[str, Any] | None = None) -> OutboxRecord:
@@ -63,3 +69,11 @@ async def test_notifier_uses_stable_content_free_arq_identity() -> None:
 async def test_notifier_rejects_wrong_or_content_bearing_payload(bad: OutboxRecord) -> None:
     with pytest.raises(ValueError, match=r"outbox|payload|identity|generation"):
         await DurableJobNotifier(FakeArqRedis()).publish(bad)
+
+
+@pytest.mark.unit
+async def test_notifier_redacts_redis_enqueue_failure() -> None:
+    with pytest.raises(RedisRuntimeError) as captured:
+        await DurableJobNotifier(FailingArqRedis()).publish(record())
+    assert captured.value.code == "REDIS_JOB_ENQUEUE_FAILED"
+    assert "SYNTHETIC_REDIS_PASSWORD" not in repr(captured.value)

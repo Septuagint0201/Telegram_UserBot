@@ -1,5 +1,6 @@
 """Deterministic port fakes with no external I/O."""
 
+import hashlib
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -125,7 +126,8 @@ class FakeModelGateway:
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
-        return ModelResponse(SensitiveValue("SYNTHETIC_MODEL_OUTPUT"), "0" * 64)
+        text = "SYNTHETIC_MODEL_OUTPUT"
+        return ModelResponse(SensitiveValue(text), hashlib.sha256(text.encode()).hexdigest())
 
 
 @dataclass(slots=True)

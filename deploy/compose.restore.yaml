@@ -1,0 +1,188 @@
+# RESTORE ONLY.  This overlay is accepted only by deploy/ops/run_restore.py for a
+# previously unused tudt-restore-* project name and previously nonexistent volumes.
+services:
+  app:
+    environment:
+      BOOTSTRAP_MAINTENANCE: "1"
+  control:
+    environment:
+      BOOTSTRAP_MAINTENANCE: "1"
+  worker:
+    environment:
+      BOOTSTRAP_MAINTENANCE: "1"
+
+  postgres-restore:
+    profiles: ["restore"]
+    image: "${DATABASE_IMAGE:?set the immutable PostgreSQL restore image name@sha256 digest}"
+    platform: linux/amd64
+    user: "999:999"
+    command: ["/usr/local/bin/tudt-pgbackrest-restore"]
+    networks: ["backup-egress"]
+    volumes:
+      - type: volume
+        source: postgres-data
+        target: /var/lib/postgresql/data
+      - type: volume
+        source: pgbackrest-spool
+        target: /var/spool/pgbackrest
+      - type: bind
+        source: "${OPS_STATE_DIR:?set the root-owned operations state directory}"
+        target: /ops-state
+        bind:
+          create_host_path: false
+    secrets:
+      - pgbackrest_s3_access_key
+      - pgbackrest_s3_secret_key
+      - pgbackrest_repo_cipher_pass
+    group_add: ["21013", "21016"]
+    environment:
+      DEPLOYMENT_ID: "${DEPLOYMENT_ID:?}"
+      TUDT_RESTORE_ONLY: explicit-restore-only
+      PGBACKREST_RESTORE_SET: "${PGBACKREST_RESTORE_SET:?set one exact pgBackRest backup set}"
+      PGBACKREST_REPO_TYPE: s3
+      PGBACKREST_S3_ENDPOINT: "${PGBACKREST_S3_ENDPOINT:?set the reviewed S3-compatible endpoint host}"
+      PGBACKREST_S3_BUCKET: "${PGBACKREST_S3_BUCKET:?set the dedicated backup bucket}"
+      PGBACKREST_S3_REGION: "${PGBACKREST_S3_REGION:?set the backup region}"
+      PGBACKREST_S3_URI_STYLE: "${PGBACKREST_S3_URI_STYLE:-host}"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,uid=999,gid=999
+      - /run/pgbackrest:rw,noexec,nosuid,size=4m,uid=999,gid=999
+    restart: "no"
+    stop_grace_period: 30s
+    mem_limit: 512m
+    cpus: 0.5
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "5"}
+
+  session-restore:
+    profiles: ["restore"]
+    image: "${OPS_IMAGE:?set the immutable one-shot operations image name@sha256 digest}"
+    platform: linux/amd64
+    user: "10001:10001"
+    command: ["/opt/ops/session_restore.py"]
+    networks: ["backup-egress"]
+    volumes:
+      - type: volume
+        source: telethon-session
+        target: /session
+      - type: bind
+        source: "${OPS_STATE_DIR:?set the root-owned operations state directory}"
+        target: /ops-state
+        bind:
+          create_host_path: false
+    secrets:
+      - session_restic_password
+      - session_s3_access_key
+      - session_s3_secret_key
+    group_add: ["21014", "21016"]
+    environment:
+      RESTIC_REPOSITORY: "${SESSION_RESTIC_REPOSITORY:?set the dedicated off-host restic repository}"
+      RESTIC_SNAPSHOT_ID: "${RESTIC_SNAPSHOT_ID:?set one exact restic snapshot ID}"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001"]
+    restart: "no"
+    stop_grace_period: 30s
+    mem_limit: 256m
+    cpus: 0.25
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "5"}
+
+  restore-gate-close:
+    profiles: ["restore"]
+    image: "${OPS_IMAGE:?set the immutable one-shot operations image name@sha256 digest}"
+    platform: linux/amd64
+    user: "10001:10001"
+    command: ["/opt/ops/restore_gate.py", "--close"]
+    networks: ["backend"]
+    volumes:
+      - type: bind
+        source: "${DEPLOYMENT_CONFIG_DIR:?set the reviewed non-secret deployment config directory}"
+        target: /etc/telegram-userbot/config
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets: ["migrator_database_password"]
+    group_add: ["21007"]
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: telegram_userbot
+      DATABASE_USER: telegram_userbot_migrator_login
+      DATABASE_RUNTIME_ROLE: telegram_userbot_migrator
+      DATABASE_PASSWORD_FILE: /run/secrets/migrator_database_password
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001"]
+    restart: "no"
+    stop_grace_period: 30s
+    mem_limit: 256m
+    cpus: 0.25
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "5"}
+
+  restore-gate-open:
+    profiles: ["restore"]
+    image: "${OPS_IMAGE:?set the immutable one-shot operations image name@sha256 digest}"
+    platform: linux/amd64
+    user: "10001:10001"
+    command: ["/opt/ops/restore_gate.py", "--verify-and-open"]
+    networks: ["backend"]
+    volumes:
+      - type: bind
+        source: "${DEPLOYMENT_CONFIG_DIR:?set the reviewed non-secret deployment config directory}"
+        target: /etc/telegram-userbot/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: telethon-session
+        target: /session
+        read_only: true
+      - type: bind
+        source: "${ERASURE_LEDGER_FILE:?set the verified cumulative erasure ledger file}"
+        target: /erasure-ledger/ledger.jsonl
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${OPS_STATE_DIR:?set the root-owned operations state directory}"
+        target: /ops-state
+        bind:
+          create_host_path: false
+    secrets:
+      - migrator_database_password
+      - credential_master_keyring
+      - erasure_hmac_key
+    group_add: ["21003", "21007", "21010", "21016"]
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: telegram_userbot
+      DATABASE_USER: telegram_userbot_migrator_login
+      DATABASE_RUNTIME_ROLE: telegram_userbot_migrator
+      DATABASE_PASSWORD_FILE: /run/secrets/migrator_database_password
+      ERASURE_LEDGER_SHA256: "${ERASURE_LEDGER_SHA256:?set the independently verified ledger SHA-256}"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001"]
+    restart: "no"
+    stop_grace_period: 60s
+    mem_limit: 384m
+    cpus: 0.5
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "5"}

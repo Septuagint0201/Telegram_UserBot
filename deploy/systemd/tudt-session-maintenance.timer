@@ -1,0 +1,11 @@
+[Unit]
+Description=Telegram UserBot approved Session maintenance window
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Unit=tudt-ops@session.service
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

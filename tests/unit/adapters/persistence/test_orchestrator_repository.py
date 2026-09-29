@@ -90,6 +90,11 @@ class FakeSession:
         return self.results.popleft() if self.results else FakeResult()
 
 
+class ExecuteForbiddenSession(FakeSession):
+    async def execute(self, statement: object) -> FakeResult:
+        raise AssertionError("ambiguous provider outcomes must not touch retry state")
+
+
 def session(fake: FakeSession) -> AsyncSession:
     return cast(AsyncSession, fake)
 
@@ -188,6 +193,7 @@ def run_row(*, state: str = "running", trigger: str = "incoming") -> dict[str, o
         "model_profile_id": UUID(int=10),
         "config_version_id": UUID(int=11),
         "credential_version_id": UUID(int=12),
+        "orchestration_claim_fingerprint": b"o" * 32,
         "input_fingerprint": b"i" * 32,
         "account_control_version_snapshot": 5,
         "mode_version_snapshot": 6,
@@ -196,7 +202,26 @@ def run_row(*, state: str = "running", trigger: str = "incoming") -> dict[str, o
         "logical_role": "main_ai",
         "purpose": ("copilot_reactive_draft" if trigger == "copilot" else "conversation_reply"),
         "trigger_kind": trigger,
+        "cancel_requested_at": None,
     }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ambiguous_provider_outcome_never_creates_a_retry_attempt() -> None:
+    repository = ConversationOrchestratorRepository(
+        session(cast(FakeSession, ExecuteForbiddenSession()))
+    )
+
+    retried = await repository.retry_generation_attempt(
+        run_id=RUN,
+        owner=OWNER,
+        now=NOW,
+        error_code="PROVIDER_RESULT_UNKNOWN",
+        request_may_have_been_sent=True,
+    )
+
+    assert not retried
 
 
 @pytest.mark.unit
@@ -891,6 +916,7 @@ async def test_start_and_complete_auto_generation(monkeypatch: pytest.MonkeyPatc
             FakeResult(),
             FakeResult(),
             FakeResult(),
+            FakeResult(),
             FakeResult(running),
         ),
     )
@@ -1098,6 +1124,7 @@ async def test_failure_preflight_and_operational_block(monkeypatch: pytest.Monke
         "group_state": "planned",
         "first_side_effect_at": None,
         "sent_count": 0,
+        "proactive_decision_id": None,
         "turn_state": "output_ready",
         "lease_owner": OWNER,
         "lease_expires_at": NOW + timedelta(seconds=1),
@@ -1157,6 +1184,7 @@ async def test_preflight_remainder_cancellation_and_ordinal_wait_are_distinct() 
         "group_state": "partial",
         "first_side_effect_at": NOW - timedelta(seconds=1),
         "sent_count": 1,
+        "proactive_decision_id": None,
         "turn_state": "output_ready",
         "lease_owner": OWNER,
         "lease_expires_at": NOW + timedelta(seconds=1),

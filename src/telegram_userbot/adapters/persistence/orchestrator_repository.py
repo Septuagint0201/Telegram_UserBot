@@ -1,7 +1,6 @@
 """PostgreSQL conversation coordinator and final-send authorization boundary."""
 
-import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -12,6 +11,7 @@ from sqlalchemy import RowMapping, and_, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from telegram_userbot.adapters.persistence.model_snapshots import capability_snapshot_digest
 from telegram_userbot.adapters.persistence.orchestrator_records import (
     ControlCommandRecord,
     ControlResult,
@@ -21,6 +21,10 @@ from telegram_userbot.adapters.persistence.orchestrator_records import (
     ModelRunRecord,
     RunResult,
     TurnRecord,
+)
+from telegram_userbot.adapters.persistence.proactive_delivery import (
+    authorize_proactive_delivery,
+    commit_proactive_delivery,
 )
 from telegram_userbot.adapters.persistence.records import NewDeliveryGroupRecord, NewJobRecord
 from telegram_userbot.adapters.persistence.repositories import DurableJobRepository
@@ -49,6 +53,7 @@ from telegram_userbot.adapters.persistence.schema import (
     operational_blocks,
     outbound_delivery_groups,
     outbound_intents,
+    prompt_versions,
     transactional_outbox,
     turn_grace_authorizations,
     turn_grace_events,
@@ -109,37 +114,7 @@ class _MainProfile:
 def _capability_snapshot_digest(row: RowMapping) -> bytes:
     """Hash only admission-relevant capability data, never the config digest."""
 
-    fields = {
-        name: row[name]
-        for name in (
-            "endpoint_id",
-            "protocol",
-            "model_name",
-            "supports_text",
-            "supports_temperature",
-            "supports_reasoning_effort",
-            "supports_image",
-            "supports_stream",
-            "supports_structured_output",
-            "chat_token_limit_field",
-            "max_context_tokens",
-            "max_output_tokens_limit",
-            "max_images_per_request",
-            "max_image_bytes_per_request",
-            "auto_image_tokens",
-            "messages_auto_detail_equivalent",
-            "supported_input_roles",
-            "embedding_dimensions",
-            "metadata_schema_version",
-            "metadata",
-            "observed_at",
-            "expires_at",
-        )
-        if name in row
-    }
-    return sha256(
-        json.dumps(fields, sort_keys=True, separators=(",", ":"), default=str).encode()
-    ).digest()
+    return capability_snapshot_digest(cast(Mapping[str, object], row))
 
 
 def _turn(row: RowMapping) -> TurnRecord:
@@ -178,6 +153,7 @@ def _run(row: RowMapping, trigger_kind: str) -> ModelRunRecord:
         row["model_profile_id"],
         row["config_version_id"],
         row["credential_version_id"],
+        row["orchestration_claim_fingerprint"],
         row["input_fingerprint"],
         started_at,
         WorkSnapshot(
@@ -1307,7 +1283,28 @@ class ConversationOrchestratorRepository:
                 fencing_token=conversation_turns.c.fencing_token + 1,
             )
         )
+        prompt = (
+            (
+                await self._session.execute(
+                    select(
+                        prompt_versions.c.version_no,
+                        prompt_versions.c.template_sha256,
+                    )
+                    .where(prompt_versions.c.logical_role == "main_ai")
+                    .order_by(prompt_versions.c.version_no.desc())
+                    .limit(1)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        # Historical M4 fixtures predate the prompt registry. Production
+        # initialization always seeds the immutable registry before any run.
+        prompt_version = "m4-main-ai-v1"
         prompt_hash = sha256(b"m4-main-ai-prompt-v1").digest()
+        if prompt is not None:
+            prompt_version = f"main-ai-v{prompt['version_no']}"
+            prompt_hash = cast(bytes, prompt["template_sha256"])
         await self._session.execute(
             insert(model_runs).values(
                 id=run_id,
@@ -1328,13 +1325,14 @@ class ConversationOrchestratorRepository:
                 content_revision_snapshot=scope.resolution.content_revision,
                 config_version_id=profile.config_version_id,
                 credential_version_id=profile.credential_version_id,
-                prompt_version="m4-main-ai-v1",
+                prompt_version=prompt_version,
                 prompt_bundle_sha256=prompt_hash,
                 capability_snapshot_sha256=getattr(
                     profile,
                     "capability_snapshot_sha256",
                     sha256(b"capability-snapshot-unavailable").digest(),
                 ),
+                orchestration_claim_fingerprint=input_fingerprint,
                 input_fingerprint=input_fingerprint,
                 adapter_version="canonical-model-port-v1",
                 request_schema_version=1,
@@ -1421,14 +1419,16 @@ class ConversationOrchestratorRepository:
         )
         if (
             run["state"] != "running"
+            or run["cancel_requested_at"] is not None
             or turn["state"] != "generating"
             or turn["lease_owner"] != owner
             or turn["lease_expires_at"] <= now
-            or turn["active_generation_no"] < 1
+            or turn["active_generation_no"] != run["generation_no"]
             or scope.resolution.effective_mode is not expected_mode
             or scope.resolution.operational_state.value != "READY"
             or scope.resolution.account_control_version != run["account_control_version_snapshot"]
             or scope.resolution.mode_version != run["mode_version_snapshot"]
+            or scope.resolution.content_revision != run["content_revision_snapshot"]
         ):
             return False
         await self._session.execute(
@@ -1530,6 +1530,9 @@ class ConversationOrchestratorRepository:
         entropy: bytes,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        finish_reason: str = "stop",
+        provider_request_id: str | None = None,
+        http_status: int | None = None,
     ) -> RunResult:
         identity = (
             (
@@ -1671,6 +1674,8 @@ class ConversationOrchestratorRepository:
             .values(
                 state="succeeded",
                 completed_at=completed_at,
+                provider_request_id=provider_request_id,
+                http_status=http_status,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
             )
@@ -1712,7 +1717,13 @@ class ConversationOrchestratorRepository:
                 )
             )
             await self._finish_run_row(
-                run_id, completed_at, output_digest, input_tokens, output_tokens
+                run_id,
+                completed_at,
+                output_digest,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                finish_reason=finish_reason,
+                provider_request_id=provider_request_id,
             )
             await self._session.execute(
                 update(conversation_turns)
@@ -1730,7 +1741,15 @@ class ConversationOrchestratorRepository:
             now=completed_at,
             output_digest=output_digest,
         )
-        await self._finish_run_row(run_id, completed_at, output_digest, input_tokens, output_tokens)
+        await self._finish_run_row(
+            run_id,
+            completed_at,
+            output_digest,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            finish_reason=finish_reason,
+            provider_request_id=provider_request_id,
+        )
         await self._session.execute(
             update(conversation_turns)
             .where(conversation_turns.c.id == turn["id"])
@@ -1738,13 +1757,16 @@ class ConversationOrchestratorRepository:
         )
         return RunResult(run_id, "succeeded", "DELIVERY_PLANNED", group_id)
 
-    async def _finish_run_row(
+    async def _finish_run_row(  # noqa: PLR0913 - provider result journal is explicit
         self,
         run_id: UUID,
         now: datetime,
         output_digest: bytes,
+        *,
         input_tokens: int | None,
         output_tokens: int | None,
+        finish_reason: str,
+        provider_request_id: str | None,
     ) -> None:
         await self._session.execute(
             update(model_runs)
@@ -1752,9 +1774,10 @@ class ConversationOrchestratorRepository:
             .values(
                 state="succeeded",
                 output_fingerprint=output_digest,
-                finish_reason="stop",
+                finish_reason=finish_reason,
                 result_kind="text",
                 is_complete=True,
+                provider_request_id=provider_request_id,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 completed_at=now,
@@ -1773,6 +1796,7 @@ class ConversationOrchestratorRepository:
         output_digest: bytes,
         copilot_draft_id: UUID | None = None,
         approved_revision_id: UUID | None = None,
+        proactive_decision_id: UUID | None = None,
     ) -> UUID:
         group_id = self._new_uuid()
         outbound_chunks = []
@@ -1813,6 +1837,7 @@ class ConversationOrchestratorRepository:
                 account_control_version=run["account_control_version_snapshot"],
                 copilot_draft_id=copilot_draft_id,
                 approved_draft_revision_id=approved_revision_id,
+                proactive_decision_id=proactive_decision_id,
                 logical_content_sha256=output_digest,
                 max_delivery_chunks=16,
                 send_authorized_at=now,
@@ -1820,15 +1845,24 @@ class ConversationOrchestratorRepository:
             chunks=tuple(outbound_chunks),
         )
 
-    async def retry_generation_attempt(
+    async def retry_generation_attempt(  # noqa: PLR0911, PLR0913 - fenced journal contract
         self,
         *,
         run_id: UUID,
         owner: UUID,
         now: datetime,
         error_code: str,
+        http_status: int | None = None,
+        retry_after_seconds: int | None = None,
+        provider_request_id: str | None = None,
+        request_may_have_been_sent: bool = False,
     ) -> bool:
         """Record a bounded retry without granting a new run or lease."""
+
+        # An ambiguous provider outcome is terminal.  A fresh attempt could duplicate
+        # a request already accepted by the provider and is never created blindly.
+        if request_may_have_been_sent:
+            return False
 
         identity = (
             (
@@ -1843,7 +1877,7 @@ class ConversationOrchestratorRepository:
         )
         if identity is None:
             return False
-        await self._locked_scope(identity["conversation_id"], now)
+        scope = await self._locked_scope(identity["conversation_id"], now)
         turn = (
             (
                 await self._session.execute(
@@ -1868,9 +1902,24 @@ class ConversationOrchestratorRepository:
             turn is None
             or run is None
             or run["state"] != "running"
+            or run["cancel_requested_at"] is not None
             or turn["state"] != "generating"
             or turn["lease_owner"] != owner
             or turn["lease_expires_at"] <= now
+            or turn["active_generation_no"] != run["generation_no"]
+        ):
+            return False
+        expected_mode = (
+            EffectiveMode.COPILOT
+            if run["purpose"] == "copilot_reactive_draft"
+            else EffectiveMode.AUTO
+        )
+        if (
+            scope.resolution.effective_mode is not expected_mode
+            or scope.resolution.operational_state.value != "READY"
+            or scope.resolution.account_control_version != run["account_control_version_snapshot"]
+            or scope.resolution.mode_version != run["mode_version_snapshot"]
+            or scope.resolution.content_revision != run["content_revision_snapshot"]
         ):
             return False
         current_attempt = await self._session.scalar(
@@ -1887,7 +1936,14 @@ class ConversationOrchestratorRepository:
                 model_run_attempts.c.attempt_no == current_attempt,
                 model_run_attempts.c.state == "started",
             )
-            .values(state="retryable_failed", completed_at=now, error_code=error_code)
+            .values(
+                state="unknown" if request_may_have_been_sent else "retryable_failed",
+                completed_at=now,
+                error_code=error_code,
+                http_status=http_status,
+                retry_after_seconds=retry_after_seconds,
+                provider_request_id=provider_request_id,
+            )
         )
         if getattr(result, "rowcount", 1) != 1:
             return False
@@ -1901,13 +1957,17 @@ class ConversationOrchestratorRepository:
         )
         return True
 
-    async def fail_generation(
+    async def fail_generation(  # noqa: PLR0913 - attempt journal metadata is explicit
         self,
         *,
         run_id: UUID,
         now: datetime,
         error_code: str,
         owner: UUID | None = None,
+        http_status: int | None = None,
+        retry_after_seconds: int | None = None,
+        provider_request_id: str | None = None,
+        request_may_have_been_sent: bool = False,
     ) -> None:
         identity = (
             (
@@ -1958,7 +2018,14 @@ class ConversationOrchestratorRepository:
                 model_run_attempts.c.model_run_id == run_id,
                 model_run_attempts.c.state == "started",
             )
-            .values(state="terminal_failed", completed_at=now, error_code=error_code)
+            .values(
+                state="unknown" if request_may_have_been_sent else "terminal_failed",
+                completed_at=now,
+                error_code=error_code,
+                http_status=http_status,
+                retry_after_seconds=retry_after_seconds,
+                provider_request_id=provider_request_id,
+            )
         )
         await self._session.execute(
             update(model_runs)
@@ -2264,10 +2331,12 @@ class ConversationOrchestratorRepository:
                         outbound_delivery_groups.c.state.label("group_state"),
                         outbound_delivery_groups.c.first_side_effect_at,
                         outbound_delivery_groups.c.sent_count,
+                        outbound_delivery_groups.c.proactive_decision_id,
                         conversation_turns.c.state.label("turn_state"),
                         conversation_turns.c.lease_owner,
                         conversation_turns.c.lease_expires_at,
                         conversation_turns.c.active_generation_no,
+                        conversation_turns.c.trigger_kind,
                     )
                     .join(
                         outbound_delivery_groups,
@@ -2292,13 +2361,37 @@ class ConversationOrchestratorRepository:
         # Claiming an intent records the conservative point at which an RPC may
         # have produced a side effect. It does not prove a chunk was delivered.
         # Only a durable successful prior chunk enables continuation semantics.
+        lease_authorized = row["lease_owner"] == owner and row["lease_expires_at"] > now
+        if row.get("trigger_kind") == "proactive" and (
+            row["lease_owner"] is None or row["lease_expires_at"] <= now
+        ):
+            await self._session.execute(
+                update(conversation_turns)
+                .where(conversation_turns.c.id == row["turn_id"])
+                .values(
+                    lease_owner=owner,
+                    lease_expires_at=now + timedelta(seconds=60),
+                    fencing_token=conversation_turns.c.fencing_token + 1,
+                )
+            )
+            lease_authorized = True
         continuation = row["sent_count"] > 0
         grace_authorized = (
             not continuation
             and scope.resolution.content_revision != row["content_revision"]
             and await self._exact_grace_authorized(row)
         )
-        source_valid = await self._continuation_source_valid(row)
+        source_valid = (
+            await authorize_proactive_delivery(
+                self._session,
+                decision_id=row["proactive_decision_id"],
+                turn_id=row["turn_id"],
+                control_version=row["account_control_version"],
+                now=now,
+            )
+            if row["proactive_decision_id"] is not None
+            else await self._continuation_source_valid(row)
+        )
         # Ordering is a dispatch prerequisite, not a terminal authorization
         # failure. A scheduler that observes a later chunk first must leave it
         # pending so the preceding chunk can still make progress.
@@ -2318,7 +2411,7 @@ class ConversationOrchestratorRepository:
                 else EffectiveMode.AUTO,
                 row["turn_state"] == "output_ready"
                 and row["active_generation_no"] == row["generation_no"],
-                row["lease_owner"] == owner and row["lease_expires_at"] > now,
+                lease_authorized,
                 duplicate_delivery=row["group_state"] not in ("planned", "sending", "partial"),
                 grace_authorized=grace_authorized,
                 source_valid=source_valid,
@@ -2341,6 +2434,10 @@ class ConversationOrchestratorRepository:
             )
             .values(first_side_effect_at=now, updated_at=now)
         )
+        if row["proactive_decision_id"] is not None:
+            await commit_proactive_delivery(
+                self._session, decision_id=row["proactive_decision_id"], now=now
+            )
         return intent
 
     async def request_copilot_draft(
@@ -2588,6 +2685,14 @@ class ConversationOrchestratorRepository:
         )
         if draft["state"] != DraftState.READY or draft["expires_at"] <= now:
             raise OrchestratorConflictError("DRAFT_NOT_ACTIONABLE")
+        if draft["proactive_decision_id"] is not None and not await authorize_proactive_delivery(
+            self._session,
+            decision_id=draft["proactive_decision_id"],
+            turn_id=draft["turn_id"],
+            control_version=draft["account_control_version_snapshot"],
+            now=now,
+        ):
+            raise OrchestratorConflictError("PROACTIVE_DRAFT_STALE")
         run = (
             (
                 await self._session.execute(
@@ -2635,6 +2740,8 @@ class ConversationOrchestratorRepository:
             .one()
         )
         chunks = split_telegram_text(revision["content_text"])
+        if draft["proactive_decision_id"] is not None and len(chunks) != 1:
+            raise OrchestratorConflictError("PROACTIVE_OUTPUT_INVALID")
         await self._session.execute(
             update(conversation_turns)
             .where(conversation_turns.c.id == turn["id"])
@@ -2650,6 +2757,7 @@ class ConversationOrchestratorRepository:
             output_digest=revision["content_sha256"],
             copilot_draft_id=draft["id"],
             approved_revision_id=revision["id"],
+            proactive_decision_id=draft["proactive_decision_id"],
         )
         await self._session.execute(
             update(copilot_drafts)

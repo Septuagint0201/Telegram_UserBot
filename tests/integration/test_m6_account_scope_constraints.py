@@ -153,7 +153,54 @@ async def _seed_memory_run(  # noqa: PLR0913 - mirrors the persisted run identit
     profile_id: UUID,
     config_id: UUID,
     credential_version_id: UUID,
+    memory_job_id: UUID | None = None,
+    memory_input_manifest_id: UUID | None = None,
 ) -> UUID:
+    if memory_job_id is None:
+        memory_job_id = uuid7()
+        await session.execute(
+            insert(memory_jobs).values(
+                id=memory_job_id,
+                account_id=account_id,
+                conversation_id=conversation_id,
+                job_kind="episode",
+                state="pending",
+                generation=1,
+                range_start_event_id=1,
+                range_end_event_id=1,
+                idempotency_key=b"z" * 32,
+                quiet_until=NOW,
+                hard_due_at=NOW,
+                pipeline_version="scope-v1",
+                policy_version="scope-v1",
+                prompt_version="scope-v1",
+                input_schema_version=1,
+                output_schema_version=1,
+            )
+        )
+    if memory_input_manifest_id is None:
+        memory_input_manifest_id = uuid7()
+        await session.execute(
+            insert(memory_input_manifests).values(
+                id=memory_input_manifest_id,
+                account_id=account_id,
+                conversation_id=conversation_id,
+                memory_job_id=memory_job_id,
+                generation=1,
+                manifest_kind="episode",
+                purpose="memory_episode",
+                range_start_event_id=1,
+                range_end_event_id=1,
+                pipeline_version="scope-v1",
+                policy_version="scope-v1",
+                prompt_version="scope-v1",
+                input_schema_version=1,
+                output_schema_version=1,
+                input_token_estimate=0,
+                image_count=0,
+                manifest_sha256=b"w" * 32,
+            )
+        )
     run_id = uuid7()
     await session.execute(
         insert(model_runs).values(
@@ -162,14 +209,17 @@ async def _seed_memory_run(  # noqa: PLR0913 - mirrors the persisted run identit
             conversation_id=conversation_id,
             logical_role="memory_agent",
             model_profile_id=profile_id,
-            purpose="memory_extraction",
+            purpose="memory_episode",
             generation_no=1,
+            memory_job_id=memory_job_id,
+            memory_input_manifest_id=memory_input_manifest_id,
             state="succeeded",
             config_version_id=config_id,
             credential_version_id=credential_version_id,
             prompt_version="scope-v1",
             prompt_bundle_sha256=b"p" * 32,
             capability_snapshot_sha256=b"c" * 32,
+            orchestration_claim_fingerprint=b"o" * 32,
             input_fingerprint=b"i" * 32,
             adapter_version="scope-v1",
             request_schema_version=1,
@@ -304,6 +354,7 @@ async def test_m5_m6_cross_account_references_are_rejected(
             memory_job_id=job_id,
             generation=1,
             manifest_kind="episode",
+            purpose="memory_episode",
             range_start_event_id=1,
             range_end_event_id=1,
             pipeline_version="scope-v1",
@@ -434,6 +485,8 @@ async def test_m5_m6_cross_account_references_are_rejected(
         profile_id=memory_profile,
         config_id=memory_config,
         credential_version_id=memory_credential,
+        memory_job_id=job_id,
+        memory_input_manifest_id=memory_manifest_id,
     )
     run_b = await _seed_memory_run(
         db_session,

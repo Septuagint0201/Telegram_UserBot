@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Telegram UserBot PostgreSQL full backup
+
+[Timer]
+OnCalendar=Sun *-*-* 02:00:00
+Unit=tudt-ops@postgres-full.service
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

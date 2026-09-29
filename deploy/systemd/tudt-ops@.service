@@ -1,0 +1,39 @@
+[Unit]
+Description=Telegram UserBot bounded Operations job (%i)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/telegram-userbot/ops.env
+ConditionPathExists=/etc/telegram-userbot/compose.env
+ConditionPathExists=/etc/telegram-userbot/config/deployment.json
+ConditionPathIsDirectory=/opt/telegram-userbot/current
+ConditionPathExists=/run/docker.sock
+OnFailure=tudt-ops-alert@%i.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/telegram-userbot/ops.env
+Environment=DOCKER_HOST=unix:///run/docker.sock
+UnsetEnvironment=DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH
+WorkingDirectory=/opt/telegram-userbot/current
+ExecStart=/usr/bin/flock --nonblock /run/lock/telegram-userbot-ops.lock /opt/telegram-userbot/venv/bin/python /opt/telegram-userbot/current/deploy/ops/run_maintenance.py %i --compose-file /opt/telegram-userbot/current/deploy/compose.yaml --env-file ${TUDT_COMPOSE_ENV} --deployment-config ${TUDT_DEPLOYMENT_CONFIG} --project-name ${TUDT_COMPOSE_PROJECT}
+TimeoutStartSec=2h15min
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+ReadOnlyPaths=/run/docker.sock
+BindReadOnlyPaths=/run/docker.sock
+ReadWritePaths=/run/lock /run/telegram-userbot

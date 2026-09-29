@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Telegram UserBot PostgreSQL differential backup
+
+[Timer]
+OnCalendar=Mon..Sat *-*-* 02:00:00
+Unit=tudt-ops@postgres-diff.service
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

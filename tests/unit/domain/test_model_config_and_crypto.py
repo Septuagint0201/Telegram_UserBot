@@ -1,3 +1,4 @@
+from dataclasses import replace
 from ipaddress import ip_address, ip_network
 from types import MappingProxyType
 from uuid import uuid7
@@ -100,6 +101,7 @@ def test_canonical_configuration_normalizes_protocol_specific_options() -> None:
         ({"protocol": ModelProtocol.EMBEDDING}, "generation protocol"),
         ({"temperature": 3.0}, "temperature"),
         ({"output": 0}, "output limit"),
+        ({"output": 8193}, "output limit"),
         ({"options": {"unknown": True}}, "Responses"),
         (
             {
@@ -263,6 +265,11 @@ def test_credential_envelope_nonce_aad_rotation_and_redaction() -> None:
     assert "aaaaaaaa" not in repr(keyring)
     with pytest.raises(CredentialCryptoError, match="authentication"):
         keyring.decrypt(
+            replace(first, secret_fingerprint=b"x" * 32),
+            binding=binding,
+        )
+    with pytest.raises(CredentialCryptoError, match="authentication"):
+        keyring.decrypt(
             first,
             binding=CredentialBinding(role, profile_id, credential_id, 2),
         )
@@ -292,6 +299,14 @@ def test_credential_keyring_rejects_invalid_material_and_secret() -> None:
     binding = CredentialBinding(LogicalRole.MAIN_AI, uuid7(), uuid7(), 1)
     with pytest.raises(CredentialCryptoError, match="input"):
         keyring.encrypt(SensitiveValue(""), binding=binding)
+    with pytest.raises(CredentialCryptoError, match="version"):
+        CredentialBinding(LogicalRole.MAIN_AI, uuid7(), uuid7(), True)
+    with pytest.raises(CredentialCryptoError, match="active credential key"):
+        CredentialKeyring(
+            deployment_id="synthetic",
+            active_key_version=True,
+            keys={1: SensitiveValue(b"a" * 32)},
+        )
 
 
 @pytest.mark.unit

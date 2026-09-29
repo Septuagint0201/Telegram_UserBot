@@ -59,7 +59,13 @@ class ExactManifestPreviewRebuilder:
                 await self._session.execute(
                     text(
                         "SELECT * FROM public.context_preview_sources("
-                        ":request_id, :admin_id, :bot_chat_id, :bot_identity)"
+                        ":request_id, :admin_id, :bot_chat_id, :bot_identity) "
+                        "WHERE NOT EXISTS ("
+                        "SELECT 1 FROM context_preview_requests p "
+                        "JOIN conversations c ON c.id = p.conversation_id "
+                        "JOIN data_erasure_requests e ON e.account_id = p.account_id "
+                        "WHERE p.id = :request_id AND (e.scope_type = 'account' "
+                        "OR (e.scope_type = 'contact' AND e.contact_id = c.contact_id)))"
                     ),
                     {
                         "request_id": request.request_id,
@@ -310,6 +316,11 @@ class DurableContextControlBackend:
 
     async def delete_due(self, *, now: datetime) -> int:
         deleted = 0
+        revoked = await self._repository.reconcile_erasure_previews(
+            bot_identity=self._bot_identity, now=now
+        )
+        if revoked:
+            await self._repository.commit_preview_boundary()
         due = await self._repository.due_preview_deletions(bot_identity=self._bot_identity, now=now)
         if due:
             await self._repository.commit_preview_boundary()

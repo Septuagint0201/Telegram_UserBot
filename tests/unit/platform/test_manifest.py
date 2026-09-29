@@ -7,7 +7,9 @@ import jsonschema
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from scripts import write_acceptance_manifest
 
+from telegram_userbot.platform.compatibility import EXPECTED_SCHEMA_REVISION
 from telegram_userbot.platform.evidence.manifest import (
     ManifestSemanticError,
     requirement_ids_for_milestone,
@@ -29,7 +31,7 @@ def test_alembic_head_fits_default_version_column() -> None:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     head = ScriptDirectory.from_config(config).get_current_head()
-    assert head == "0024_runtime_fencing_provenance"
+    assert head == EXPECTED_SCHEMA_REVISION
     assert len(head) <= 32
 
 
@@ -55,6 +57,7 @@ def test_valid_manifest_semantics() -> None:
         ("M5", 11),
         ("M6", 12),
         ("M7", 12),
+        ("M8", 16),
     ],
 )
 def test_requirement_ids_follow_supported_manifest_milestone(milestone: str, count: int) -> None:
@@ -65,7 +68,7 @@ def test_requirement_ids_follow_supported_manifest_milestone(milestone: str, cou
 
 @pytest.mark.unit
 def test_requirement_ids_reject_unknown_or_missing_milestone() -> None:
-    for milestone in (None, "M8", 1):
+    for milestone in (None, "M9", 1):
         with pytest.raises(ManifestSemanticError, match="unsupported evidence milestone"):
             requirement_ids_for_milestone(milestone)
 
@@ -178,3 +181,47 @@ def test_manifest_requires_all_declared_requirement_ids() -> None:
             valid_manifest(),
             required_requirement_ids=frozenset({"M0-001", "M0-002"}),
         )
+
+
+@pytest.mark.unit
+def test_m8_traceability_keeps_all_requirements_not_run_without_ubuntu_evidence() -> None:
+    requirements = write_acceptance_manifest._requirements_for_m8(ROOT)
+    document = {
+        "source": {"commit": "a" * 40, "dirty": False},
+        "requirements": requirements,
+    }
+
+    validate_manifest_semantics(
+        document,
+        required_requirement_ids=requirement_ids_for_milestone("M8"),
+    )
+    statuses = {requirement["id"]: requirement["status"] for requirement in requirements}
+    assert set(statuses.values()) == {"NOT RUN"}
+    m8_by_id = {requirement["id"]: requirement for requirement in requirements}
+    assert "complete runtime identity" in m8_by_id["M8-003"]["reason"]
+    assert "disk-pressure behavior" in m8_by_id["M8-009"]["reason"]
+    assert "/server_status" in m8_by_id["M8-010"]["reason"]
+    assert "age encryption" in m8_by_id["M8-011"]["reason"]
+    assert "fresh Ubuntu install" in m8_by_id["M8-013"]["reason"]
+    assert "off-host backup target" in m8_by_id["M8-006"]["reason"]
+    assert "64 GiB" in m8_by_id["M8-015"]["reason"]
+    assert "40 GiB" in m8_by_id["M8-015"]["reason"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("evidence_scope", ["source-static", "ci-synthetic", "ubuntu-synthetic"])
+def test_m8_semantics_rejects_nonproduction_requirement_pass(evidence_scope: str) -> None:
+    document = {
+        "source": {"commit": "a" * 40, "dirty": False},
+        "requirements": [
+            {
+                "id": "M8-003",
+                "status": "PASS",
+                "evidence": ["tests.operations.test_m8_compose_static"],
+                "evidence_scope": evidence_scope,
+            }
+        ],
+    }
+
+    with pytest.raises(ManifestSemanticError, match="cannot pass from static evidence"):
+        validate_manifest_semantics(document)

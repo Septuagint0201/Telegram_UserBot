@@ -99,18 +99,30 @@ class ModelConfigurationRepository:
         if set(profile_ids) != set(LogicalRole) or set(credential_ids) != set(LogicalRole):
             raise ModelRepositoryError("all logical roles require stable identities")
         for role in LogicalRole:
-            await self._session.execute(
-                postgresql_insert(model_profiles)
-                .values(
-                    id=profile_ids[role],
-                    logical_role=role.value,
-                    profile_kind=profile_kind_for(role).value,
+            profile = (
+                (
+                    await self._session.execute(
+                        postgresql_insert(model_profiles)
+                        .values(
+                            id=profile_ids[role],
+                            logical_role=role.value,
+                            profile_kind=profile_kind_for(role).value,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=[model_profiles.c.logical_role],
+                            set_={"logical_role": model_profiles.c.logical_role},
+                        )
+                        .returning(model_profiles.c.id, model_profiles.c.profile_kind)
+                    )
                 )
-                .on_conflict_do_nothing(index_elements=[model_profiles.c.logical_role])
+                .mappings()
+                .one()
             )
+            if profile["profile_kind"] != profile_kind_for(role).value:
+                raise ModelRepositoryError("model profile kind conflicts with logical role")
             await self._session.execute(
                 postgresql_insert(model_credentials)
-                .values(id=credential_ids[role], profile_id=profile_ids[role])
+                .values(id=credential_ids[role], profile_id=profile["id"])
                 .on_conflict_do_nothing(index_elements=[model_credentials.c.profile_id])
             )
 

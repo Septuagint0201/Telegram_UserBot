@@ -37,6 +37,7 @@ class RawMedia:
     width: int | None = None
     height: int | None = None
     telegram_document_id: int | None = None
+    telegram_media_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,8 @@ def _media(raw: RawMedia, position: int) -> MediaDescriptor:
     }
     if raw.telegram_document_id is not None:
         metadata["telegram_document_id"] = raw.telegram_document_id
+    if raw.telegram_media_id is not None:
+        metadata["telegram_media_id"] = raw.telegram_media_id
     if raw.width is not None:
         metadata["width"] = raw.width
     if raw.height is not None:

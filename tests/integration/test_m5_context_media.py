@@ -23,6 +23,7 @@ from telegram_userbot.adapters.persistence.schema import (
     memories,
     memory_versions,
     message_events,
+    message_media,
     message_revisions,
     messages,
     retrieval_policies,
@@ -47,17 +48,23 @@ NOW = datetime(2030, 6, 1, tzinfo=UTC)
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-async def seed_scope(session: AsyncSession) -> tuple[UUID, UUID, UUID, UUID]:
-    account_id, peer_id, account_peer_id = uuid7(), uuid7(), uuid7()
+async def seed_scope(
+    session: AsyncSession,
+    *,
+    existing_account_id: UUID | None = None,
+    body_hash: bytes | None = None,
+) -> tuple[UUID, UUID, UUID, UUID]:
+    account_id, peer_id, account_peer_id = existing_account_id or uuid7(), uuid7(), uuid7()
     contact_id, conversation_id, turn_id = uuid7(), uuid7(), uuid7()
-    await session.execute(
-        insert(accounts).values(
-            id=account_id,
-            telegram_user_id=account_id.int % 2**63,
-            display_label="m5-synthetic-owner",
-            status="active",
+    if existing_account_id is None:
+        await session.execute(
+            insert(accounts).values(
+                id=account_id,
+                telegram_user_id=account_id.int % 2**63,
+                display_label="m5-synthetic-owner",
+                status="active",
+            )
         )
-    )
     await session.execute(
         insert(telegram_peers).values(
             id=peer_id,
@@ -111,7 +118,7 @@ async def seed_scope(session: AsyncSession) -> tuple[UUID, UUID, UUID, UUID]:
             event_kind="incoming.create",
             telegram_message_id=10,
             fingerprint_version=1,
-            update_fingerprint=b"f" * 32,
+            update_fingerprint=hashlib.sha256(conversation_id.bytes).digest(),
             ordering_key="v1:00000010",
             metadata_schema_version=1,
         )
@@ -146,7 +153,7 @@ async def seed_scope(session: AsyncSession) -> tuple[UUID, UUID, UUID, UUID]:
             text_content="SYNTHETIC_PRIVATE_CONTEXT_BODY",
             entities_schema_version=1,
             entities=[],
-            content_sha256=hashlib.sha256(b"SYNTHETIC_PRIVATE_CONTEXT_BODY").digest(),
+            content_sha256=body_hash or hashlib.sha256(b"SYNTHETIC_PRIVATE_CONTEXT_BODY").digest(),
             source_event_id=event_id,
         )
     )
@@ -901,7 +908,7 @@ async def test_m5_media_cleanup_reclaims_lease_fences_stale_worker_and_retries(
     try:
         object_id = uuid7()
         async with factory() as setup, setup.begin():
-            account_id, _conversation_id, _turn_id, _revision_id = await seed_scope(setup)
+            account_id, _conversation_id, _turn_id, revision_id = await seed_scope(setup)
             await setup.execute(
                 insert(media_objects).values(
                     id=object_id,
@@ -917,6 +924,21 @@ async def test_m5_media_cleanup_reclaims_lease_fences_stale_worker_and_retries(
                     ready_at=NOW - timedelta(days=31),
                     retention_class="media_original_30d",
                     expires_at=NOW - timedelta(days=1),
+                )
+            )
+            # The canonical Telegram relation is retained as metadata after TTL;
+            # it must not turn a 30-day filesystem copy into permanent storage.
+            await setup.execute(
+                insert(message_media).values(
+                    id=uuid7(),
+                    account_id=account_id,
+                    message_revision_id=revision_id,
+                    media_object_id=object_id,
+                    media_kind="photo",
+                    position=0,
+                    declared_mime="image/png",
+                    declared_size=128,
+                    metadata_schema_version=1,
                 )
             )
 

@@ -23,6 +23,7 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
     steps:
       - name: Check out source
@@ -45,6 +46,7 @@ jobs:
         env:
           CI_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
+          mkdir -p .artifacts .artifacts/dist .artifacts/m0
           .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
           .venv/bin/ruff format --check .
           .venv/bin/ruff check .
@@ -63,6 +65,7 @@ jobs:
         with:
           name: preflight-evidence
           if-no-files-found: ignore
+          retention-days: 30
           path: |
             .artifacts/coverage.json
             .artifacts/coverage.xml
@@ -74,6 +77,7 @@ jobs:
   integration:
     name: PostgreSQL and Redis integration
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
     services:
       postgres:
@@ -120,6 +124,7 @@ jobs:
       - name: Run integration and migration gates
         shell: bash
         run: |
+          mkdir -p .artifacts/m7
           .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
           .venv/bin/pytest -m "not browser and not soak and not live and not requires_secret" \
             --junitxml=.artifacts/m7/junit.xml --cov-report=xml:.artifacts/m7/coverage.xml
@@ -135,6 +140,7 @@ jobs:
         with:
           name: integration-evidence
           if-no-files-found: ignore
+          retention-days: 30
           path: |
             .artifacts/coverage.json
             .artifacts/m7
@@ -143,6 +149,7 @@ jobs:
   browser:
     name: Chromium browser contract
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
     steps:
       - name: Check out source
@@ -164,6 +171,7 @@ jobs:
       - name: Run browser security contract
         shell: bash
         run: |
+          mkdir -p .artifacts/browser
           .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
           .venv/bin/pytest -m browser tests/browser --no-cov --junitxml=.artifacts/browser/junit.xml
           .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/browser
@@ -173,6 +181,52 @@ jobs:
         with:
           name: browser-evidence
           if-no-files-found: ignore
+          retention-days: 30
           path: |
             .artifacts/browser
+            DISCLOSURE
+
+  m8-operations:
+    name: M8 operations synthetic contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: python:3.14.7-bookworm@sha256:8771427e2ac3e39208c1632f17e8b09e464333d262844a03705cc5e0023c16e2
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Trust checked-out workspace
+        shell: bash
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install locked toolchain
+        shell: bash
+        run: |
+          python --version
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes -r requirements/bootstrap.lock
+          .venv/bin/python -m pip install --require-hashes -r requirements/dev.lock
+          .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+      - name: Run M8 static and synthetic operations contracts
+        shell: bash
+        env:
+          CI_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          mkdir -p .artifacts/m8
+          .venv/bin/python scripts/repo_checks.py --require-disclosure --require-signed-commit
+          .venv/bin/pytest tests/operations -m "not integration and not recovery and not soak and not live and not requires_secret" \
+            --no-cov --junitxml=.artifacts/m8/junit.xml
+          .venv/bin/python scripts/write_acceptance_manifest.py --milestone M8 --commit "$CI_COMMIT_SHA" \
+            --output .artifacts/m8/acceptance-manifest.json
+          .venv/bin/python scripts/validate_acceptance_manifest.py .artifacts/m8/acceptance-manifest.json
+          .venv/bin/python scripts/repo_checks.py --scan-extra .artifacts/m8
+      - name: Upload M8 operations evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: m8-operations-evidence
+          if-no-files-found: ignore
+          retention-days: 30
+          path: |
+            .artifacts/m8
             DISCLOSURE

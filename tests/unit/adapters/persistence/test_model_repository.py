@@ -16,6 +16,7 @@ from telegram_userbot.domain.model_config import (
     ModelCapabilities,
     ModelProtocol,
     ProfileKind,
+    profile_kind_for,
 )
 from telegram_userbot.domain.shared.redaction import SensitiveValue
 from telegram_userbot.platform.crypto import CredentialKeyring
@@ -195,8 +196,23 @@ async def test_bootstrap_list_endpoint_and_draft_crud() -> None:
     profile_id = profile_ids[LogicalRole.MAIN_AI]
     credential_id = credential_ids[LogicalRole.MAIN_AI]
     endpoint_id = uuid7()
+    bootstrap_results = tuple(
+        result
+        for role in LogicalRole
+        for result in (
+            FakeResult(
+                rows=[
+                    {
+                        "id": profile_ids[role],
+                        "profile_kind": profile_kind_for(role).value,
+                    }
+                ]
+            ),
+            FakeResult(),
+        )
+    )
     repo, fake = repository(
-        *(FakeResult() for _ in range(8)),
+        *bootstrap_results,
         FakeResult(rows=[profile_row(profile_id, credential_id)]),
         FakeResult(),
         FakeResult(),

@@ -1,5 +1,20 @@
 """Canonical model protocol adapters."""
 
+from telegram_userbot.adapters.llm.capability_probe import (
+    CapabilityTransportFactory,
+    ProductionModelCapabilityProbe,
+    SyntheticCapabilityCeilings,
+    SyntheticCapabilityProbeError,
+    build_production_capability_probe,
+)
+from telegram_userbot.adapters.llm.http_transport import (
+    HttpcoreProviderNetworkSender,
+    PinnedProviderRequest,
+    ProviderHTTPTransport,
+    ProviderNetworkError,
+    ProviderNetworkResponse,
+    ProviderNetworkSender,
+)
 from telegram_userbot.adapters.llm.protocols import (
     CanonicalContent,
     CanonicalEmbeddingRequest,
@@ -26,16 +41,27 @@ __all__ = [
     "CanonicalGenerationRequest",
     "CanonicalMessage",
     "CanonicalProtocolClient",
+    "CapabilityTransportFactory",
     "ContentKind",
+    "HttpcoreProviderNetworkSender",
     "ModelUsage",
     "NormalizedEmbedding",
     "NormalizedGeneration",
+    "PinnedProviderRequest",
+    "ProductionModelCapabilityProbe",
+    "ProviderHTTPTransport",
+    "ProviderNetworkError",
+    "ProviderNetworkResponse",
+    "ProviderNetworkSender",
     "ProviderProtocolError",
     "ProviderTransport",
     "ProviderWireRequest",
     "ProviderWireResponse",
+    "SyntheticCapabilityCeilings",
+    "SyntheticCapabilityProbeError",
     "build_embedding_request",
     "build_generation_request",
+    "build_production_capability_probe",
     "normalize_embedding_response",
     "normalize_generation_response",
 ]
