@@ -8,7 +8,10 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 
 WORKDIR /build
 COPY requirements/runtime.lock /build/requirements/runtime.lock
+COPY requirements/bootstrap.lock /build/requirements/bootstrap.lock
 RUN python -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install \
+        --require-hashes --requirement /build/requirements/bootstrap.lock \
     && /opt/venv/bin/python -m pip install \
         --no-deps \
         --require-hashes \
@@ -23,6 +26,7 @@ LABEL org.opencontainers.image.title="Telegram Personal AI Digital Twin" \
 
 ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONPATH="/opt/app/src" \
+    PYTHONTZPATH="" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

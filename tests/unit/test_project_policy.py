@@ -36,9 +36,9 @@ def test_runtime_dependencies_and_python_are_pinned() -> None:
         "Pillow==12.3.0",
         "psycopg[binary]==3.3.4",
         "redis==5.3.1",
-        "starlette==1.6.0",
-        "Telethon==1.44.0",
-        "tzdata==2026.3",
+        "starlette==1.7.0",
+        "Telethon==1.45.0",
+        "tzdata==2026.5",
         "uvicorn==0.52.1",
     ]
     assert document["project"]["requires-python"] == ">=3.14,<3.15"

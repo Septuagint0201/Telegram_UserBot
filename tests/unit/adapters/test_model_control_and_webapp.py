@@ -38,12 +38,14 @@ def signed_init_data(
     user_id: int = ADMIN_ID,
     query_id: str = "SYNTHETIC_QUERY",
     bot_token: str = BOT_TOKEN,
+    extra_fields: dict[str, str] | None = None,
 ) -> str:
     values = {
         "auth_date": str(int(now.timestamp())),
         "query_id": query_id,
         "user": json.dumps({"id": user_id, "first_name": "Synthetic"}, separators=(",", ":")),
     }
+    values.update(extra_fields or {})
     check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
     secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
     values["hash"] = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
@@ -70,6 +72,48 @@ def test_telegram_init_data_auth_tamper_expiry_future_admin_and_duplicates() -> 
     for raw in rejected:
         with pytest.raises(WebAppAuthenticationError, match="REJECTED"):
             verifier.verify(raw, now=now)
+
+
+@pytest.mark.unit
+def test_telegram_hmac_covers_third_party_signature_field() -> None:
+    now = datetime.now(UTC)
+    verifier = TelegramInitDataVerifier(
+        bot_token=SensitiveValue(BOT_TOKEN), allowed_admin_ids=frozenset({ADMIN_ID})
+    )
+    raw = signed_init_data(now, extra_fields={"signature": "synthetic-signature"})
+    assert verifier.verify(raw, now=now).user_id == ADMIN_ID
+    with pytest.raises(WebAppAuthenticationError, match="REJECTED"):
+        verifier.verify(raw.replace("synthetic-signature", "tampered-signature"), now=now)
+    with pytest.raises(WebAppAuthenticationError, match="REJECTED"):
+        verifier.verify(signed_init_data(now) + "&signature=unsigned", now=now)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"auth_date": "9" * 100},
+        {"auth_date": "-" + "9" * 100},
+        {"user": "[" * 1200 + "0" + "]" * 1200},
+    ],
+)
+def test_telegram_init_data_rejects_unrepresentable_signed_values(fields: dict[str, str]) -> None:
+    now = datetime.now(UTC)
+    verifier = TelegramInitDataVerifier(
+        bot_token=SensitiveValue(BOT_TOKEN), allowed_admin_ids=frozenset({ADMIN_ID})
+    )
+    with pytest.raises(WebAppAuthenticationError, match="REJECTED"):
+        verifier.verify(signed_init_data(now, extra_fields=fields), now=now)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", ["hash=" + "%C3%A9" * 64, "\ud800"])
+def test_telegram_init_data_rejects_invalid_unicode(raw: str) -> None:
+    verifier = TelegramInitDataVerifier(
+        bot_token=SensitiveValue(BOT_TOKEN), allowed_admin_ids=frozenset({ADMIN_ID})
+    )
+    with pytest.raises(WebAppAuthenticationError, match="REJECTED"):
+        verifier.verify(raw, now=datetime.now(UTC))
 
 
 @pytest.mark.unit
@@ -236,6 +280,74 @@ async def test_key_web_app_rejects_content_length_mismatch_before_authentication
         )
 
     assert response.status_code == 400
+    assert mutation.calls == []
+
+
+@pytest.mark.unit
+async def test_key_web_app_rejects_deep_json_without_internal_error() -> None:
+    mutation = MutationFake()
+    app = create_key_web_app(
+        verifier=TelegramInitDataVerifier(
+            bot_token=SensitiveValue(BOT_TOKEN), allowed_admin_ids=frozenset({ADMIN_ID})
+        ),
+        mutation_port=mutation,
+        public_origin=ORIGIN,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=ORIGIN) as client:
+        response = await client.post(
+            "/api/v1/model-keys/main_ai",
+            headers={"origin": ORIGIN, "content-type": "application/json"},
+            content=b"[" * 1200 + b"0" + b"]" * 1200,
+        )
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "code": "REQUEST_REJECTED"}
+    assert response.headers["cache-control"].startswith("no-store")
+    assert mutation.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("declared_length", [1, 16384])
+async def test_key_web_app_stops_reading_at_body_budget(declared_length: int) -> None:
+    mutation = MutationFake()
+    app = create_key_web_app(
+        verifier=TelegramInitDataVerifier(
+            bot_token=SensitiveValue(BOT_TOKEN), allowed_admin_ids=frozenset({ADMIN_ID})
+        ),
+        mutation_port=mutation,
+        public_origin=ORIGIN,
+    )
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/api/v1/model-keys/main_ai",
+        "raw_path": b"/api/v1/model-keys/main_ai",
+        "query_string": b"",
+        "headers": [
+            (b"origin", ORIGIN.encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(declared_length).encode()),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("control", 8080),
+    }
+    received = 0
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal received
+        received += 1
+        assert received == 1, "oversized body must be rejected without reading more chunks"
+        return {"type": "http.request", "body": b"x" * 16385, "more_body": True}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    assert received == 1
+    assert sent[0]["status"] == 400
     assert mutation.calls == []
 
 

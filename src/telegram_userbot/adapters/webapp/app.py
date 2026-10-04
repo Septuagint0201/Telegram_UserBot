@@ -209,6 +209,17 @@ def _single_header(request: Request, name: bytes) -> str:
         raise _RequestRejectedError from None
 
 
+async def _bounded_request_body(request: Request, *, declared_length: int) -> bytes:
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > min(declared_length, MAX_KEY_REQUEST_BYTES):
+            raise _RequestRejectedError
+        body.extend(chunk)
+    if len(body) != declared_length:
+        raise _RequestRejectedError
+    return bytes(body)
+
+
 def _canonical_origin(value: str, *, allow_insecure_loopback: bool) -> bool:
     try:
         parsed = urlsplit(value)
@@ -286,9 +297,7 @@ def create_key_web_app(  # noqa: PLR0913 - explicit security dependencies/checks
             parsed_length = int(declared_length)
             if parsed_length < 0 or parsed_length > MAX_KEY_REQUEST_BYTES:
                 raise _RequestRejectedError
-            body = await request.body()
-            if len(body) != parsed_length or len(body) > MAX_KEY_REQUEST_BYTES:
-                raise _RequestRejectedError
+            body = await _bounded_request_body(request, declared_length=parsed_length)
             payload = json.loads(body, object_pairs_hook=_reject_duplicate_json)
             if not isinstance(payload, dict):
                 raise _RequestRejectedError
@@ -324,6 +333,7 @@ def create_key_web_app(  # noqa: PLR0913 - explicit security dependencies/checks
             KeyError,
             TypeError,
             ValueError,
+            RecursionError,
             json.JSONDecodeError,
             WebAppAuthenticationError,
         ):

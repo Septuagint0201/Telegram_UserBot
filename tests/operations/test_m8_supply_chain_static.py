@@ -46,6 +46,8 @@ def test_runtime_dockerfile_is_locked_non_root_and_has_no_fake_command() -> None
     )
     assert f'ARG PYTHON_BASE="{python_reference}"' in dockerfile
     assert "--require-hashes" in dockerfile
+    assert "--require-hashes --requirement /build/requirements/bootstrap.lock" in dockerfile
+    assert 'PYTHONTZPATH=""' in dockerfile
     assert "USER 10001:10001" in dockerfile
     assert "SOURCE_COMMIT" in dockerfile
     assert "/var/lib/telegram-userbot/session" in dockerfile

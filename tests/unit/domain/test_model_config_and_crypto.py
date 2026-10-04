@@ -360,6 +360,8 @@ def test_public_and_private_endpoint_policy_is_fail_closed() -> None:
         ("https://169.254.169.254", "169.254.169.254", "ADDRESS_FORBIDDEN"),
         ("https://user:pass@example.com", "8.8.8.8", "COMPONENT_FORBIDDEN"),
         ("https://example.com/v1%2fadmin", "8.8.8.8", "PATH_INVALID"),
+        ("https://api.example.com:0/v1", "8.8.8.8", "URL_INVALID"),
+        ("https://api.example.com:000/v1", "8.8.8.8", "URL_INVALID"),
     ],
 )
 def test_endpoint_policy_rejects_malicious_url_corpus(url: str, address: str, code: str) -> None:

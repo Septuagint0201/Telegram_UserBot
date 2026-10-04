@@ -54,7 +54,10 @@ class TelegramInitDataVerifier:
     def verify(self, raw: str, *, now: datetime) -> TelegramWebIdentity:
         if now.tzinfo is None or now.utcoffset() is None:
             raise WebAppAuthenticationError("WEBAPP_AUTH_CLOCK_INVALID")
-        encoded = raw.encode("utf-8")
+        try:
+            encoded = raw.encode("utf-8")
+        except UnicodeError:
+            raise WebAppAuthenticationError("WEBAPP_AUTH_REJECTED") from None
         if not encoded or len(encoded) > MAX_INIT_DATA_BYTES or "\x00" in raw:
             raise WebAppAuthenticationError("WEBAPP_AUTH_REJECTED")
         try:
@@ -74,8 +77,11 @@ class TelegramInitDataVerifier:
                 raise WebAppAuthenticationError("WEBAPP_AUTH_REJECTED")
             values[key] = value
         supplied_hash = values.pop("hash", "")
-        values.pop("signature", None)
-        if len(supplied_hash) != 64:
+        # Bot-token HMAC covers every field except hash, including signature.
+        # Only Telegram's separate Ed25519 third-party flow excludes signature.
+        if len(supplied_hash) != 64 or any(
+            character not in "0123456789abcdefABCDEF" for character in supplied_hash
+        ):
             raise WebAppAuthenticationError("WEBAPP_AUTH_REJECTED")
         check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
         secret = hmac.new(
@@ -94,7 +100,7 @@ class TelegramInitDataVerifier:
                 raise WebAppAuthenticationError("WEBAPP_AUTH_REJECTED")
             user_id = raw_user_id
             query_id = values["query_id"]
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError) as error:
+        except (KeyError, TypeError, ValueError, OSError, OverflowError, RecursionError) as error:
             raise WebAppAuthenticationError("WEBAPP_AUTH_REJECTED") from error
         current = now.astimezone(UTC)
         if auth_date > current + self._future_skew or current - auth_date > self._max_age:

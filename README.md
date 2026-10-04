@@ -6,6 +6,8 @@
 
 Worker 实现已补齐，Design 保持冻结。2026-09-29 本地默认测试 **1775 passed、4 skipped，覆盖率 85.03%**。影子向量空间重建与回退、大积压分块、历史时区重切，以及主动扫描、决策、预算回收、AUTO/COPILOT 发布均已接入。
 
+2026-10-04 开发副本审计完成：默认测试 **1787 passed、4 skipped、224 deselected，覆盖率 85.07%**，本地 Chromium 契约 **1 passed**。修复 Mini App HMAC 对 `signature` 字段的处理、请求体提前限额和异常输入边界、provider 零端口规范化；更新有安全公告的依赖及 Telegram/WebApp/时区组件。详见[本轮审计与剩余维护门禁](docs/audits/2026-10-04-development-audit.md)。当前基础镜像仍固定 CPython 3.14.7/PostgreSQL 17.10，已发现 3.14.8/17.11 安全更新，完成隔离镜像构建、数据库回归与恢复验证前不能标记为当前安全生产候选。
+
 当前 head 为 `0036_worker_complete`；queue inventory 已无 Worker 必需消费者缺口。运行 READY 仍需通过数据库、账号、恢复闸门、磁盘和依赖检查。详见 [Worker 运行说明](docs/runbooks/worker-runtime.md) 与 [本轮完成审计](docs/audits/2026-09-29-worker-complete.md)。
 
 代码检查和隔离初验已完成，用户已确认本阶段成果。本次提交保存当前源码和文档；完整 Compose、真实 Telegram/provider 与生产全链路验证按用户要求留待后续，不随本次推送启动。参见 [源码收尾记录](docs/audits/2026-09-29-source-closeout.md)。
@@ -69,7 +71,7 @@ Docker Engine + Compose v2
 2 vCPU / 4 GiB RAM / 40 GiB SSD
 ```
 
-标准GIL CPython固定为3.14（当前patch为3.14.7），pip 25.3及全部runtime/dev/lock工具使用独立hash lock。跨平台IANA时区数据固定为`tzdata==2026.3`；M1固定PostgreSQL 17.10、pgvector 0.8.6、Redis server 8.2.8、redis-py 5.3.1和arq 0.28.0。Caddy与production image留在M8。Windows unit/property/contract不能替代Linux CI或Ubuntu生产证据。
+标准GIL CPython固定为3.14（本轮验证patch为3.14.7），pip 26.2.1及全部runtime/dev/lock工具使用独立hash lock。跨平台IANA时区数据固定为`tzdata==2026.5`（IANA 2026e）；production Docker 使用 `PYTHONTZPATH=""` 保证采用该锁定数据，而不优先读取基础镜像的旧系统时区。M1固定PostgreSQL 17.10、pgvector 0.8.6、Redis server 8.2.8、redis-py 5.3.1和arq 0.28.0。历史兼容基线不等于最新安全版本；Windows unit/property/contract不能替代Linux CI或Ubuntu生产证据。
 
 Windows PowerShell的可重复开发安装：
 
@@ -105,6 +107,7 @@ redis
 migrate
 session-backup
 data-export
+erasure-ledger-export
 ```
 
 部署模板、operator边界和逐项runbook见[deploy/README.md](deploy/README.md)与[docs/runbooks/README.md](docs/runbooks/README.md)。它们已经定义Compose/Caddy、secret、health、backup/restore和升级操作的实现契约，但不等同于已验证的生产部署说明：在固定镜像、真实secret、隔离restore、Ubuntu运行时和soak证据完成前，完整业务服务与真实AUTO仍为`NOT RUN`。M8的逐项兼容性与当前 synthetic/production 边界见[M8 Compatibility Set](docs/compatibility/m8.md)；2026-09-04检查的目标VM根文件系统约60.9 GiB、可用约32.9 GiB，不能替代40 GiB受限磁盘边界或fresh soak证据。

@@ -159,9 +159,16 @@ def validate_endpoint(
         raise EndpointPolicyError("ENDPOINT_URL_INVALID")
     try:
         parsed = urlsplit(raw_url)
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        explicit_port = parsed.port
+        port = (
+            explicit_port
+            if explicit_port is not None
+            else (443 if parsed.scheme.lower() == "https" else 80)
+        )
     except ValueError as error:
         raise EndpointPolicyError("ENDPOINT_URL_INVALID") from error
+    if port == 0:
+        raise EndpointPolicyError("ENDPOINT_URL_INVALID")
     scheme = parsed.scheme.lower()
     if scheme not in {"http", "https"} or not parsed.hostname:
         raise EndpointPolicyError("ENDPOINT_SCHEME_FORBIDDEN")
